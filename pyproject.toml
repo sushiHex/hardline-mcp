@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "comms-mcp"
+version = "0.1.0"
+description = "MCP server for inter-agent messaging between Claude Code, Hermes, and Codex."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "sushiHex" }]
+keywords = ["mcp", "agents", "messaging", "claude", "hermes", "codex"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "anyio>=4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+comms-mcp = "comms_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/sushiHex/comms-mcp"
+Repository = "https://github.com/sushiHex/comms-mcp"
+Issues = "https://github.com/sushiHex/comms-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["comms_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
