@@ -153,3 +153,23 @@ def test_non_codex_agents_have_no_discovery(monkeypatch):
     # hermes/claude resolve to bare default when no env override; no discovery.
     monkeypatch.delenv("HARDLINE_HERMES_CMD", raising=False)
     assert adapters._prefix_for("hermes")[0] == "hermes"
+
+
+# --------------------------------------------------------------------------
+# _run_cmd hardening: isolate stdin (this is a stdio MCP server — a spawned
+# child must NOT inherit the JSON-RPC pipe) and decode robustly (an agent
+# emitting non-ASCII must not crash the tool with UnicodeDecodeError).
+# --------------------------------------------------------------------------
+
+def test_run_cmd_isolates_stdin_and_decodes_utf8(monkeypatch):
+    monkeypatch.delenv("HARDLINE_HERMES_CMD", raising=False)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="ok"))
+    adapters.ask("hermes", "hi")
+    kw = calls[0]["kwargs"]
+    assert kw.get("stdin") == subprocess.DEVNULL
+    assert kw.get("encoding") == "utf-8"
+    assert kw.get("errors") == "replace"
+
+
+def test_known_agents_is_the_fixed_roster():
+    assert set(adapters.known_agents()) == {"claude", "hermes", "codex"}

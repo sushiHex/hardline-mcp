@@ -36,7 +36,16 @@ async def _in_thread(fn, *args, **kwargs):
 # ── mailbox tools ────────────────────────────────────────────────────────────
 
 def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> dict:
+    # Reject unknown agents up front: a typo'd recipient would otherwise persist
+    # forever, unread and undeliverable — a silent black hole. Validate before
+    # writing anything.
+    known = adapters.known_agents()
+    unknown = [a for a in (from_agent, to_agent) if a not in known]
+    if unknown:
+        return {"ok": False, "error": f"unknown agent(s) {unknown}; known: {sorted(known)}"}
+
     result = mailbox.send(from_agent, to_agent, message)
+    result["ok"] = True
     if deliver:
         notice = (
             f"[hardline] new message #{result['message_id']} from {from_agent}. "
@@ -56,8 +65,9 @@ async def send(
     a one-shot notice to the recipient via its native mechanism (hermes chat /
     codex exec / claude -p) so it sees the message without polling.
 
-    ``from_agent``/``to_agent`` are one of: claude, hermes, codex. Returns
-    ``{"message_id", "created_at"}`` (plus ``delivery`` when ``deliver`` set).
+    ``from_agent``/``to_agent`` are one of: claude, hermes, codex; an unknown
+    agent is rejected. Returns ``{"ok": true, "message_id", "created_at"}``
+    (plus ``delivery`` when ``deliver`` set), or ``{"ok": false, "error"}``.
     """
     return await _in_thread(_send_impl, from_agent, to_agent, message, deliver)
 

@@ -61,10 +61,10 @@ def _discover_codex() -> Optional[str]:
 #           the reply is just the final message; -q takes the query. Order
 #           matters — -Q before -q, since -q consumes the next arg as the query.
 #           (Without -Q the reply is ~940 chars of ANSI box art per call.)
-#   codex:  exec output carries a small preamble/token-count footer around the
-#           answer; usable as-is. --output-last-message <FILE> is the fully-
-#           clean path if this ever proves too noisy. Resolved via discovery
-#           (see _prefix_for) because its install dir is hash-named.
+#   codex:  exec writes only the final answer to stdout (its session log/
+#           token-count go to stderr, which we don't return), so the reply is
+#           already clean. Resolved via discovery (see _prefix_for) because
+#           its install dir is hash-named.
 #   claude: -p headless print mode is already clean; normally on PATH.
 _DISPATCH = {
     "hermes": ("hermes", ["chat", "-Q", "-q"], "HARDLINE_HERMES_CMD"),
@@ -88,15 +88,30 @@ def _prefix_for(agent: str) -> list[str]:
     return [exe or default_exe, *subcmd]
 
 
+def known_agents() -> tuple[str, ...]:
+    """The fixed roster of addressable agents (single source of truth)."""
+    return tuple(_DISPATCH)
+
+
 def _run_cmd(argv: list[str]) -> dict:
     """Run argv, capturing text output. Never raises — every failure mode is
     mapped to ``{"ok": False, "error": ...}`` so one dead target can't crash
-    the MCP tool call."""
+    the MCP tool call.
+
+    ``stdin=DEVNULL``: hardline-mcp is itself a stdio MCP server, so its stdin
+    is the JSON-RPC pipe to the host agent. A spawned child must not inherit
+    it — a child that reads stdin would steal protocol bytes. ``encoding``/
+    ``errors``: agent output is often non-ASCII (emoji, box-drawing); decode
+    as UTF-8 and replace undecodable bytes rather than crash on the platform
+    default codec (cp1252 on Windows)."""
     try:
         proc = subprocess.run(
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
             timeout=_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:

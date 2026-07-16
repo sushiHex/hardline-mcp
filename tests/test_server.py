@@ -49,3 +49,18 @@ def test_send_impl_invokes_deliver_when_flagged(monkeypatch, tmp_path):
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+def test_send_impl_rejects_unknown_agent(monkeypatch, tmp_path):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    r = server._send_impl("claude", "bob", "hi", deliver=False)
+    assert r["ok"] is False and "unknown" in r["error"].lower()
+    assert server.mailbox.history(db_path=db) == []  # nothing persisted
+
+
+def test_send_impl_success_has_ok_true(monkeypatch, tmp_path):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    r = server._send_impl("claude", "hermes", "hi", deliver=False)
+    assert r["ok"] is True and isinstance(r["message_id"], int)
