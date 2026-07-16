@@ -1,30 +1,59 @@
 """Native push/query adapters — reach each agent the way it was built to be
 reached.
 
-- hermes -> ``hermes chat -q <prompt>``   (one-shot query to the running agent)
-- codex  -> ``codex exec <prompt>``        (non-interactive execution)
-- claude -> ``claude -p <prompt>``         (headless print mode)
+- hermes -> ``hermes chat -Q -q <prompt>``  (quiet one-shot query; -Q strips
+                                             the banner/box-chrome, -q = query)
+- codex  -> ``codex exec <prompt>``          (non-interactive execution)
+- claude -> ``claude -p <prompt>``           (headless print mode)
 
 ``ask()`` runs the command and returns the reply synchronously; ``deliver()``
 pushes a one-shot notice through the same dispatch. Both are pure subprocess
 wrappers (no ``mcp`` import) so the server layer can run them off-thread.
 
-Only the BINARY location is overridable via env var (the subcommand args are
-intrinsic to each tool and never change). This lets a binary that isn't on
-PATH still be reached — notably ``hermes`` (bundled venv) and ``codex``
-(hashed install dir) on this project's machine:
+Executable resolution, in precedence order, per agent:
 
-    HARDLINE_HERMES_CMD, HARDLINE_CODEX_CMD, HARDLINE_CLAUDE_CMD
+1. ``HARDLINE_{HERMES,CODEX,CLAUDE}_CMD`` env var — an explicit path override,
+   for a binary that isn't on PATH (e.g. ``hermes`` in its bundled venv).
+2. A per-agent discovery hook (only ``codex`` has one — its install dir is
+   hash-named and rotates on every Codex update, so a pinned path rots;
+   discovery finds the newest ``codex.exe`` so the tool self-heals).
+3. The bare command name, resolved on PATH (the normal case for ``claude``).
 
-Each is a path to the executable only, e.g.
-``HARDLINE_HERMES_CMD="C:/.../venv/Scripts/hermes.exe"``. The fixed subcommand
-(``chat -q`` / ``exec`` / ``-p``) is still appended automatically.
+Only the executable is resolved this way; the fixed subcommand
+(``chat -Q -q`` / ``exec`` / ``-p``) is always appended.
 """
 
 from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
+from typing import Optional
+
+
+def _codex_bin_root() -> Path:
+    """Directory holding Codex's hash-named install subdirs
+    (``%LOCALAPPDATA%\\OpenAI\\Codex\\bin`` on Windows). Split out so tests can
+    point discovery at a temp tree."""
+    local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(local) / "OpenAI" / "Codex" / "bin"
+
+
+def _discover_codex() -> Optional[str]:
+    """Newest ``codex.exe`` under the hash-named install dirs, or None.
+
+    Codex installs to ``.../Codex/bin/<hash>/codex.exe`` and the ``<hash>``
+    changes on every update, so pinning one path breaks on the next update.
+    Picking the most-recently-modified binary tracks the current install."""
+    try:
+        candidates = list(_codex_bin_root().glob("*/codex.exe"))
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    return str(newest)
+
 
 # (default executable, fixed subcommand args, env var overriding the executable).
 # The prompt is appended after the subcommand args.
@@ -33,9 +62,10 @@ import subprocess
 #           matters — -Q before -q, since -q consumes the next arg as the query.
 #           (Without -Q the reply is ~940 chars of ANSI box art per call.)
 #   codex:  exec output carries a small preamble/token-count footer around the
-#           answer; usable as-is for v1. --output-last-message <FILE> is the
-#           fully-clean path if this proves noisy in practice.
-#   claude: -p headless print mode is already clean.
+#           answer; usable as-is. --output-last-message <FILE> is the fully-
+#           clean path if this ever proves too noisy. Resolved via discovery
+#           (see _prefix_for) because its install dir is hash-named.
+#   claude: -p headless print mode is already clean; normally on PATH.
 _DISPATCH = {
     "hermes": ("hermes", ["chat", "-Q", "-q"], "HARDLINE_HERMES_CMD"),
     "codex": ("codex", ["exec"], "HARDLINE_CODEX_CMD"),
@@ -49,8 +79,13 @@ _TIMEOUT_S = 180
 
 def _prefix_for(agent: str) -> list[str]:
     default_exe, subcmd, env_var = _DISPATCH[agent]
-    exe = os.environ.get(env_var) or default_exe
-    return [exe, *subcmd]
+    # Precedence: explicit env override > per-agent discovery > bare name (PATH).
+    # Only codex needs discovery — its install dir is hash-named and rotates on
+    # every update, so a pinned path rots.
+    exe = os.environ.get(env_var)
+    if not exe and agent == "codex":
+        exe = _discover_codex()
+    return [exe or default_exe, *subcmd]
 
 
 def _run_cmd(argv: list[str]) -> dict:

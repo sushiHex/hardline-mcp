@@ -41,6 +41,10 @@ def test_ask_hermes_shells_hermes_chat(monkeypatch):
 
 
 def test_ask_codex_shells_codex_exec(monkeypatch):
+    # isolate from this machine's real codex install: no env, no discovery,
+    # so it falls to the bare "codex" on PATH.
+    monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
+    monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
     out = adapters.ask("codex", "summarize")
     assert out["ok"] is True
@@ -103,3 +107,49 @@ def test_deliver_uses_same_agent_dispatch(monkeypatch):
     assert out["ok"] is True
     argv = calls[0]["cmd"]
     assert "you have 1 new message; call inbox" in argv
+
+
+# --------------------------------------------------------------------------
+# codex binary auto-discovery — the install dir is hash-named and rotates on
+# every Codex update, so a hardcoded path rots. Discovery picks the newest.
+# --------------------------------------------------------------------------
+
+def test_codex_discovery_picks_newest_install(monkeypatch, tmp_path):
+    import os
+    base = tmp_path / "OpenAI" / "Codex" / "bin"
+    old = base / "aaaa1111"
+    new = base / "bbbb2222"
+    for d in (old, new):
+        d.mkdir(parents=True)
+        (d / "codex.exe").write_text("x")
+    # make `new` newer than `old`
+    os.utime(old / "codex.exe", (1000, 1000))
+    os.utime(new / "codex.exe", (2000, 2000))
+
+    monkeypatch.setattr(adapters, "_codex_bin_root", lambda: base)
+    found = adapters._discover_codex()
+    assert found == str(new / "codex.exe")
+
+
+def test_codex_discovery_returns_none_when_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(adapters, "_codex_bin_root", lambda: tmp_path / "nope")
+    assert adapters._discover_codex() is None
+
+
+def test_prefix_precedence_env_over_discovery_over_default(monkeypatch):
+    # 1. env override wins
+    monkeypatch.setenv("HARDLINE_CODEX_CMD", "C:/pinned/codex.exe")
+    monkeypatch.setattr(adapters, "_discover_codex", lambda: "C:/found/codex.exe")
+    assert adapters._prefix_for("codex")[0] == "C:/pinned/codex.exe"
+    # 2. no env -> discovery
+    monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
+    assert adapters._prefix_for("codex")[0] == "C:/found/codex.exe"
+    # 3. no env, discovery fails -> bare default (PATH)
+    monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
+    assert adapters._prefix_for("codex")[0] == "codex"
+
+
+def test_non_codex_agents_have_no_discovery(monkeypatch):
+    # hermes/claude resolve to bare default when no env override; no discovery.
+    monkeypatch.delenv("HARDLINE_HERMES_CMD", raising=False)
+    assert adapters._prefix_for("hermes")[0] == "hermes"
