@@ -1,10 +1,10 @@
-"""Tests for comms_mcp.mailbox — real temp-dir SQLite (concurrency is the point)."""
+"""Tests for hardline_mcp.mailbox — real temp-dir SQLite (concurrency is the point)."""
 
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from comms_mcp import mailbox
+from hardline_mcp import mailbox
 
 _T0 = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
 

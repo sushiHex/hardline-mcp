@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "comms-mcp"
+name = "hardline-mcp"
 version = "0.1.0"
 description = "MCP server for inter-agent messaging between Claude Code, Hermes, and Codex."
 readme = "README.md"
@@ -25,15 +25,15 @@ dependencies = [
 dev = ["pytest>=7.0"]
 
 [project.scripts]
-comms-mcp = "comms_mcp.server:main"
+hardline-mcp = "hardline_mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/sushiHex/comms-mcp"
-Repository = "https://github.com/sushiHex/comms-mcp"
-Issues = "https://github.com/sushiHex/comms-mcp/issues"
+Homepage = "https://github.com/sushiHex/hardline-mcp"
+Repository = "https://github.com/sushiHex/hardline-mcp"
+Issues = "https://github.com/sushiHex/hardline-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["comms_mcp"]
+packages = ["hardline_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

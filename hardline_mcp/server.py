@@ -1,8 +1,8 @@
 """FastMCP server exposing inter-agent messaging tools.
 
 The only module that imports ``mcp``. It wires the pure logic in
-:mod:`comms_mcp.mailbox` (durable SQLite mailbox) and
-:mod:`comms_mcp.adapters` (native per-agent push/query) into MCP tools.
+:mod:`hardline_mcp.mailbox` (durable SQLite mailbox) and
+:mod:`hardline_mcp.adapters` (native per-agent push/query) into MCP tools.
 
 Every tool is ``async def`` and runs its blocking body (SQLite I/O,
 subprocess spawns) in a worker thread via ``anyio.to_thread.run_sync`` — the
@@ -25,7 +25,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import adapters, mailbox
 
-mcp = FastMCP("comms-mcp")
+mcp = FastMCP("hardline-mcp")
 
 
 async def _in_thread(fn, *args, **kwargs):
@@ -39,8 +39,8 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
     result = mailbox.send(from_agent, to_agent, message)
     if deliver:
         notice = (
-            f"[comms] new message #{result['message_id']} from {from_agent}. "
-            f"Call comms-mcp inbox(agent='{to_agent}') to read it."
+            f"[hardline] new message #{result['message_id']} from {from_agent}. "
+            f"Call hardline-mcp inbox(agent='{to_agent}') to read it."
         )
         result["delivery"] = adapters.deliver(to_agent, notice)
     return result
@@ -129,7 +129,7 @@ async def ask_claude(prompt: str) -> dict:
 
 
 def main() -> None:
-    """Console-script entry point (``comms-mcp``). Serves over stdio."""
+    """Console-script entry point (``hardline-mcp``). Serves over stdio."""
     mcp.run()
 
 

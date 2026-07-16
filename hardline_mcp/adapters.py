@@ -14,10 +14,10 @@ intrinsic to each tool and never change). This lets a binary that isn't on
 PATH still be reached — notably ``hermes`` (bundled venv) and ``codex``
 (hashed install dir) on this project's machine:
 
-    COMMS_HERMES_CMD, COMMS_CODEX_CMD, COMMS_CLAUDE_CMD
+    HARDLINE_HERMES_CMD, HARDLINE_CODEX_CMD, HARDLINE_CLAUDE_CMD
 
 Each is a path to the executable only, e.g.
-``COMMS_HERMES_CMD="C:/.../venv/Scripts/hermes.exe"``. The fixed subcommand
+``HARDLINE_HERMES_CMD="C:/.../venv/Scripts/hermes.exe"``. The fixed subcommand
 (``chat -q`` / ``exec`` / ``-p``) is still appended automatically.
 """
 
@@ -37,9 +37,9 @@ import subprocess
 #           fully-clean path if this proves noisy in practice.
 #   claude: -p headless print mode is already clean.
 _DISPATCH = {
-    "hermes": ("hermes", ["chat", "-Q", "-q"], "COMMS_HERMES_CMD"),
-    "codex": ("codex", ["exec"], "COMMS_CODEX_CMD"),
-    "claude": ("claude", ["-p"], "COMMS_CLAUDE_CMD"),
+    "hermes": ("hermes", ["chat", "-Q", "-q"], "HARDLINE_HERMES_CMD"),
+    "codex": ("codex", ["exec"], "HARDLINE_CODEX_CMD"),
+    "claude": ("claude", ["-p"], "HARDLINE_CLAUDE_CMD"),
 }
 
 # ask()/deliver() spawn a whole agent session — generous ceiling, but bounded

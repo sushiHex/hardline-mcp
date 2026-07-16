@@ -1,8 +1,8 @@
-"""SQLite-backed inter-agent mailbox — the durable core of comms-mcp.
+"""SQLite-backed inter-agent mailbox — the durable core of hardline-mcp.
 
-Every agent (Claude Code, Hermes, Codex) runs its own comms-mcp subprocess,
+Every agent (Claude Code, Hermes, Codex) runs its own hardline-mcp subprocess,
 so the shared state is a single on-disk SQLite database
-(``~/.cache/comms-mcp/mailbox.db`` by default). SQLite in WAL mode with a
+(``~/.cache/hardline-mcp/mailbox.db`` by default). SQLite in WAL mode with a
 busy timeout handles the concurrent multi-writer case natively — no
 temp-file/lock dance — which is why it's used here rather than the JSON
 ledger pattern of the sibling vram-mcp project.
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-_DEFAULT_PATH = Path.home() / ".cache" / "comms-mcp" / "mailbox.db"
+_DEFAULT_PATH = Path.home() / ".cache" / "hardline-mcp" / "mailbox.db"
 
 
 def _default_now() -> datetime:

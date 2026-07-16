@@ -2,7 +2,7 @@
 
 import pytest
 
-from comms_mcp import server
+from hardline_mcp import server
 
 
 @pytest.mark.anyio

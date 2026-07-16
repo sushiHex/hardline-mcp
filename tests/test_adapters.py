@@ -1,10 +1,10 @@
-"""Tests for comms_mcp.adapters — subprocess is monkeypatched (no real spawns)."""
+"""Tests for hardline_mcp.adapters — subprocess is monkeypatched (no real spawns)."""
 
 import subprocess
 
 import pytest
 
-from comms_mcp import adapters
+from hardline_mcp import adapters
 
 
 class _FakeCompleted:
@@ -87,9 +87,9 @@ def test_ask_missing_binary_is_handled(monkeypatch):
 
 
 def test_env_override_replaces_binary_but_keeps_subcommand(monkeypatch):
-    """COMMS_*_CMD overrides only the executable path; the fixed subcommand
+    """HARDLINE_*_CMD overrides only the executable path; the fixed subcommand
     (chat -q / exec / -p) must still be appended, and the prompt after it."""
-    monkeypatch.setenv("COMMS_HERMES_CMD", "C:/x/hermes.exe")
+    monkeypatch.setenv("HARDLINE_HERMES_CMD", "C:/x/hermes.exe")
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="ok"))
     adapters.ask("hermes", "status?")
     assert calls[0]["cmd"] == ["C:/x/hermes.exe", "chat", "-Q", "-q", "status?"]

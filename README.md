@@ -1,4 +1,4 @@
-# comms-mcp
+# hardline-mcp
 
 An [MCP](https://modelcontextprotocol.io) server that gives local AI agents —
 [Claude Code](https://claude.com/claude-code), [Hermes](https://github.com/NousResearch/hermes-agent)
@@ -45,23 +45,23 @@ runs as the same user on one machine.
 pip install -e .
 ```
 
-`comms-mcp` is the stdio server entry point (console script).
+`hardline-mcp` is the stdio server entry point (console script).
 
 ## Configuration
 
-State lives at `~/.cache/comms-mcp/mailbox.db`.
+State lives at `~/.cache/hardline-mcp/mailbox.db`.
 
 Each agent's CLI must be reachable. If a binary isn't on `PATH`, set its full
 command via env var (space-split, quotes honored):
 
-- `COMMS_HERMES_CMD` — e.g. `"C:/Users/you/AppData/Local/hermes/hermes-agent/venv/Scripts/hermes.exe"`
-- `COMMS_CODEX_CMD`
-- `COMMS_CLAUDE_CMD`
+- `HARDLINE_HERMES_CMD` — e.g. `"C:/Users/you/AppData/Local/hermes/hermes-agent/venv/Scripts/hermes.exe"`
+- `HARDLINE_CODEX_CMD`
+- `HARDLINE_CLAUDE_CMD`
 
 ## MCP client registration
 
 **Claude Code / Hermes** (`config.yaml` `mcp_servers` or Claude's MCP config):
-point the command at the installed `comms-mcp` console script.
+point the command at the installed `hardline-mcp` console script.
 
 **Codex** (`~/.codex/config.toml`): register under `mcp_servers` (Codex uses
 its own TOML config, separate from the other two).
