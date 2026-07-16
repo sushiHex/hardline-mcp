@@ -14,6 +14,7 @@ so tests run against a temp database with a controllable clock.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -75,17 +76,14 @@ def send(
     """
     db_path = db_path or _DEFAULT_PATH
     created = _iso(now_fn())
-    conn = _connect(db_path)
-    try:
-        with conn:
+    with closing(_connect(db_path)) as conn:
+        with conn:  # transaction: commit on success, rollback on error
             cur = conn.execute(
                 "INSERT INTO messages (sender, recipient, body, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (from_agent, to_agent, body, created),
             )
         return {"message_id": cur.lastrowid, "created_at": created}
-    finally:
-        conn.close()
 
 
 def inbox(
@@ -101,12 +99,9 @@ def inbox(
     if unread_only:
         sql += " AND acked_at IS NULL"
     sql += " ORDER BY id ASC"
-    conn = _connect(db_path)
-    try:
+    with closing(_connect(db_path)) as conn:
         rows = conn.execute(sql, (agent,)).fetchall()
         return [_row_to_dict(r) for r in rows]
-    finally:
-        conn.close()
 
 
 def ack(
@@ -116,16 +111,13 @@ def ack(
     """Mark one message read. Returns ``{"ok": True}`` only if a still-unread
     message with that id existed (idempotent: a second ack returns False)."""
     db_path = db_path or _DEFAULT_PATH
-    conn = _connect(db_path)
-    try:
-        with conn:
+    with closing(_connect(db_path)) as conn:
+        with conn:  # transaction: commit on success, rollback on error
             cur = conn.execute(
                 "UPDATE messages SET acked_at = ? WHERE id = ? AND acked_at IS NULL",
                 (_iso(now_fn()), message_id),
             )
         return {"ok": cur.rowcount > 0}
-    finally:
-        conn.close()
 
 
 def history(
@@ -142,9 +134,6 @@ def history(
         params = (agent, agent)
     sql += " ORDER BY id DESC LIMIT ?"
     params = params + (limit,)
-    conn = _connect(db_path)
-    try:
+    with closing(_connect(db_path)) as conn:
         rows = conn.execute(sql, params).fetchall()
         return [_row_to_dict(r) for r in rows]
-    finally:
-        conn.close()

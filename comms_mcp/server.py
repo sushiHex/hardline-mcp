@@ -27,8 +27,6 @@ from . import adapters, mailbox
 
 mcp = FastMCP("comms-mcp")
 
-_KNOWN_AGENTS = ("claude", "hermes", "codex")
-
 
 async def _in_thread(fn, *args, **kwargs):
     """Run a blocking tool body off the event loop."""

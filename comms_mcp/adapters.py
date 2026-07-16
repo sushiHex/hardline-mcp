@@ -76,17 +76,17 @@ def _run_cmd(argv: list[str]) -> dict:
     return {"ok": True, "reply": (proc.stdout or "").strip()}
 
 
-def ask(agent: str, prompt: str) -> dict:
-    """Live synchronous query to ``agent``. Returns ``{"ok", "reply"}`` on
-    success or ``{"ok": False, "error"}``."""
+def ask(agent: str, text: str) -> dict:
+    """Run ``text`` through ``agent``'s native CLI and return its output.
+
+    Returns ``{"ok", "reply"}`` on success or ``{"ok": False, "error"}``.
+    """
     if agent not in _DISPATCH:
         return {"ok": False, "error": f"unknown agent {agent!r}; known: {sorted(_DISPATCH)}"}
-    return _run_cmd(_prefix_for(agent) + [prompt])
+    return _run_cmd(_prefix_for(agent) + [text])
 
 
-def deliver(agent: str, notice: str) -> dict:
-    """Push a one-shot notice to ``agent`` via its native mechanism (same
-    dispatch as ``ask``). Used by the server's ``deliver`` flag on send."""
-    if agent not in _DISPATCH:
-        return {"ok": False, "error": f"unknown agent {agent!r}; known: {sorted(_DISPATCH)}"}
-    return _run_cmd(_prefix_for(agent) + [notice])
+# Pushing a one-shot notice IS running text through the agent — same operation.
+# ``deliver`` is kept as a named alias so intent reads clearly at call sites
+# (the server's ``deliver`` flag on send) without duplicating the body/guard.
+deliver = ask
