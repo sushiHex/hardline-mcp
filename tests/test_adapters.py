@@ -35,7 +35,9 @@ def test_ask_hermes_shells_hermes_chat(monkeypatch):
     assert out["reply"] == "hermes says hi"
     argv = calls[0]["cmd"]
     assert "hermes" in argv[0].lower() or argv[0] == "hermes"
-    assert "chat" in argv and "what is your status" in argv
+    assert "chat" in argv and "-Q" in argv and "what is your status" in argv
+    # -Q must precede -q so -q consumes the prompt, not -Q
+    assert argv.index("-Q") < argv.index("-q")
 
 
 def test_ask_codex_shells_codex_exec(monkeypatch):
@@ -90,7 +92,7 @@ def test_env_override_replaces_binary_but_keeps_subcommand(monkeypatch):
     monkeypatch.setenv("COMMS_HERMES_CMD", "C:/x/hermes.exe")
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="ok"))
     adapters.ask("hermes", "status?")
-    assert calls[0]["cmd"] == ["C:/x/hermes.exe", "chat", "-q", "status?"]
+    assert calls[0]["cmd"] == ["C:/x/hermes.exe", "chat", "-Q", "-q", "status?"]
 
 
 def test_deliver_uses_same_agent_dispatch(monkeypatch):

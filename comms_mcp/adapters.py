@@ -28,8 +28,16 @@ import subprocess
 
 # (default executable, fixed subcommand args, env var overriding the executable).
 # The prompt is appended after the subcommand args.
+#   hermes: -Q (quiet) suppresses banner/spinner/tool-previews/box-chrome so
+#           the reply is just the final message; -q takes the query. Order
+#           matters — -Q before -q, since -q consumes the next arg as the query.
+#           (Without -Q the reply is ~940 chars of ANSI box art per call.)
+#   codex:  exec output carries a small preamble/token-count footer around the
+#           answer; usable as-is for v1. --output-last-message <FILE> is the
+#           fully-clean path if this proves noisy in practice.
+#   claude: -p headless print mode is already clean.
 _DISPATCH = {
-    "hermes": ("hermes", ["chat", "-q"], "COMMS_HERMES_CMD"),
+    "hermes": ("hermes", ["chat", "-Q", "-q"], "COMMS_HERMES_CMD"),
     "codex": ("codex", ["exec"], "COMMS_CODEX_CMD"),
     "claude": ("claude", ["-p"], "COMMS_CLAUDE_CMD"),
 }
