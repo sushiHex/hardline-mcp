@@ -84,6 +84,15 @@ def test_ask_missing_binary_is_handled(monkeypatch):
     assert "not found" in out["error"].lower() or "not installed" in out["error"].lower()
 
 
+def test_env_override_replaces_binary_but_keeps_subcommand(monkeypatch):
+    """COMMS_*_CMD overrides only the executable path; the fixed subcommand
+    (chat -q / exec / -p) must still be appended, and the prompt after it."""
+    monkeypatch.setenv("COMMS_HERMES_CMD", "C:/x/hermes.exe")
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="ok"))
+    adapters.ask("hermes", "status?")
+    assert calls[0]["cmd"] == ["C:/x/hermes.exe", "chat", "-q", "status?"]
+
+
 def test_deliver_uses_same_agent_dispatch(monkeypatch):
     """deliver(agent, notice) pushes a one-shot notification via the agent's
     native mechanism — same dispatch table as ask()."""

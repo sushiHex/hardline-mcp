@@ -9,28 +9,29 @@ reached.
 pushes a one-shot notice through the same dispatch. Both are pure subprocess
 wrappers (no ``mcp`` import) so the server layer can run them off-thread.
 
-Each agent's command is overridable via env var so a binary that isn't on
-PATH can still be reached — notably ``hermes`` on this project's machine,
-which lives inside its bundled venv:
+Only the BINARY location is overridable via env var (the subcommand args are
+intrinsic to each tool and never change). This lets a binary that isn't on
+PATH still be reached — notably ``hermes`` (bundled venv) and ``codex``
+(hashed install dir) on this project's machine:
 
     COMMS_HERMES_CMD, COMMS_CODEX_CMD, COMMS_CLAUDE_CMD
 
-Each may contain a full path and leading fixed args, space-split (e.g.
-``COMMS_HERMES_CMD="C:/.../venv/Scripts/hermes.exe"``).
+Each is a path to the executable only, e.g.
+``COMMS_HERMES_CMD="C:/.../venv/Scripts/hermes.exe"``. The fixed subcommand
+(``chat -q`` / ``exec`` / ``-p``) is still appended automatically.
 """
 
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 
-# prompt is appended as the final argv element(s); this is the invocation
-# *prefix* per agent. Env override replaces the prefix entirely.
+# (default executable, fixed subcommand args, env var overriding the executable).
+# The prompt is appended after the subcommand args.
 _DISPATCH = {
-    "hermes": (["hermes", "chat", "-q"], "COMMS_HERMES_CMD"),
-    "codex": (["codex", "exec"], "COMMS_CODEX_CMD"),
-    "claude": (["claude", "-p"], "COMMS_CLAUDE_CMD"),
+    "hermes": ("hermes", ["chat", "-q"], "COMMS_HERMES_CMD"),
+    "codex": ("codex", ["exec"], "COMMS_CODEX_CMD"),
+    "claude": ("claude", ["-p"], "COMMS_CLAUDE_CMD"),
 }
 
 # ask()/deliver() spawn a whole agent session — generous ceiling, but bounded
@@ -39,13 +40,9 @@ _TIMEOUT_S = 180
 
 
 def _prefix_for(agent: str) -> list[str]:
-    _default, env_var = _DISPATCH[agent]
-    override = os.environ.get(env_var)
-    if override:
-        # split on whitespace but honor quoting, so a Windows path with
-        # spaces can be quoted in the env var
-        return shlex.split(override, posix=False)
-    return list(_default)
+    default_exe, subcmd, env_var = _DISPATCH[agent]
+    exe = os.environ.get(env_var) or default_exe
+    return [exe, *subcmd]
 
 
 def _run_cmd(argv: list[str]) -> dict:
