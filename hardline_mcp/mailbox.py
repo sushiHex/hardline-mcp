@@ -13,6 +13,7 @@ so tests run against a temp database with a controllable clock.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from contextlib import closing
@@ -21,6 +22,17 @@ from pathlib import Path
 from typing import Callable, Optional
 
 _DEFAULT_PATH = Path.home() / ".cache" / "hardline-mcp" / "mailbox.db"
+
+
+def _resolve_db(db_path: Optional[Path]) -> Path:
+    """Pick the mailbox file: an explicit ``db_path`` wins (tests), else the
+    ``HARDLINE_DB`` env var (relocate the store, or run isolated instances),
+    else the default under ~/.cache. Read at call time so a subprocess started
+    with HARDLINE_DB set is honored without re-import."""
+    if db_path is not None:
+        return db_path
+    env = os.environ.get("HARDLINE_DB")
+    return Path(env) if env else _DEFAULT_PATH
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -101,7 +113,7 @@ def send(
     Returns ``{"message_id", "created_at"}``. Delivery/push is a separate
     concern (see adapters + the server's ``deliver`` flag); this only records.
     """
-    db_path = db_path or _DEFAULT_PATH
+    db_path = _resolve_db(db_path)
     created = _iso(now_fn())
     with closing(_connect(db_path)) as conn:
         with conn:  # transaction: commit on success, rollback on error
@@ -121,7 +133,7 @@ def inbox(
 
     ``unread_only`` (default) hides already-acked messages.
     """
-    db_path = db_path or _DEFAULT_PATH
+    db_path = _resolve_db(db_path)
     sql = "SELECT * FROM messages WHERE recipient = ?"
     if unread_only:
         sql += " AND acked_at IS NULL"
@@ -137,7 +149,7 @@ def ack(
 ) -> dict:
     """Mark one message read. Returns ``{"ok": True}`` only if a still-unread
     message with that id existed (idempotent: a second ack returns False)."""
-    db_path = db_path or _DEFAULT_PATH
+    db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
         with conn:  # transaction: commit on success, rollback on error
             cur = conn.execute(
@@ -153,7 +165,7 @@ def history(
 ) -> list[dict]:
     """Recent messages newest-first (the visibility/log feed). ``agent``, if
     given, matches messages where it is EITHER sender or recipient."""
-    db_path = db_path or _DEFAULT_PATH
+    db_path = _resolve_db(db_path)
     params: tuple = ()
     sql = "SELECT * FROM messages"
     if agent is not None:
