@@ -132,6 +132,21 @@ pip install -e ".[dev]"
 python -m pytest -q
 ```
 
+The suite includes a **headless end-to-end test** that launches two real
+server subprocesses over MCP stdio and does a cross-instance round-trip — no
+agents needed, runs in CI.
+
+There is also a **live integration test** (`tests/test_live_agents.py`) that
+spawns the *actual* `hermes` / `codex` / `claude` CLIs and drives the `ask_*`
+bridges against their real brains. It's off by default (it costs plan tokens
+and needs the CLIs installed) — it skips unless `HARDLINE_LIVE_TESTS=1`, and
+skips per-agent when a CLI isn't reachable, so CI never runs it:
+
+```bash
+# hermes usually isn't on PATH — point at its binary, same as production
+HARDLINE_LIVE_TESTS=1 HARDLINE_HERMES_CMD="/path/to/hermes" python -m pytest tests/test_live_agents.py -v
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
