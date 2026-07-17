@@ -67,7 +67,9 @@ pip install -e .
 
 ## Configuration
 
-The mailbox lives at `~/.cache/hardline-mcp/mailbox.db` — no setup needed.
+The mailbox lives at `~/.cache/hardline-mcp/mailbox.db` — no setup needed. Set
+`HARDLINE_DB` to relocate it, or to run isolated instances (each agent's server
+must point at the *same* file to share a mailbox).
 
 Each agent's CLI must be launchable by hardline-mcp. If a binary isn't on
 `PATH`, pin its **executable path** (path only — the fixed subcommand is
