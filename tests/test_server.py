@@ -64,3 +64,23 @@ def test_send_impl_success_has_ok_true(monkeypatch, tmp_path):
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
     r = server._send_impl("claude", "hermes", "hi", deliver=False)
     assert r["ok"] is True and isinstance(r["message_id"], int)
+
+
+@pytest.mark.anyio
+async def test_async_tools_round_trip(monkeypatch, tmp_path):
+    # Exercise the actual async MCP tool wrappers (through _in_thread), not just
+    # the sync _send_impl: send -> inbox -> ack -> inbox -> history end to end.
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+
+    sent = await server.send(from_agent="claude", to_agent="hermes", message="hi there")
+    assert sent["ok"] is True and isinstance(sent["message_id"], int)
+
+    inb = await server.inbox(agent="hermes")
+    assert inb["count"] == 1 and inb["messages"][0]["body"] == "hi there"
+
+    acked = await server.ack(message_id=sent["message_id"])
+    assert acked["ok"] is True
+    assert (await server.inbox(agent="hermes"))["count"] == 0  # now read
+
+    hist = await server.history(agent="hermes")
+    assert hist["count"] == 1 and hist["messages"][0]["body"] == "hi there"

@@ -100,3 +100,49 @@ def test_survives_reopen_same_db(tmp_path):
     mailbox.send("claude", "hermes", "persist", db_path=db, now_fn=now_fn)
     # fresh calls reopen the connection — data must persist on disk
     assert len(mailbox.inbox("hermes", db_path=db)) == 1
+
+
+def test_unicode_body_round_trips(tmp_path):
+    # The adapter decodes agent output as UTF-8; the store must be just as
+    # unicode-safe. Non-ASCII bodies must survive send -> SQLite -> inbox.
+    db = tmp_path / "mb.db"
+    body = "café ☕ 日本語 — rocket 🚀  line-sep"
+    r = mailbox.send("claude", "hermes", body, db_path=db)
+    got = mailbox.inbox("hermes", db_path=db)
+    assert got[0]["message_id"] == r["message_id"]
+    assert got[0]["body"] == body
+
+
+def test_concurrent_writers_do_not_lose_or_duplicate(tmp_path):
+    # The headline durability claim: WAL mode + per-call connections let many
+    # agent subprocesses write the same mailbox at once without losing or
+    # corrupting messages. Hammer one db from several threads and prove every
+    # message landed exactly once (unique ids, exact count, no exceptions).
+    import threading
+
+    db = tmp_path / "mb.db"
+    n_threads, per_thread = 8, 30
+    errors: list[Exception] = []
+    barrier = threading.Barrier(n_threads)  # maximize write overlap
+
+    def worker(tid: int) -> None:
+        try:
+            barrier.wait()
+            for i in range(per_thread):
+                mailbox.send(f"agent{tid}", "hermes", f"t{tid}-m{i}", db_path=db)
+        except Exception as e:  # noqa: BLE001 - surface any concurrency failure
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"concurrent writers raised: {errors}"
+    rows = mailbox.history(limit=10_000, db_path=db)
+    assert len(rows) == n_threads * per_thread          # nothing lost
+    ids = [r["message_id"] for r in rows]
+    assert len(set(ids)) == len(ids)                    # nothing duplicated
+    bodies = {r["body"] for r in rows}
+    assert len(bodies) == n_threads * per_thread        # every distinct message present

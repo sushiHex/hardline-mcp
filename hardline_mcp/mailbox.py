@@ -14,12 +14,35 @@ so tests run against a temp database with a controllable clock.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 _DEFAULT_PATH = Path.home() / ".cache" / "hardline-mcp" / "mailbox.db"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender     TEXT NOT NULL,
+    recipient  TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    acked_at   TEXT
+)
+"""
+
+# One-time per-db init (schema + WAL) is guarded so it happens exactly once
+# per process per path. WAL is a *persistent* DB-header property, so setting it
+# per connection is not just wasteful — it's actively harmful under
+# concurrency: several connections each trying to switch journal mode contend
+# on an exclusive lock and raise "database is locked" (the WAL-mode change does
+# not honor busy_timeout). Establish it once up front; per-op connections then
+# only need busy_timeout to make concurrent writers WAIT for the single WAL
+# write lock instead of erroring.
+_init_lock = threading.Lock()
+_initialized_paths: set[str] = set()
 
 
 def _default_now() -> datetime:
@@ -30,27 +53,31 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _ensure_initialized(db_path: Path) -> None:
+    """Create the parent dir, enable WAL, and create the schema exactly once
+    per db file (double-checked lock for thread safety)."""
+    key = str(db_path)
+    if key in _initialized_paths:
+        return
+    with _init_lock:
+        if key in _initialized_paths:
+            return
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(str(db_path), timeout=10.0)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(_SCHEMA)
+            conn.commit()
+        _initialized_paths.add(key)
+
+
 def _connect(db_path: Path) -> sqlite3.Connection:
-    """Open (creating parent dir + schema on first use) with WAL + busy timeout
-    so concurrent agent subprocesses can read/write without corrupting each
-    other or spuriously failing on a momentary lock."""
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    """Open a connection for a single operation. Schema + WAL are established
+    once by ``_ensure_initialized``; ``busy_timeout`` makes concurrent writers
+    wait for the single WAL write lock rather than fail on a momentary lock."""
+    _ensure_initialized(db_path)
     conn = sqlite3.connect(str(db_path), timeout=10.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS messages (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender     TEXT NOT NULL,
-            recipient  TEXT NOT NULL,
-            body       TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            acked_at   TEXT
-        )
-        """
-    )
     return conn
 
 
