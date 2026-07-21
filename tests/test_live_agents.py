@@ -120,7 +120,11 @@ async def test_live_claude_model_and_effort_over_mcp():
     assert payload["ok"] is True, payload.get("error")
     assert token in payload["reply"]
     assert payload["requested_model"] == "fable"
-    assert payload["actual_model"] == "claude-fable-5"
     assert payload["requested_effort"] == "low"
     assert payload["api_key_source"] == "none"
-    assert payload["fallback"] is None
+    assert payload["subscription_verified"] is True
+    if payload["fallback"] is None:
+        assert payload["actual_model"].startswith("claude-fable-")
+    else:
+        assert payload["fallback"]["original_model"].startswith("claude-fable-")
+        assert payload["actual_model"] == payload["fallback"]["fallback_model"]

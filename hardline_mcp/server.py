@@ -19,6 +19,7 @@ the same posture as the sibling vram-mcp's claim ledger.
 from __future__ import annotations
 
 import functools
+from typing import Literal
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
@@ -26,6 +27,9 @@ from mcp.server.fastmcp import FastMCP
 from . import adapters, mailbox
 
 mcp = FastMCP("hardline-mcp")
+
+ClaudeEffort = Literal["default", "low", "medium", "high", "xhigh", "max"]
+ClaudeMode = Literal["default", "advisory"]
 
 
 async def _in_thread(fn, *args, **kwargs):
@@ -136,8 +140,8 @@ async def ask_codex(prompt: str) -> dict:
 async def ask_claude(
     prompt: str,
     model: str | None = None,
-    effort: str = "default",
-    mode: str = "default",
+    effort: ClaudeEffort = "default",
+    mode: ClaudeMode = "default",
 ) -> dict:
     """Ask Claude Code a question and wait for its reply.
 
@@ -145,9 +149,10 @@ async def ask_claude(
     ``model`` pins a Claude alias/full model ID. ``effort`` is one of
     ``default|low|medium|high|xhigh|max``; ``default`` omits the flag. Mode
     ``advisory`` disables tools/project customizations, runs in a neutral cwd,
-    and strips API-provider overrides so Claude Code uses first-party account
-    auth. Optioned calls return actual-model, usage, rate-limit, and safeguard
-    fallback metadata in addition to ``ok``/``reply``.
+    strips API-provider overrides, and fails closed unless response telemetry
+    verifies first-party account auth without overage. Optioned calls return
+    actual-model, usage, rate-limit, auth-verification, and safeguard fallback
+    metadata in addition to ``ok``/``reply``.
     """
     return await _in_thread(
         adapters.ask_claude,

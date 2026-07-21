@@ -166,7 +166,11 @@ def ask(agent: str, text: str) -> dict:
 
 
 def _parse_claude_stream(
-    output: str, *, requested_model: str | None, requested_effort: str
+    output: str,
+    *,
+    requested_model: str | None,
+    requested_effort: str,
+    require_base_subscription: bool = False,
 ) -> dict:
     """Reduce Claude Code's stream-json output to a stable transport result.
 
@@ -219,6 +223,13 @@ def _parse_claude_stream(
     )
     rate_limit = rate_event.get("rate_limit_info")
     success = result.get("subtype") == "success" and not result.get("is_error", False)
+    subscription_verified = None
+    if require_base_subscription:
+        subscription_verified = (
+            init.get("apiKeySource") == "none"
+            and isinstance(rate_limit, dict)
+            and rate_limit.get("isUsingOverage") is False
+        )
     response = {
         "ok": success,
         "reply": result.get("result", ""),
@@ -231,8 +242,16 @@ def _parse_claude_stream(
         "usage": result.get("usage") or {},
         "model_usage": result.get("modelUsage") or {},
         "rate_limit": rate_limit,
+        "subscription_verified": subscription_verified,
     }
-    if not success:
+    if success and require_base_subscription and not subscription_verified:
+        response["ok"] = False
+        response["error"] = (
+            "advisory mode could not verify base Claude subscription usage "
+            f"(apiKeySource={init.get('apiKeySource')!r}, "
+            f"isUsingOverage={rate_limit.get('isUsingOverage') if isinstance(rate_limit, dict) else None!r})"
+        )
+    elif not success:
         response["error"] = (
             result.get("result") or result.get("subtype") or "Claude request failed"
         )
@@ -252,8 +271,9 @@ def ask_claude(
     Supplying model/effort, or selecting advisory mode, enables stream-json so
     callers can distinguish the requested model from the model actually served.
     Advisory mode additionally strips API-provider overrides, disables tools and
-    project customizations, and runs in a neutral temporary directory so Claude
-    Code uses its first-party subscription authentication path.
+    project customizations, and runs in a neutral temporary directory. The
+    parsed result fails closed unless telemetry verifies first-party account
+    auth without overage; command wrappers and admin policy remain trusted.
     """
     if effort not in _CLAUDE_EFFORTS:
         return {
@@ -328,6 +348,7 @@ def ask_claude(
         run.get("reply", ""),
         requested_model=model,
         requested_effort=effort,
+        require_base_subscription=mode == "advisory",
     )
 
 

@@ -174,6 +174,10 @@ def test_ask_claude_advisory_isolates_context_and_api_overrides(monkeypatch, tmp
             "model": "claude-fable-5",
             "apiKeySource": "none",
         },
+        {
+            "type": "rate_limit_event",
+            "rate_limit_info": {"isUsingOverage": False, "rateLimitType": "seven_day"},
+        },
         {"type": "result", "subtype": "success", "result": "ok"},
     )
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
@@ -182,6 +186,7 @@ def test_ask_claude_advisory_isolates_context_and_api_overrides(monkeypatch, tmp
     out = adapters.ask_claude("review", model="fable", effort="high", mode="advisory")
 
     assert out["ok"] is True
+    assert out["subscription_verified"] is True
     argv = calls[0]["cmd"]
     assert "--safe-mode" in argv
     assert argv[argv.index("--tools") + 1] == ""
@@ -191,6 +196,38 @@ def test_ask_claude_advisory_isolates_context_and_api_overrides(monkeypatch, tmp
     assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
     child_env = calls[0]["kwargs"]["env"]
     assert all(name not in child_env for name in adapters._CLAUDE_AUTH_OVERRIDE_ENV)
+
+
+@pytest.mark.parametrize(
+    ("api_key_source", "rate_limit"),
+    [
+        ("environment", {"isUsingOverage": False}),
+        ("none", {"isUsingOverage": True}),
+        ("none", None),
+    ],
+)
+def test_ask_claude_advisory_fails_closed_without_base_subscription_evidence(
+    monkeypatch, tmp_path, api_key_source, rate_limit
+):
+    events = [
+        {
+            "type": "system",
+            "subtype": "init",
+            "model": "claude-fable-5",
+            "apiKeySource": api_key_source,
+        }
+    ]
+    if rate_limit is not None:
+        events.append({"type": "rate_limit_event", "rate_limit_info": rate_limit})
+    events.append({"type": "result", "subtype": "success", "result": "ok"})
+    _capture_run(monkeypatch, _FakeCompleted(stdout=_claude_stream(*events)))
+    monkeypatch.setattr(adapters.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
+
+    out = adapters.ask_claude("review", model="fable", mode="advisory")
+
+    assert out["ok"] is False
+    assert out["subscription_verified"] is False
+    assert "subscription" in out["error"].lower()
 
 
 def test_ask_claude_rejects_unknown_mode(monkeypatch):
