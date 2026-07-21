@@ -7,6 +7,7 @@ real MCP clients over stdio. A cross-instance send -> inbox -> ack round-trip
 through JSON-RPC is the closest a test can get to "agent A messages agent B"
 without launching the agents themselves.
 """
+
 from __future__ import annotations
 
 import json
@@ -56,9 +57,23 @@ async def test_headless_cross_instance_round_trip(tmp_path):
                 await a.initialize()
                 names = {t.name for t in (await a.list_tools()).tools}
                 assert {"send", "inbox", "ack", "history"} <= names
-                sent = _tool_dict(await a.call_tool("send", {
-                    "from_agent": "claude", "to_agent": "hermes",
-                    "message": "headless hi"}))
+                ask_claude = next(
+                    t for t in (await a.list_tools()).tools if t.name == "ask_claude"
+                )
+                properties = ask_claude.inputSchema["properties"]
+                assert properties["model"]["anyOf"][0]["type"] == "string"
+                assert properties["effort"]["default"] == "default"
+                assert properties["mode"]["default"] == "default"
+                sent = _tool_dict(
+                    await a.call_tool(
+                        "send",
+                        {
+                            "from_agent": "claude",
+                            "to_agent": "hermes",
+                            "message": "headless hi",
+                        },
+                    )
+                )
                 assert sent["ok"] is True
                 message_id = sent["message_id"]
 
@@ -87,6 +102,10 @@ async def test_headless_unknown_agent_rejected_over_protocol(tmp_path):
         async with stdio_client(_params(tmp_path / "mb.db")) as (r, w):
             async with ClientSession(r, w) as s:
                 await s.initialize()
-                res = _tool_dict(await s.call_tool("send", {
-                    "from_agent": "claude", "to_agent": "nobody", "message": "x"}))
+                res = _tool_dict(
+                    await s.call_tool(
+                        "send",
+                        {"from_agent": "claude", "to_agent": "nobody", "message": "x"},
+                    )
+                )
                 assert res["ok"] is False and "unknown" in res["error"].lower()

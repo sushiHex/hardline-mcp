@@ -1,6 +1,7 @@
 """Tests for hardline_mcp.adapters — subprocess is monkeypatched (no real spawns)."""
 
 import subprocess
+import json
 
 import pytest
 
@@ -61,6 +62,189 @@ def test_ask_claude_shells_claude_p(monkeypatch):
     assert argv[0] == "claude" and "-p" in argv
 
 
+def _claude_stream(*events):
+    return "\n".join(json.dumps(event) for event in events) + "\n"
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_ask_claude_routes_model_and_effort(monkeypatch, effort):
+    stdout = _claude_stream(
+        {
+            "type": "system",
+            "subtype": "init",
+            "model": "claude-fable-5",
+            "apiKeySource": "none",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "model": "claude-fable-5",
+                "content": [{"type": "text", "text": "answer"}],
+            },
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "result": "answer",
+            "usage": {"input_tokens": 2, "output_tokens": 1},
+            "modelUsage": {"claude-fable-5": {"inputTokens": 2, "outputTokens": 1}},
+        },
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_claude("review this", model="fable", effort=effort)
+
+    assert out["ok"] is True
+    assert out["reply"] == "answer"
+    assert out["requested_model"] == "fable"
+    assert out["actual_model"] == "claude-fable-5"
+    assert out["requested_effort"] == effort
+    assert out["effective_effort"] is None  # Claude does not echo this value.
+    assert out["api_key_source"] == "none"
+    assert out["usage"]["input_tokens"] == 2
+    argv = calls[0]["cmd"]
+    assert argv[0] == "claude"
+    assert argv[1] == "-p"
+    assert argv[argv.index("--model") + 1] == "fable"
+    assert argv[argv.index("--effort") + 1] == effort
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in argv
+    assert argv[-1] == "review this"
+
+
+def test_ask_claude_default_effort_omits_flag(monkeypatch):
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "claude-sonnet-5"},
+        {"type": "result", "subtype": "success", "result": "ok"},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_claude("hello", model="sonnet", effort="default")
+
+    assert out["ok"] is True
+    assert "--effort" not in calls[0]["cmd"]
+    assert out["requested_effort"] == "default"
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "ultra", "", "HIGH"])
+def test_ask_claude_rejects_unsupported_effort(monkeypatch, effort):
+    calls = _capture_run(monkeypatch)
+
+    out = adapters.ask_claude("hello", model="fable", effort=effort)
+
+    assert out["ok"] is False
+    assert "effort" in out["error"].lower()
+    assert calls == []
+
+
+def test_ask_claude_reports_refusal_fallback(monkeypatch):
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "claude-fable-5"},
+        {
+            "type": "system",
+            "subtype": "model_refusal_fallback",
+            "original_model": "claude-fable-5",
+            "fallback_model": "claude-opus-4-8",
+            "api_refusal_category": "cyber",
+        },
+        {"type": "assistant", "message": {"model": "claude-opus-4-8", "content": []}},
+        {"type": "result", "subtype": "success", "result": "fallback answer"},
+    )
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_claude("review", model="fable", effort="high")
+
+    assert out["ok"] is True
+    assert out["actual_model"] == "claude-opus-4-8"
+    assert out["fallback"] == {
+        "type": "model_refusal_fallback",
+        "original_model": "claude-fable-5",
+        "fallback_model": "claude-opus-4-8",
+        "category": "cyber",
+    }
+
+
+def test_ask_claude_advisory_isolates_context_and_api_overrides(monkeypatch, tmp_path):
+    for name in adapters._CLAUDE_AUTH_OVERRIDE_ENV:
+        monkeypatch.setenv(name, "must-not-leak")
+    stdout = _claude_stream(
+        {
+            "type": "system",
+            "subtype": "init",
+            "model": "claude-fable-5",
+            "apiKeySource": "none",
+        },
+        {"type": "result", "subtype": "success", "result": "ok"},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+    monkeypatch.setattr(adapters.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
+
+    out = adapters.ask_claude("review", model="fable", effort="high", mode="advisory")
+
+    assert out["ok"] is True
+    argv = calls[0]["cmd"]
+    assert "--safe-mode" in argv
+    assert argv[argv.index("--tools") + 1] == ""
+    assert "--disable-slash-commands" in argv
+    assert "--no-session-persistence" in argv
+    assert "--system-prompt" in argv
+    assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
+    child_env = calls[0]["kwargs"]["env"]
+    assert all(name not in child_env for name in adapters._CLAUDE_AUTH_OVERRIDE_ENV)
+
+
+def test_ask_claude_rejects_unknown_mode(monkeypatch):
+    calls = _capture_run(monkeypatch)
+    out = adapters.ask_claude("hello", mode="unsafe")
+    assert out["ok"] is False
+    assert "mode" in out["error"].lower()
+    assert calls == []
+
+
+def test_ask_claude_maps_advisory_tempdir_failure(monkeypatch):
+    calls = _capture_run(monkeypatch)
+
+    def fail_mkdtemp(*, prefix):
+        raise OSError("no writable temp directory")
+
+    monkeypatch.setattr(adapters.tempfile, "mkdtemp", fail_mkdtemp)
+
+    out = adapters.ask_claude("hello", model="fable", mode="advisory")
+
+    assert out["ok"] is False
+    assert "temporary directory" in out["error"].lower()
+    assert "no writable temp directory" in out["error"]
+    assert calls == []
+
+
+def test_ask_claude_rejects_flag_shaped_model(monkeypatch):
+    calls = _capture_run(monkeypatch)
+    out = adapters.ask_claude("hello", model="--dangerously-skip-permissions")
+    assert out["ok"] is False
+    assert "model" in out["error"].lower()
+    assert calls == []
+
+
+def test_ask_claude_separates_flag_shaped_prompt(monkeypatch):
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "claude-fable-5"},
+        {"type": "result", "subtype": "success", "result": "ok"},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_claude("--model opus", model="fable")
+
+    assert out["ok"] is True
+    assert calls[0]["cmd"][-2:] == ["--", "--model opus"]
+
+
+def test_ask_claude_rejects_malformed_stream(monkeypatch):
+    _capture_run(monkeypatch, _FakeCompleted(stdout="not-json\n"))
+    out = adapters.ask_claude("hello", model="fable")
+    assert out["ok"] is False
+    assert "stream-json" in out["error"]
+
+
 def test_ask_unknown_agent_rejected(monkeypatch):
     calls = _capture_run(monkeypatch)
     out = adapters.ask("nobody", "hi")
@@ -87,7 +271,9 @@ def test_ask_missing_binary_is_handled(monkeypatch):
     _capture_run(monkeypatch, exc=FileNotFoundError("hermes not found"))
     out = adapters.ask("hermes", "x")
     assert out["ok"] is False
-    assert "not found" in out["error"].lower() or "not installed" in out["error"].lower()
+    assert (
+        "not found" in out["error"].lower() or "not installed" in out["error"].lower()
+    )
 
 
 def test_env_override_replaces_binary_but_keeps_subcommand(monkeypatch):
@@ -114,8 +300,10 @@ def test_deliver_uses_same_agent_dispatch(monkeypatch):
 # every Codex update, so a hardcoded path rots. Discovery picks the newest.
 # --------------------------------------------------------------------------
 
+
 def test_codex_discovery_picks_newest_install(monkeypatch, tmp_path):
     import os
+
     base = tmp_path / "OpenAI" / "Codex" / "bin"
     old = base / "aaaa1111"
     new = base / "bbbb2222"
@@ -160,6 +348,7 @@ def test_non_codex_agents_have_no_discovery(monkeypatch):
 # child must NOT inherit the JSON-RPC pipe) and decode robustly (an agent
 # emitting non-ASCII must not crash the tool with UnicodeDecodeError).
 # --------------------------------------------------------------------------
+
 
 def test_run_cmd_isolates_stdin_and_decodes_utf8(monkeypatch):
     monkeypatch.delenv("HARDLINE_HERMES_CMD", raising=False)
