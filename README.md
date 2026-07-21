@@ -44,7 +44,7 @@ splits the problem:
 | `history(limit=50, agent=None)` | Recent messages newest-first; `agent` matches sender or recipient. |
 | `ask_hermes(prompt)` | Live query → `hermes chat -Q -q`. |
 | `ask_codex(prompt)` | Live query → `codex exec`. |
-| `ask_claude(prompt)` | Live query → `claude -p`. |
+| `ask_claude(prompt, model=None, effort="default", mode="default")` | Live query → `claude -p`; optionally pins model/effort and returns actual-model/fallback telemetry. |
 
 Agents are the fixed set `claude`, `hermes`, `codex`. Identity is self-declared
 (`from_agent`) — convention, not enforced auth; every process runs as the same
@@ -84,6 +84,47 @@ appended automatically) via env var:
 
 Resolution precedence per agent: env override → (codex only) auto-discovery →
 bare command on `PATH`.
+
+### Claude model and effort selection
+
+`ask_claude` remains backward compatible: a prompt with no additional options
+uses the original plain `claude -p` path and returns `ok`/`reply`.
+
+For model-aware calls, set `model`, `effort`, or `mode`:
+
+```text
+ask_claude(
+  prompt="Review this design and identify the highest-risk assumption.",
+  model="fable",
+  effort="high",
+  mode="advisory",
+)
+```
+
+Supported Claude effort values are `default`, `low`, `medium`, `high`, `xhigh`,
+and `max`. `default` omits Claude Code's `--effort` flag. Unsupported values
+fail before spawning Claude; there is no silent downgrade.
+
+Optioned calls use Claude Code's `stream-json` output and add:
+
+- `requested_model` and the `actual_model` from the final assistant event;
+- `requested_effort` (`effective_effort` is `null`, because Claude Code does
+  not echo the provider's effective effort);
+- `api_key_source`, usage, model-usage, and rate-limit metadata;
+- `subscription_verified`, which is `true` only when advisory telemetry reports
+  `apiKeySource: none` and confirms that overage is not being used;
+- a parsed `fallback` object when Fable emits `model_refusal_fallback` and the
+  request continues on another model.
+
+`mode="advisory"` is intended for read-only model panels. It disables tools,
+slash commands, project customizations, and session persistence; runs in a
+fresh neutral directory with a fixed minimal system prompt; and removes
+Anthropic API-key/base-URL plus Bedrock/Vertex/Foundry overrides from the child
+environment. This reduces accidental API-provider routing, but trusted command
+wrappers and admin-managed Claude settings remain outside Hardline's control.
+After execution, advisory calls therefore fail closed unless runtime telemetry
+verifies first-party account auth with no overage. This is post-call evidence;
+it cannot undo a request already made by a misconfigured trusted wrapper.
 
 ## Register with an MCP client
 
@@ -146,6 +187,14 @@ skips per-agent when a CLI isn't reachable, so CI never runs it:
 # hermes usually isn't on PATH — point at its binary, same as production
 HARDLINE_LIVE_TESTS=1 HARDLINE_HERMES_CMD="/path/to/hermes" python -m pytest tests/test_live_agents.py -v
 ```
+
+The headless suite includes a deterministic MCP-to-executable E2E that captures
+the actual Claude argv and proves model/effort flags survive the full transport.
+The live module additionally launches Hardline over stdio, requests Fable at
+`low` effort in advisory mode, and verifies subscription/fallback telemetry.
+Claude does not echo effective effort, so provider-side effort cannot be
+asserted independently of the accepted CLI invocation. Live tests remain
+opt-in and consume plan tokens.
 
 ## License
 

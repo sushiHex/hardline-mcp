@@ -7,6 +7,7 @@ real MCP clients over stdio. A cross-instance send -> inbox -> ack round-trip
 through JSON-RPC is the closest a test can get to "agent A messages agent B"
 without launching the agents themselves.
 """
+
 from __future__ import annotations
 
 import json
@@ -56,9 +57,32 @@ async def test_headless_cross_instance_round_trip(tmp_path):
                 await a.initialize()
                 names = {t.name for t in (await a.list_tools()).tools}
                 assert {"send", "inbox", "ack", "history"} <= names
-                sent = _tool_dict(await a.call_tool("send", {
-                    "from_agent": "claude", "to_agent": "hermes",
-                    "message": "headless hi"}))
+                ask_claude = next(
+                    t for t in (await a.list_tools()).tools if t.name == "ask_claude"
+                )
+                properties = ask_claude.inputSchema["properties"]
+                assert properties["model"]["anyOf"][0]["type"] == "string"
+                assert properties["effort"]["default"] == "default"
+                assert properties["effort"]["enum"] == [
+                    "default",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max",
+                ]
+                assert properties["mode"]["default"] == "default"
+                assert properties["mode"]["enum"] == ["default", "advisory"]
+                sent = _tool_dict(
+                    await a.call_tool(
+                        "send",
+                        {
+                            "from_agent": "claude",
+                            "to_agent": "hermes",
+                            "message": "headless hi",
+                        },
+                    )
+                )
                 assert sent["ok"] is True
                 message_id = sent["message_id"]
 
@@ -87,6 +111,65 @@ async def test_headless_unknown_agent_rejected_over_protocol(tmp_path):
         async with stdio_client(_params(tmp_path / "mb.db")) as (r, w):
             async with ClientSession(r, w) as s:
                 await s.initialize()
-                res = _tool_dict(await s.call_tool("send", {
-                    "from_agent": "claude", "to_agent": "nobody", "message": "x"}))
+                res = _tool_dict(
+                    await s.call_tool(
+                        "send",
+                        {"from_agent": "claude", "to_agent": "nobody", "message": "x"},
+                    )
+                )
                 assert res["ok"] is False and "unknown" in res["error"].lower()
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="portable fake executable uses a POSIX shebang"
+)
+@pytest.mark.anyio
+async def test_headless_claude_effort_reaches_actual_executable(tmp_path):
+    """MCP -> server -> adapter -> executable argv, without spending plan tokens."""
+    capture = tmp_path / "claude-argv.json"
+    fake = tmp_path / "claude"
+    fake.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+import sys
+
+with open(os.environ["HARDLINE_CAPTURE_ARGV"], "w", encoding="utf-8") as fh:
+    json.dump(sys.argv[1:], fh)
+print(json.dumps({{"type": "system", "subtype": "init", "model": "claude-fable-5"}}))
+print(json.dumps({{"type": "result", "subtype": "success", "result": "captured"}}))
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "hardline_mcp.server"],
+        env={
+            **os.environ,
+            "HARDLINE_DB": str(tmp_path / "mb.db"),
+            "HARDLINE_CLAUDE_CMD": str(fake),
+            "HARDLINE_CAPTURE_ARGV": str(capture),
+        },
+    )
+
+    with anyio.fail_after(60):
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                payload = _tool_dict(
+                    await session.call_tool(
+                        "ask_claude",
+                        {
+                            "prompt": "capture this",
+                            "model": "fable",
+                            "effort": "xhigh",
+                        },
+                    )
+                )
+
+    assert payload["ok"] is True
+    argv = json.loads(capture.read_text(encoding="utf-8"))
+    assert argv[argv.index("--model") + 1] == "fable"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+    assert argv[-2:] == ["--", "capture this"]

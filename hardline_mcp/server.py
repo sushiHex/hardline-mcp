@@ -19,6 +19,7 @@ the same posture as the sibling vram-mcp's claim ledger.
 from __future__ import annotations
 
 import functools
+from typing import Literal
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
@@ -26,6 +27,9 @@ from mcp.server.fastmcp import FastMCP
 from . import adapters, mailbox
 
 mcp = FastMCP("hardline-mcp")
+
+ClaudeEffort = Literal["default", "low", "medium", "high", "xhigh", "max"]
+ClaudeMode = Literal["default", "advisory"]
 
 
 async def _in_thread(fn, *args, **kwargs):
@@ -35,6 +39,7 @@ async def _in_thread(fn, *args, **kwargs):
 
 # ── mailbox tools ────────────────────────────────────────────────────────────
 
+
 def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> dict:
     # Reject unknown agents up front: a typo'd recipient would otherwise persist
     # forever, unread and undeliverable — a silent black hole. Validate before
@@ -42,7 +47,10 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
     known = adapters.known_agents()
     unknown = [a for a in (from_agent, to_agent) if a not in known]
     if unknown:
-        return {"ok": False, "error": f"unknown agent(s) {unknown}; known: {sorted(known)}"}
+        return {
+            "ok": False,
+            "error": f"unknown agent(s) {unknown}; known: {sorted(known)}",
+        }
 
     result = mailbox.send(from_agent, to_agent, message)
     result["ok"] = True
@@ -106,6 +114,7 @@ async def history(limit: int = 50, agent: str | None = None) -> dict:
 
 # ── live query tools ─────────────────────────────────────────────────────────
 
+
 @mcp.tool()
 async def ask_hermes(prompt: str) -> dict:
     """Ask the Hermes agent (MrAnderson) a question and wait for its reply.
@@ -128,14 +137,30 @@ async def ask_codex(prompt: str) -> dict:
 
 
 @mcp.tool()
-async def ask_claude(prompt: str) -> dict:
+async def ask_claude(
+    prompt: str,
+    model: str | None = None,
+    effort: ClaudeEffort = "default",
+    mode: ClaudeMode = "default",
+) -> dict:
     """Ask Claude Code a question and wait for its reply.
 
-    Spawns a one-shot headless ``claude -p`` — the heaviest of the three (a
-    full Claude session per call). Use sparingly, for live answers. Returns
-    ``{"ok", "reply"}`` or ``{"ok": false, "error"}``.
+    With no options, preserves the original one-shot ``claude -p`` behavior.
+    ``model`` pins a Claude alias/full model ID. ``effort`` is one of
+    ``default|low|medium|high|xhigh|max``; ``default`` omits the flag. Mode
+    ``advisory`` disables tools/project customizations, runs in a neutral cwd,
+    strips API-provider overrides, and fails closed unless response telemetry
+    verifies first-party account auth without overage. Optioned calls return
+    actual-model, usage, rate-limit, auth-verification, and safeguard fallback
+    metadata in addition to ``ok``/``reply``.
     """
-    return await _in_thread(adapters.ask, "claude", prompt)
+    return await _in_thread(
+        adapters.ask_claude,
+        prompt,
+        model=model,
+        effort=effort,
+        mode=mode,
+    )
 
 
 def main() -> None:

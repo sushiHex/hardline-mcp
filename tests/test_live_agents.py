@@ -21,12 +21,18 @@ Run it on a real machine with:
     # hermes isn't on PATH — point at its bundled venv, same as production
     HARDLINE_LIVE_TESTS=1 HARDLINE_HERMES_CMD="C:/.../hermes.exe" python -m pytest tests/test_live_agents.py -v
 """
+
 from __future__ import annotations
 
 import os
 import shutil
+import sys
+import json
 
+import anyio
 import pytest
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from hardline_mcp import adapters
 
@@ -52,7 +58,9 @@ def _agent_available(agent: str) -> bool:
 @pytest.mark.parametrize("agent", ["hermes", "codex", "claude"])
 def test_live_ask_reaches_real_agent(agent):
     if not _agent_available(agent):
-        pytest.skip(f"{agent} CLI not reachable on this machine (resolved: {_resolved_exe(agent)!r})")
+        pytest.skip(
+            f"{agent} CLI not reachable on this machine (resolved: {_resolved_exe(agent)!r})"
+        )
 
     token = f"HARDLINE-LIVE-{agent.upper()}"
     result = adapters.ask(agent, f"Reply with exactly this and nothing else: {token}")
@@ -62,3 +70,61 @@ def test_live_ask_reaches_real_agent(agent):
         f"{agent} replied without the token (bridge reached the CLI but the "
         f"answer was unexpected): {result['reply']!r}"
     )
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_live_claude_model_and_effort_over_mcp():
+    """Real E2E: MCP schema -> server -> Claude CLI -> Fable subscription."""
+    if not _agent_available("claude"):
+        pytest.skip(
+            f"claude CLI not reachable on this machine (resolved: {_resolved_exe('claude')!r})"
+        )
+
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "hardline_mcp.server"],
+        env=dict(os.environ),
+    )
+    token = "HARDLINE-FABLE-EFFORT-E2E"
+    with anyio.fail_after(240):
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                response = await session.call_tool(
+                    "ask_claude",
+                    {
+                        "prompt": f"Reply with exactly: {token}",
+                        "model": "fable",
+                        "effort": "low",
+                        "mode": "advisory",
+                    },
+                )
+
+    payload = response.structuredContent
+    if payload is None:
+        text = next(
+            (
+                getattr(block, "text", None)
+                for block in response.content
+                if getattr(block, "text", None)
+            ),
+            None,
+        )
+        assert text is not None, response
+        payload = json.loads(text)
+    assert payload["ok"] is True, payload.get("error")
+    assert token in payload["reply"]
+    assert payload["requested_model"] == "fable"
+    assert payload["requested_effort"] == "low"
+    assert payload["api_key_source"] == "none"
+    assert payload["subscription_verified"] is True
+    if payload["fallback"] is None:
+        assert payload["actual_model"].startswith("claude-fable-")
+    else:
+        assert payload["fallback"]["original_model"].startswith("claude-fable-")
+        assert payload["actual_model"] == payload["fallback"]["fallback_model"]
