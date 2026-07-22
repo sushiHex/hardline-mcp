@@ -4,12 +4,19 @@ reached.
 - hermes -> ``hermes chat -Q -q <prompt>``  (quiet one-shot query; -Q strips
                                              the banner/box-chrome, -q = query)
 - codex  -> ``codex exec <prompt>``          (non-interactive execution)
-- claude -> ``claude -p <prompt>``           (headless print mode, with an
-                                             optioned model/effort path)
+- claude -> ``claude -p --model sonnet <prompt>``  (headless print mode; the
+                                             model is always pinned explicitly
+                                             - never left to whatever the
+                                             installed Claude CLI's own global
+                                             settings currently default to -
+                                             with an optioned model/effort path)
 
 ``ask()`` runs the command and returns the reply synchronously; ``deliver()``
 pushes a one-shot notice through the same dispatch. Both are pure subprocess
 wrappers (no ``mcp`` import) so the server layer can run them off-thread.
+``ask("claude", ...)``/``deliver("claude", ...)`` both route through
+``ask_claude()`` rather than dispatching claude directly, so the model pin
+applies uniformly.
 
 Executable resolution, in precedence order, per agent:
 
@@ -81,6 +88,12 @@ _DISPATCH = {
 # longer than the lightweight live-message adapters.
 _TIMEOUT_S = 180
 _CLAUDE_TIMEOUT_S = 900
+
+# A bare `claude -p` with no --model inherits whatever the installed Claude
+# CLI's own global settings currently default to - ambient, mutable state
+# (e.g. an interactive `/model` switch) that hardline must not silently
+# depend on. Every unqualified claude call pins this explicitly instead.
+_CLAUDE_DEFAULT_MODEL = "sonnet"
 
 _CLAUDE_EFFORTS = frozenset({"default", "low", "medium", "high", "xhigh", "max"})
 _CLAUDE_MODES = frozenset({"default", "advisory"})
@@ -192,6 +205,11 @@ def ask(agent: str, text: str) -> dict:
             "ok": False,
             "error": f"unknown agent {agent!r}; known: {sorted(_DISPATCH)}",
         }
+    if agent == "claude":
+        # Route through ask_claude so every claude invocation - including
+        # deliver()'s push-notice path - pins the explicit default model
+        # instead of falling through to the bare claude -p dispatch below.
+        return ask_claude(text)
     return _run_agent_cmd(agent, _prefix_for(agent) + [text])
 
 
@@ -297,13 +315,20 @@ def ask_claude(
 ) -> dict:
     """Query Claude Code with optional model/effort selection and telemetry.
 
-    With no options this preserves the historical ``claude -p`` behavior.
-    Supplying model/effort, or selecting advisory mode, enables stream-json so
-    callers can distinguish the requested model from the model actually served.
-    Advisory mode additionally strips API-provider overrides, disables tools and
-    project customizations, and runs in a neutral temporary directory. The
-    parsed result fails closed unless telemetry verifies first-party account
-    auth without overage; command wrappers and admin policy remain trusted.
+    Omitting ``model`` still pins an explicit default (the ``sonnet`` alias,
+    not a versioned model id - it resolves the same way an explicit
+    ``model="sonnet"`` would, so it tracks whatever Claude Code's own alias
+    resolution currently considers "sonnet") rather than falling through to
+    whatever the installed Claude CLI's own global settings currently select
+    for un-flagged ``claude -p`` calls - that default is ambient, mutable
+    state (e.g. an interactive ``/model`` switch) hardline must not silently
+    inherit. Supplying model/effort, or selecting advisory mode, enables
+    stream-json so callers can distinguish the requested model from the model
+    actually served. Advisory mode additionally strips API-provider
+    overrides, disables tools and project customizations, and runs in a
+    neutral temporary directory. The parsed result fails closed unless
+    telemetry verifies first-party account auth without overage; command
+    wrappers and admin policy remain trusted.
     """
     if effort not in _CLAUDE_EFFORTS:
         return {
@@ -315,7 +340,10 @@ def ask_claude(
             "ok": False,
             "error": f"unsupported Claude mode {mode!r}; expected one of {sorted(_CLAUDE_MODES)}",
         }
-    if model is not None and (
+    model_omitted = model is None
+    if model_omitted:
+        model = _CLAUDE_DEFAULT_MODEL
+    if (
         not isinstance(model, str)
         or not model
         or model.startswith("-")
@@ -326,13 +354,18 @@ def ask_claude(
             "error": "Claude model must be a non-empty, non-option identifier without whitespace",
         }
 
-    # Exact backward compatibility for existing callers and delivery notices.
-    if model is None and effort == "default" and mode == "default":
-        return ask("claude", prompt)
+    # Exact backward-compatible reply SHAPE ({"ok","reply"}, no stream-json
+    # telemetry) for the unqualified default call only - a lightweight plain
+    # `claude -p` invocation, just with the model pinned explicitly. An
+    # *explicit* model="sonnet" still gets full telemetry below, same as any
+    # other explicit model selection - "omitted" and "happens to equal the
+    # default" are different caller intents.
+    if model_omitted and effort == "default" and mode == "default":
+        return _run_agent_cmd(
+            "claude", _prefix_for("claude") + ["--model", model, "--", prompt]
+        )
 
-    argv = _prefix_for("claude")
-    if model is not None:
-        argv += ["--model", model]
+    argv = _prefix_for("claude") + ["--model", model]
     if effort != "default":
         argv += ["--effort", effort]
     argv += [
