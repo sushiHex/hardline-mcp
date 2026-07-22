@@ -85,6 +85,17 @@ appended automatically) via env var:
 Resolution precedence per agent: env override → (codex only) auto-discovery →
 bare command on `PATH`.
 
+Live queries are bounded so a hung CLI cannot wedge its MCP caller. Hermes and
+Codex retain a 180-second default. Claude defaults to 900 seconds because
+high-effort review and reasoning calls routinely exceed three minutes. Override
+the Claude ceiling with a positive integer number of seconds:
+
+```text
+HARDLINE_CLAUDE_TIMEOUT_S=1200
+```
+
+An invalid or non-positive value fails the tool call before spawning Claude.
+
 ### Claude model and effort selection
 
 `ask_claude` remains backward compatible: a prompt with no additional options

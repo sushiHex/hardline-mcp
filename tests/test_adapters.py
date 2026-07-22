@@ -39,6 +39,7 @@ def test_ask_hermes_shells_hermes_chat(monkeypatch):
     assert "chat" in argv and "-Q" in argv and "what is your status" in argv
     # -Q must precede -q so -q consumes the prompt, not -Q
     assert argv.index("-Q") < argv.index("-q")
+    assert calls[0]["kwargs"]["timeout"] == 180
 
 
 def test_ask_codex_shells_codex_exec(monkeypatch):
@@ -62,12 +63,62 @@ def test_ask_claude_shells_claude_p(monkeypatch):
     assert argv[0] == "claude" and "-p" in argv
 
 
+def test_ask_claude_uses_longer_default_timeout(monkeypatch):
+    monkeypatch.delenv("HARDLINE_CLAUDE_TIMEOUT_S", raising=False)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="claude reply"))
+
+    out = adapters.ask("claude", "perform a substantive review")
+
+    assert out["ok"] is True
+    assert calls[0]["kwargs"]["timeout"] == 900
+
+
+def test_ask_claude_timeout_can_be_configured(monkeypatch):
+    monkeypatch.setenv("HARDLINE_CLAUDE_TIMEOUT_S", "1200")
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="claude reply"))
+
+    out = adapters.ask("claude", "perform a very substantive review")
+
+    assert out["ok"] is True
+    assert calls[0]["kwargs"]["timeout"] == 1200
+
+
+@pytest.mark.parametrize("value", ["forever", "", "   ", "0", "-1"])
+@pytest.mark.parametrize("optioned", [False, True])
+def test_ask_claude_rejects_invalid_configured_timeout(monkeypatch, value, optioned):
+    monkeypatch.setenv("HARDLINE_CLAUDE_TIMEOUT_S", value)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="must not run"))
+
+    if optioned:
+        out = adapters.ask_claude("hello", model="fable")
+    else:
+        out = adapters.ask("claude", "hello")
+
+    assert out["ok"] is False
+    assert "HARDLINE_CLAUDE_TIMEOUT_S" in out["error"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("agent", ["hermes", "codex"])
+def test_non_claude_timeout_is_not_environment_configurable(monkeypatch, agent):
+    monkeypatch.setenv(f"HARDLINE_{agent.upper()}_TIMEOUT_S", "1200")
+    if agent == "codex":
+        monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="reply"))
+
+    out = adapters.ask(agent, "hello")
+
+    assert out["ok"] is True
+    assert calls[0]["kwargs"]["timeout"] == 180
+
+
 def _claude_stream(*events):
     return "\n".join(json.dumps(event) for event in events) + "\n"
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
 def test_ask_claude_routes_model_and_effort(monkeypatch, effort):
+    monkeypatch.delenv("HARDLINE_CLAUDE_TIMEOUT_S", raising=False)
     stdout = _claude_stream(
         {
             "type": "system",
@@ -110,6 +161,7 @@ def test_ask_claude_routes_model_and_effort(monkeypatch, effort):
     assert argv[argv.index("--output-format") + 1] == "stream-json"
     assert "--verbose" in argv
     assert argv[-1] == "review this"
+    assert calls[0]["kwargs"]["timeout"] == 900
 
 
 def test_ask_claude_default_effort_omits_flag(monkeypatch):
