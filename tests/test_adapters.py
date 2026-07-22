@@ -59,8 +59,62 @@ def test_ask_claude_shells_claude_p(monkeypatch):
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="claude reply"))
     out = adapters.ask("claude", "hello")
     assert out["ok"] is True
+    assert out["reply"] == "claude reply"
     argv = calls[0]["cmd"]
     assert argv[0] == "claude" and "-p" in argv
+    # Default calls must pin an explicit model - never the bare command,
+    # which would silently inherit the installed Claude CLI's own global
+    # default (ambient, mutable state; see test_default_model_is_not_hardcoded_version).
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    # Prompt is separated so a prompt starting with "-" can't be read as a flag.
+    assert argv[-2:] == ["--", "hello"]
+
+
+def test_deliver_to_claude_also_pins_default_model(monkeypatch):
+    """The send(deliver=true) push-notice path uses deliver() == ask(), which
+    must get the same model pin as a direct ask_claude() call - not the raw,
+    unpinned claude -p dispatch other agents use."""
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="delivered"))
+    out = adapters.deliver("claude", "[hardline] new message #1 from hermes.")
+    assert out["ok"] is True
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--model") + 1] == "sonnet"
+
+
+def test_default_model_is_not_hardcoded_version():
+    """`sonnet` is a tier alias Claude Code itself resolves, not a versioned
+    id like "claude-sonnet-5" - so this constant never needs bumping when a
+    new Sonnet ships, matching how explicit model="fable"/"opus" already work."""
+    assert adapters._CLAUDE_DEFAULT_MODEL == "sonnet"
+    assert not any(char.isdigit() for char in adapters._CLAUDE_DEFAULT_MODEL)
+
+
+def test_ask_claude_explicit_sonnet_still_gets_full_telemetry(monkeypatch):
+    """An *explicit* model="sonnet" is a different caller intent than
+    omitting model - it must still take the stream-json/telemetry path,
+    same as any other explicit model, not the lightweight default shortcut."""
+    stdout = _claude_stream(
+        {
+            "type": "system",
+            "subtype": "init",
+            "model": "claude-sonnet-5",
+            "apiKeySource": "none",
+        },
+        {
+            "type": "assistant",
+            "message": {"model": "claude-sonnet-5", "content": []},
+        },
+        {"type": "result", "subtype": "success", "result": "reviewed"},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_claude("hello", model="sonnet")
+
+    assert out["ok"] is True
+    assert out["actual_model"] == "claude-sonnet-5"
+    assert out["requested_model"] == "sonnet"
+    argv = calls[0]["cmd"]
+    assert "--output-format" in argv and "stream-json" in argv
 
 
 def test_ask_claude_uses_longer_default_timeout(monkeypatch):

@@ -44,7 +44,7 @@ splits the problem:
 | `history(limit=50, agent=None)` | Recent messages newest-first; `agent` matches sender or recipient. |
 | `ask_hermes(prompt)` | Live query → `hermes chat -Q -q`. |
 | `ask_codex(prompt)` | Live query → `codex exec`. |
-| `ask_claude(prompt, model=None, effort="default", mode="default")` | Live query → `claude -p`; optionally pins model/effort and returns actual-model/fallback telemetry. |
+| `ask_claude(prompt, model=None, effort="default", mode="default")` | Live query → `claude -p --model sonnet`; optionally pins a different model/effort and returns actual-model/fallback telemetry. |
 
 Agents are the fixed set `claude`, `hermes`, `codex`. Identity is self-declared
 (`from_agent`) — convention, not enforced auth; every process runs as the same
@@ -99,7 +99,21 @@ An invalid or non-positive value fails the tool call before spawning Claude.
 ### Claude model and effort selection
 
 `ask_claude` remains backward compatible: a prompt with no additional options
-uses the original plain `claude -p` path and returns `ok`/`reply`.
+uses a plain `claude -p` path and returns `ok`/`reply`. That path *always*
+explicitly pins `--model sonnet` rather than omitting `--model` — a bare
+`claude -p` inherits whatever the installed Claude CLI's own global settings
+currently default to, which is ambient, mutable state (an interactive
+`/model` switch changes it for every unflagged invocation, including
+hardline's). `sonnet` is Claude Code's own tier alias, not a versioned model
+id, so it tracks whichever model Claude Code itself currently resolves
+`sonnet` to — the same mechanism `model="fable"`/`model="opus"` already rely
+on — and never needs bumping in code when a new Sonnet ships. This pin
+applies uniformly to `ask_claude(prompt)` and to `send(..., to_agent="claude",
+deliver=true)`'s push-notice path — both spawn `claude` the same way. Passing
+`model="sonnet"` explicitly resolves to the same model but is a *different*
+caller intent than omitting it, so it takes the full telemetry path below
+(returning `actual_model`, usage, etc.) instead of the plain `ok`/`reply`
+shortcut — the same as any other explicit `model=`.
 
 For model-aware calls, set `model`, `effort`, or `mode`:
 
