@@ -76,9 +76,11 @@ _DISPATCH = {
     "claude": ("claude", ["-p"], "HARDLINE_CLAUDE_CMD"),
 }
 
-# ask()/deliver() spawn a whole agent session — generous ceiling, but bounded
-# so a hung target can never wedge the caller forever.
+# ask()/deliver() spawn a whole agent session — bounded so a hung target can
+# never wedge the caller forever. Claude reasoning/review runs routinely need
+# longer than the lightweight live-message adapters.
 _TIMEOUT_S = 180
+_CLAUDE_TIMEOUT_S = 900
 
 _CLAUDE_EFFORTS = frozenset({"default", "low", "medium", "high", "xhigh", "max"})
 _CLAUDE_MODES = frozenset({"default", "advisory"})
@@ -115,8 +117,28 @@ def known_agents() -> tuple[str, ...]:
     return tuple(_DISPATCH)
 
 
+def _timeout_for(agent: str) -> int:
+    if agent != "claude":
+        return _TIMEOUT_S
+    key = "HARDLINE_CLAUDE_TIMEOUT_S"
+    if key not in os.environ:
+        return _CLAUDE_TIMEOUT_S
+    raw = os.environ[key].strip()
+    try:
+        timeout_s = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{key} must be a positive integer number of seconds") from exc
+    if timeout_s <= 0:
+        raise ValueError(f"{key} must be a positive integer number of seconds")
+    return timeout_s
+
+
 def _run_cmd(
-    argv: list[str], *, env: dict[str, str] | None = None, cwd: str | None = None
+    argv: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+    timeout_s: int = _TIMEOUT_S,
 ) -> dict:
     """Run argv, capturing text output. Never raises — every failure mode is
     mapped to ``{"ok": False, "error": ...}`` so one dead target can't crash
@@ -136,12 +158,12 @@ def _run_cmd(
             encoding="utf-8",
             errors="replace",
             stdin=subprocess.DEVNULL,
-            timeout=_TIMEOUT_S,
+            timeout=timeout_s,
             env=env,
             cwd=cwd,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"timeout after {_TIMEOUT_S}s"}
+        return {"ok": False, "error": f"timeout after {timeout_s}s"}
     except FileNotFoundError:
         return {"ok": False, "error": f"command not found / not installed: {argv[0]!r}"}
     except OSError as e:
@@ -150,6 +172,14 @@ def _run_cmd(
         detail = (proc.stderr or proc.stdout or "").strip()
         return {"ok": False, "error": f"exit {proc.returncode}: {detail}"}
     return {"ok": True, "reply": (proc.stdout or "").strip()}
+
+
+def _run_agent_cmd(agent: str, argv: list[str], **kwargs) -> dict:
+    try:
+        timeout_s = _timeout_for(agent)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    return _run_cmd(argv, timeout_s=timeout_s, **kwargs)
 
 
 def ask(agent: str, text: str) -> dict:
@@ -162,7 +192,7 @@ def ask(agent: str, text: str) -> dict:
             "ok": False,
             "error": f"unknown agent {agent!r}; known: {sorted(_DISPATCH)}",
         }
-    return _run_cmd(_prefix_for(agent) + [text])
+    return _run_agent_cmd(agent, _prefix_for(agent) + [text])
 
 
 def _parse_claude_stream(
@@ -338,7 +368,12 @@ def ask_claude(
     argv += ["--", prompt]
 
     try:
-        run = _run_cmd(argv, env=child_env, cwd=neutral_cwd)
+        run = _run_agent_cmd(
+            "claude",
+            argv,
+            env=child_env,
+            cwd=neutral_cwd,
+        )
     finally:
         if neutral_cwd:
             shutil.rmtree(neutral_cwd, ignore_errors=True)
