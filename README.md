@@ -43,7 +43,7 @@ splits the problem:
 | `ack(message_id)` | Mark read (idempotent). |
 | `history(limit=50, agent=None)` | Recent messages newest-first; `agent` matches sender or recipient. |
 | `ask_hermes(prompt)` | Live query → `hermes chat -Q -q`. |
-| `ask_codex(prompt)` | Live query → `codex exec`. |
+| `ask_codex(prompt, model=None, effort="default", mode="default", workdir=None)` | Ephemeral live query → `codex exec --model gpt-5.6-sol`; optional routing, isolation, and telemetry. |
 | `ask_claude(prompt, model=None, effort="default", mode="default")` | Live query → `claude -p --model sonnet`; optionally pins a different model/effort and returns actual-model/fallback telemetry. |
 
 Agents are the fixed set `claude`, `hermes`, `codex`. Identity is self-declared
@@ -85,16 +85,69 @@ appended automatically) via env var:
 Resolution precedence per agent: env override → (codex only) auto-discovery →
 bare command on `PATH`.
 
-Live queries are bounded so a hung CLI cannot wedge its MCP caller. Hermes and
-Codex retain a 180-second default. Claude defaults to 900 seconds because
+Live queries are bounded so a hung CLI cannot wedge its MCP caller. Hermes
+retains a 180-second default. Claude and Codex default to 900 seconds because
 high-effort review and reasoning calls routinely exceed three minutes. Override
-the Claude ceiling with a positive integer number of seconds:
+either ceiling with a positive integer number of seconds:
 
 ```text
 HARDLINE_CLAUDE_TIMEOUT_S=1200
+HARDLINE_CODEX_TIMEOUT_S=1200
 ```
 
-An invalid or non-positive value fails the tool call before spawning Claude.
+An invalid or non-positive value fails the tool call before spawning the agent.
+
+### Codex model, effort, isolation, and telemetry
+
+`ask_codex(prompt)` preserves the original compact `ok`/`reply` response but
+now explicitly pins `gpt-5.6-sol`, creates an ephemeral session, and terminates
+option parsing before the prompt. The same safe pinned path applies to
+`send(..., to_agent="codex", deliver=true)`. Hardline therefore no longer
+inherits Codex CLI's mutable ambient model, persists one-shot review sessions,
+or interprets a flag-shaped prompt as a CLI option.
+
+Pass `model`, `effort`, `mode`, or `workdir` for the structured path:
+
+```text
+ask_codex(
+  prompt="Review the cancellation protocol.",
+  model="gpt-5.6-terra",
+  effort="xhigh",
+  workdir="C:/src/project",
+)
+```
+
+Supported efforts are `default`, `low`, `medium`, `high`, `xhigh`, `max`, and
+`ultra`. `default` leaves Codex's model-specific reasoning default intact;
+other values are transported as `model_reasoning_effort`. Unsupported values
+and unsafe model identifiers fail before the process is spawned. Any explicit
+`workdir` must already exist, is resolved once to an absolute path, and is
+passed both as the child cwd and Codex `-C` (so relative paths are not applied
+twice).
+
+Structured calls use `codex exec --json` and return:
+
+- `requested_model` and `requested_effort`;
+- the final agent message, ephemeral `thread_id`, and structured token `usage`;
+- `actual_model: null` and `effective_effort: null`, deliberately: Codex CLI
+  0.145 JSONL does not emit either value, so Hardline does not guess;
+- structured `turn.failed` errors (including nonzero process exits) instead of a
+  generic subprocess error, while terminal-event ordering prevents a transient
+  retry `error` from overriding a later successful `turn.completed`.
+
+`mode="advisory"` is intended for isolated read-only model panels. It requires
+the local Codex auth configuration to declare `auth_mode: chatgpt`, removes
+OpenAI/Azure API-provider environment overrides, copies only `auth.json` into a
+temporary `CODEX_HOME` (so global `AGENTS.md`/`AGENTS.override.md` guidance is
+not inherited), ignores user configuration and rules, disables session
+persistence, uses a separate fresh neutral workspace, selects the read-only
+sandbox, and supplies fixed defensive developer instructions.
+An explicit `workdir` is rejected in this mode because it would defeat neutral
+isolation. The response reports `subscription_configured: true` after the local
+preflight but leaves `subscription_verified: null`: unlike Claude, Codex JSONL
+does not expose runtime auth-source or overage telemetry. This distinction is
+intentional; local configuration is not post-call billing proof. Trusted binary
+overrides and platform sandbox enforcement remain outside Hardline's control.
 
 ### Claude model and effort selection
 
@@ -213,13 +266,14 @@ skips per-agent when a CLI isn't reachable, so CI never runs it:
 HARDLINE_LIVE_TESTS=1 HARDLINE_HERMES_CMD="/path/to/hermes" python -m pytest tests/test_live_agents.py -v
 ```
 
-The headless suite includes a deterministic MCP-to-executable E2E that captures
-the actual Claude argv and proves model/effort flags survive the full transport.
-The live module additionally launches Hardline over stdio, requests Fable at
-`low` effort in advisory mode, and verifies subscription/fallback telemetry.
-Claude does not echo effective effort, so provider-side effort cannot be
-asserted independently of the accepted CLI invocation. Live tests remain
-opt-in and consume plan tokens.
+The headless suite includes deterministic MCP-to-executable E2Es that capture
+the actual Claude and Codex argv and prove model/effort options survive the full
+transport. The live module additionally launches Hardline over stdio, requests
+Fable and Sol at `low` effort in advisory mode, and verifies each CLI's truthful
+telemetry contract. Claude does not echo effective effort; Codex JSONL echoes
+neither effective effort nor served model. Those fields therefore remain null
+rather than being inferred from the requested options. Live tests remain opt-in
+and consume plan tokens.
 
 ## License
 

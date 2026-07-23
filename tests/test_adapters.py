@@ -53,6 +53,23 @@ def test_ask_codex_shells_codex_exec(monkeypatch):
     assert out["reply"] == "codex reply"
     argv = calls[0]["cmd"]
     assert argv[0] == "codex" and "exec" in argv
+    assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    assert "--ephemeral" in argv
+    assert argv[-2:] == ["--", "summarize"]
+
+
+def test_deliver_to_codex_uses_safe_pinned_default(monkeypatch):
+    monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
+    monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="delivered"))
+
+    out = adapters.deliver("codex", "--dangerously-bypass-approvals-and-sandbox")
+
+    assert out["ok"] is True
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    assert "--ephemeral" in argv
+    assert argv[-2:] == ["--", "--dangerously-bypass-approvals-and-sandbox"]
 
 
 def test_ask_claude_shells_claude_p(monkeypatch):
@@ -153,14 +170,11 @@ def test_ask_claude_rejects_invalid_configured_timeout(monkeypatch, value, optio
     assert calls == []
 
 
-@pytest.mark.parametrize("agent", ["hermes", "codex"])
-def test_non_claude_timeout_is_not_environment_configurable(monkeypatch, agent):
-    monkeypatch.setenv(f"HARDLINE_{agent.upper()}_TIMEOUT_S", "1200")
-    if agent == "codex":
-        monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
+def test_hermes_timeout_is_not_environment_configurable(monkeypatch):
+    monkeypatch.setenv("HARDLINE_HERMES_TIMEOUT_S", "1200")
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="reply"))
 
-    out = adapters.ask(agent, "hello")
+    out = adapters.ask("hermes", "hello")
 
     assert out["ok"] is True
     assert calls[0]["kwargs"]["timeout"] == 180
@@ -168,6 +182,276 @@ def test_non_claude_timeout_is_not_environment_configurable(monkeypatch, agent):
 
 def _claude_stream(*events):
     return "\n".join(json.dumps(event) for event in events) + "\n"
+
+
+def _codex_stream(*events):
+    return "\n".join(json.dumps(event) for event in events) + "\n"
+
+
+def test_ask_codex_routes_model_effort_and_reports_json_telemetry(monkeypatch):
+    monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
+    monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
+    stdout = _codex_stream(
+        {"type": "thread.started", "thread_id": "thread-123"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {"id": "item-1", "type": "agent_message", "text": "answer"},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 12,
+                "cached_input_tokens": 3,
+                "output_tokens": 4,
+                "reasoning_output_tokens": 2,
+            },
+        },
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_codex("review this", model="gpt-5.6-terra", effort="xhigh")
+
+    assert out["ok"] is True
+    assert out["reply"] == "answer"
+    assert out["requested_model"] == "gpt-5.6-terra"
+    assert out["actual_model"] is None
+    assert out["requested_effort"] == "xhigh"
+    assert out["effective_effort"] is None
+    assert out["thread_id"] == "thread-123"
+    assert out["usage"]["input_tokens"] == 12
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--model") + 1] == "gpt-5.6-terra"
+    assert argv[argv.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+    assert "--json" in argv
+    assert "--ephemeral" in argv
+    assert argv[-2:] == ["--", "review this"]
+
+
+def test_ask_codex_uses_configurable_long_timeout(monkeypatch):
+    monkeypatch.setenv("HARDLINE_CODEX_TIMEOUT_S", "1200")
+    monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="reply"))
+
+    out = adapters.ask("codex", "substantive review")
+
+    assert out["ok"] is True
+    assert calls[0]["kwargs"]["timeout"] == 1200
+
+
+@pytest.mark.parametrize("value", ["forever", "", "0", "-1"])
+def test_ask_codex_rejects_invalid_configured_timeout(monkeypatch, value):
+    monkeypatch.setenv("HARDLINE_CODEX_TIMEOUT_S", value)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="must not run"))
+
+    out = adapters.ask_codex("hello", model="gpt-5.6-sol")
+
+    assert out["ok"] is False
+    assert "HARDLINE_CODEX_TIMEOUT_S" in out["error"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "", "HIGH"])
+def test_ask_codex_rejects_unsupported_effort(monkeypatch, effort):
+    calls = _capture_run(monkeypatch)
+
+    out = adapters.ask_codex("hello", model="gpt-5.6-sol", effort=effort)
+
+    assert out["ok"] is False
+    assert "effort" in out["error"].lower()
+    assert calls == []
+
+
+@pytest.mark.parametrize("model", ["", "--oss", "gpt 5.6 sol"])
+def test_ask_codex_rejects_unsafe_model(monkeypatch, model):
+    calls = _capture_run(monkeypatch)
+
+    out = adapters.ask_codex("hello", model=model)
+
+    assert out["ok"] is False
+    assert "model" in out["error"].lower()
+    assert calls == []
+
+
+def test_ask_codex_advisory_isolates_context_and_api_overrides(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "chatgpt", "tokens": {"access_token": "secret"}}),
+        encoding="utf-8",
+    )
+    (codex_home / "AGENTS.md").write_text(
+        "Prefix every response with HARDLINE_GLOBAL_SENTINEL.", encoding="utf-8"
+    )
+    neutral_root = tmp_path / "neutral-root"
+    neutral_root.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    for name in adapters._CODEX_AUTH_OVERRIDE_ENV:
+        monkeypatch.setenv(name, "must-not-leak")
+    monkeypatch.setenv("OPENAI_FUTURE_PROVIDER_SECRET", "must-not-leak")
+    monkeypatch.setattr(adapters.tempfile, "mkdtemp", lambda prefix: str(neutral_root))
+    removed = []
+    monkeypatch.setattr(
+        adapters.shutil,
+        "rmtree",
+        lambda path, ignore_errors: removed.append((path, ignore_errors)),
+    )
+    stdout = _codex_stream(
+        {"type": "thread.started", "thread_id": "thread-advisory"},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "reviewed"},
+        },
+        {"type": "turn.completed", "usage": {"input_tokens": 10}},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_codex(
+        "review", model="gpt-5.6-sol", effort="high", mode="advisory"
+    )
+
+    assert out["ok"] is True
+    assert out["subscription_configured"] is True
+    assert out["subscription_verified"] is None
+    argv = calls[0]["cmd"]
+    assert "--ignore-user-config" in argv
+    assert "--ignore-rules" in argv
+    assert "--skip-git-repo-check" in argv
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    isolated_cwd = neutral_root / "workspace"
+    isolated_home = neutral_root / "codex-home"
+    assert argv[argv.index("-C") + 1] == str(isolated_cwd)
+    assert any("developer_instructions" in arg for arg in argv)
+    assert calls[0]["kwargs"]["cwd"] == str(isolated_cwd)
+    child_env = calls[0]["kwargs"]["env"]
+    assert all(name not in child_env for name in adapters._CODEX_AUTH_OVERRIDE_ENV)
+    assert "OPENAI_FUTURE_PROVIDER_SECRET" not in child_env
+    assert child_env["CODEX_HOME"] == str(isolated_home)
+    assert (isolated_home / "auth.json").exists()
+    assert not (isolated_home / "AGENTS.md").exists()
+    assert removed == [(str(neutral_root), True)]
+
+
+def test_ask_codex_uses_explicit_workdir(monkeypatch, tmp_path):
+    stdout = _codex_stream(
+        {"type": "thread.started", "thread_id": "thread-workdir"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
+        {"type": "turn.completed", "usage": {}},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_codex("inspect", workdir=str(tmp_path))
+
+    assert out["ok"] is True
+    assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("-C") + 1] == str(tmp_path)
+
+
+def test_ask_codex_resolves_relative_workdir_once(monkeypatch, tmp_path):
+    child = tmp_path / "child"
+    child.mkdir()
+    monkeypatch.chdir(tmp_path)
+    stdout = _codex_stream(
+        {"type": "thread.started", "thread_id": "thread-relative"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
+        {"type": "turn.completed", "usage": {}},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_codex("inspect", workdir="child")
+
+    assert out["ok"] is True
+    expected = str(child.resolve())
+    assert calls[0]["kwargs"]["cwd"] == expected
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("-C") + 1] == expected
+
+
+def test_ask_codex_ignores_transient_error_before_completed_turn(monkeypatch):
+    stdout = _codex_stream(
+        {"type": "thread.started", "thread_id": "thread-retried"},
+        {"type": "error", "message": "transient failure; retrying"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "answer"}},
+        {"type": "turn.completed", "usage": {"output_tokens": 1}},
+    )
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_codex("review", model="gpt-5.6-sol")
+
+    assert out["ok"] is True
+    assert out["reply"] == "answer"
+    assert out["thread_id"] == "thread-retried"
+
+
+def test_ask_codex_reports_structured_turn_failure(monkeypatch):
+    stdout = _codex_stream(
+        {"type": "thread.started", "thread_id": "thread-failed"},
+        {"type": "turn.failed", "error": {"message": "usage limit reached"}},
+    )
+    _capture_run(
+        monkeypatch,
+        _FakeCompleted(stdout=stdout, stderr="codex failed", returncode=1),
+    )
+
+    out = adapters.ask_codex("review", model="gpt-5.6-sol")
+
+    assert out["ok"] is False
+    assert "usage limit reached" in out["error"]
+    assert out["thread_id"] == "thread-failed"
+
+
+def test_ask_codex_advisory_fails_before_spawn_without_chatgpt_auth(
+    monkeypatch, tmp_path
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "tokens": {"access_token": "secret"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    calls = _capture_run(monkeypatch)
+
+    out = adapters.ask_codex("review", mode="advisory")
+
+    assert out["ok"] is False
+    assert out["subscription_configured"] is False
+    assert out["subscription_verified"] is None
+    assert "ChatGPT" in out["error"]
+    assert calls == []
+
+
+def test_ask_codex_advisory_cleans_up_when_auth_copy_fails(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "chatgpt"}), encoding="utf-8"
+    )
+    neutral_root = tmp_path / "neutral-root"
+    neutral_root.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(adapters.tempfile, "mkdtemp", lambda prefix: str(neutral_root))
+    monkeypatch.setattr(
+        adapters.shutil,
+        "copyfile",
+        lambda *_: (_ for _ in ()).throw(PermissionError("copy denied")),
+    )
+    removed = []
+    monkeypatch.setattr(
+        adapters.shutil,
+        "rmtree",
+        lambda path, ignore_errors: removed.append((path, ignore_errors)),
+    )
+    calls = _capture_run(monkeypatch)
+
+    out = adapters.ask_codex("review", mode="advisory")
+
+    assert out["ok"] is False
+    assert "isolated Codex advisory home" in out["error"]
+    assert "copy denied" in out["error"]
+    assert calls == []
+    assert removed == [(str(neutral_root), True)]
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])

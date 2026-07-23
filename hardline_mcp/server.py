@@ -30,6 +30,8 @@ mcp = FastMCP("hardline-mcp")
 
 ClaudeEffort = Literal["default", "low", "medium", "high", "xhigh", "max"]
 ClaudeMode = Literal["default", "advisory"]
+CodexEffort = Literal["default", "low", "medium", "high", "xhigh", "max", "ultra"]
+CodexMode = Literal["default", "advisory"]
 
 
 async def _in_thread(fn, *args, **kwargs):
@@ -127,13 +129,32 @@ async def ask_hermes(prompt: str) -> dict:
 
 
 @mcp.tool()
-async def ask_codex(prompt: str) -> dict:
+async def ask_codex(
+    prompt: str,
+    model: str | None = None,
+    effort: CodexEffort = "default",
+    mode: CodexMode = "default",
+    workdir: str | None = None,
+) -> dict:
     """Ask Codex a question and wait for its reply.
 
-    Spawns a one-shot ``codex exec``. Slower/heavier than the mailbox; use for
-    live answers. Returns ``{"ok", "reply"}`` or ``{"ok": false, "error"}``.
+    Spawns an ephemeral ``codex exec`` pinned to GPT-5.6 Sol by default.
+    Optional model/effort selection enables JSONL usage/thread telemetry.
+    Advisory mode uses ChatGPT auth preflight, a temporary auth-only CODEX_HOME,
+    a neutral read-only directory, ignored user/project configuration, and
+    stripped API-provider overrides.
+    ``workdir`` targets a repository in default mode and is rejected in advisory
+    mode. Codex JSONL does not currently report served model/effective effort,
+    so those telemetry fields remain null rather than being guessed.
     """
-    return await _in_thread(adapters.ask, "codex", prompt)
+    return await _in_thread(
+        adapters.ask_codex,
+        prompt,
+        model=model,
+        effort=effort,
+        mode=mode,
+        workdir=workdir,
+    )
 
 
 @mcp.tool()

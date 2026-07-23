@@ -21,6 +21,41 @@ async def test_all_seven_tools_registered():
 
 
 @pytest.mark.anyio
+async def test_ask_codex_forwards_model_effort_mode_and_workdir(monkeypatch):
+    captured = {}
+
+    def fake_ask_codex(
+        prompt, *, model=None, effort="default", mode="default", workdir=None
+    ):
+        captured.update(
+            prompt=prompt,
+            model=model,
+            effort=effort,
+            mode=mode,
+            workdir=workdir,
+        )
+        return {"ok": True, "reply": "reviewed", "usage": {"input_tokens": 10}}
+
+    monkeypatch.setattr(server.adapters, "ask_codex", fake_ask_codex)
+
+    result = await server.ask_codex(
+        prompt="review this",
+        model="gpt-5.6-terra",
+        effort="xhigh",
+        mode="advisory",
+    )
+
+    assert result["ok"] is True
+    assert captured == {
+        "prompt": "review this",
+        "model": "gpt-5.6-terra",
+        "effort": "xhigh",
+        "mode": "advisory",
+        "workdir": None,
+    }
+
+
+@pytest.mark.anyio
 async def test_ask_claude_forwards_model_effort_and_mode(monkeypatch):
     captured = {}
 
