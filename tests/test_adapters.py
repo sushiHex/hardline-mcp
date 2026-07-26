@@ -368,6 +368,52 @@ def test_ask_codex_resolves_relative_workdir_once(monkeypatch, tmp_path):
     assert argv[argv.index("-C") + 1] == expected
 
 
+def test_ask_codex_write_requires_workdir(monkeypatch):
+    out = adapters.ask_codex("patch it", write=True)
+    assert out["ok"] is False
+    assert "workdir" in out["error"].lower()
+
+
+def test_ask_codex_write_rejects_advisory_mode(monkeypatch, tmp_path):
+    out = adapters.ask_codex(
+        "patch it", write=True, mode="advisory"
+    )
+    assert out["ok"] is False
+    assert "advisory" in out["error"].lower()
+
+
+def test_ask_codex_write_adds_workspace_write_sandbox(monkeypatch, tmp_path):
+    stdout = _codex_stream(
+        {"type": "thread.started", "thread_id": "thread-write"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "patched"}},
+        {"type": "turn.completed", "usage": {}},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_codex("patch it", workdir=str(tmp_path), write=True)
+
+    assert out["ok"] is True
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert argv[argv.index("-a") + 1] == "never"
+    assert argv[argv.index("-C") + 1] == str(tmp_path)
+
+
+def test_ask_codex_write_false_keeps_prior_argv_shape(monkeypatch):
+    # Default (write=False) must stay byte-for-byte identical to before this
+    # param existed - Hermes's existing bare ask_codex() calls depend on it.
+    monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
+    monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+
+    out = adapters.ask_codex("summarize")
+
+    assert out["ok"] is True
+    argv = calls[0]["cmd"]
+    assert "--sandbox" not in argv
+    assert "-a" not in argv
+
+
 def test_ask_codex_ignores_transient_error_before_completed_turn(monkeypatch):
     stdout = _codex_stream(
         {"type": "thread.started", "thread_id": "thread-retried"},
@@ -626,6 +672,80 @@ def test_ask_claude_rejects_unknown_mode(monkeypatch):
     assert out["ok"] is False
     assert "mode" in out["error"].lower()
     assert calls == []
+
+
+def test_ask_claude_default_denies_edit_write(monkeypatch):
+    # Parity with Codex: safe by default, matching test_ask_codex_write_false_keeps_prior_argv_shape.
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="claude reply"))
+
+    out = adapters.ask("claude", "summarize")
+
+    assert out["ok"] is True
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,NotebookEdit"
+    assert "--permission-mode" not in argv
+
+
+def test_ask_claude_optioned_call_also_denies_edit_write_by_default(monkeypatch, tmp_path):
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "claude-fable-5"},
+        {"type": "result", "subtype": "success", "result": "reviewed"},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_claude("review", model="fable", workdir=str(tmp_path))
+
+    assert out["ok"] is True
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,NotebookEdit"
+
+
+def test_ask_claude_write_requires_workdir(monkeypatch):
+    out = adapters.ask_claude("edit it", write=True)
+    assert out["ok"] is False
+    assert "workdir" in out["error"].lower()
+
+
+def test_ask_claude_write_rejects_advisory_mode(monkeypatch, tmp_path):
+    out = adapters.ask_claude("edit it", write=True, mode="advisory")
+    assert out["ok"] is False
+    assert "advisory" in out["error"].lower()
+
+
+def test_ask_claude_write_grants_full_tools_and_bypasses_permissions(monkeypatch, tmp_path):
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "claude-fable-5"},
+        {"type": "result", "subtype": "success", "result": "edited"},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_claude("edit it", workdir=str(tmp_path), write=True)
+
+    assert out["ok"] is True
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+    assert "--disallowedTools" not in argv
+    assert "-C" not in argv  # claude has no -C flag; cwd is set via the subprocess kwarg
+    assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
+
+
+def test_ask_claude_uses_explicit_workdir(monkeypatch, tmp_path):
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "claude-fable-5"},
+        {"type": "result", "subtype": "success", "result": "ok"},
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_claude("inspect", model="fable", workdir=str(tmp_path))
+
+    assert out["ok"] is True
+    assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
+
+
+def test_ask_claude_advisory_rejects_workdir(monkeypatch, tmp_path):
+    out = adapters.ask_claude("review", mode="advisory", workdir=str(tmp_path))
+    assert out["ok"] is False
+    assert "workdir" in out["error"].lower()
 
 
 def test_ask_claude_maps_advisory_tempdir_failure(monkeypatch):

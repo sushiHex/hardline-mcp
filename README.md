@@ -43,8 +43,10 @@ splits the problem:
 | `ack(message_id)` | Mark read (idempotent). |
 | `history(limit=50, agent=None)` | Recent messages newest-first; `agent` matches sender or recipient. |
 | `ask_hermes(prompt)` | Live query → `hermes chat -Q -q`. |
-| `ask_codex(prompt, model=None, effort="default", mode="default", workdir=None)` | Ephemeral live query → `codex exec --model gpt-5.6-sol`; optional routing, isolation, and telemetry. |
-| `ask_claude(prompt, model=None, effort="default", mode="default")` | Live query → `claude -p --model sonnet`; optionally pins a different model/effort and returns actual-model/fallback telemetry. |
+| `ask_codex(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Ephemeral live query → `codex exec --model gpt-5.6-sol`; optional routing, isolation, telemetry, and opt-in write access. |
+| `ask_codex_async(prompt, from_agent, label=None, model=None, effort="default", workdir=None, write=False)` | Fire-and-forget `ask_codex` on a background thread; result is delivered through the mailbox (`sender="codex"`, `recipient=from_agent`) — poll it with `inbox`. |
+| `ask_claude(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Live query → `claude -p --model sonnet`; optional routing, isolation, telemetry, and opt-in write access (parity with `ask_codex`). |
+| `ask_claude_async(prompt, from_agent, label=None, model=None, effort="default", workdir=None, write=False)` | Fire-and-forget `ask_claude` on a background thread; result is delivered through the mailbox (`sender="claude"`, `recipient=from_agent`) — poll it with `inbox`. |
 
 Agents are the fixed set `claude`, `hermes`, `codex`. Identity is self-declared
 (`from_agent`) — convention, not enforced auth; every process runs as the same
@@ -149,24 +151,71 @@ does not expose runtime auth-source or overage telemetry. This distinction is
 intentional; local configuration is not post-call billing proof. Trusted binary
 overrides and platform sandbox enforcement remain outside Hardline's control.
 
+### Codex write access and background dispatch
+
+`ask_codex` is read-only unless `write=True` is passed explicitly — omit it
+and behavior is unchanged from before this option existed. `write=True`
+requires an explicit `workdir` (never an implicit cwd) and is rejected with
+`mode="advisory"` (advisory is fixed read-only by design). It adds
+`--sandbox workspace-write -a never`: approvals are disabled because a
+spawned Codex process's stdin is `/dev/null`, so any approval prompt would
+just hang until timeout instead of ever being answered — the sandbox
+boundary is what keeps an unattended, un-approvable run safe.
+
+```text
+ask_codex(
+  prompt="Add input validation to the login handler.",
+  workdir="C:/src/project",
+  write=True,
+)
+```
+
+For a task that shouldn't block the caller, `ask_codex_async` runs the same
+`ask_codex` on a background thread and returns `{"ok": true, "dispatched":
+true, "label": ...}` immediately. The result lands in the mailbox as a
+message from `"codex"` to `from_agent` once the run finishes — poll it the
+same way you'd poll for any other mailbox message:
+
+```text
+ask_codex_async(
+  prompt="Refactor the retry loop; write the diff.",
+  from_agent="claude",
+  workdir="C:/src/project",
+  write=True,
+  label="retry-refactor",
+)
+# later:
+inbox(agent="claude")
+```
+
+`label` is echoed back in the delivered message body so a caller firing
+several concurrent dispatches can match each result to its request. This is
+fire-and-forget, not durable: if hardline-mcp restarts before a dispatched
+task finishes, that task is lost — there is no task table, only the
+existing send/inbox mailbox the result is dropped into on completion.
+
 ### Claude model and effort selection
 
-`ask_claude` remains backward compatible: a prompt with no additional options
-uses a plain `claude -p` path and returns `ok`/`reply`. That path *always*
-explicitly pins `--model sonnet` rather than omitting `--model` — a bare
-`claude -p` inherits whatever the installed Claude CLI's own global settings
-currently default to, which is ambient, mutable state (an interactive
-`/model` switch changes it for every unflagged invocation, including
-hardline's). `sonnet` is Claude Code's own tier alias, not a versioned model
-id, so it tracks whichever model Claude Code itself currently resolves
-`sonnet` to — the same mechanism `model="fable"`/`model="opus"` already rely
-on — and never needs bumping in code when a new Sonnet ships. This pin
-applies uniformly to `ask_claude(prompt)` and to `send(..., to_agent="claude",
-deliver=true)`'s push-notice path — both spawn `claude` the same way. Passing
-`model="sonnet"` explicitly resolves to the same model but is a *different*
-caller intent than omitting it, so it takes the full telemetry path below
-(returning `actual_model`, usage, etc.) instead of the plain `ok`/`reply`
-shortcut — the same as any other explicit `model=`.
+`ask_claude`'s bare `ask_claude(prompt)` response *shape* stays backward
+compatible: a prompt with no additional options still returns the plain
+`ok`/`reply` object, not the fuller telemetry shape. Tool access is not part
+of that compatibility promise — see *Claude write access and background
+dispatch* below for the one behavior change (Edit/Write/NotebookEdit are now
+denied unless `write=True`). The bare path *always* explicitly pins `--model
+sonnet` rather than omitting `--model` — a bare `claude -p` inherits whatever
+the installed Claude CLI's own global settings currently default to, which is
+ambient, mutable state (an interactive `/model` switch changes it for every
+unflagged invocation, including hardline's). `sonnet` is Claude Code's own
+tier alias, not a versioned model id, so it tracks whichever model Claude
+Code itself currently resolves `sonnet` to — the same mechanism
+`model="fable"`/`model="opus"` already rely on — and never needs bumping in
+code when a new Sonnet ships. This pin applies uniformly to
+`ask_claude(prompt)` and to `send(..., to_agent="claude", deliver=true)`'s
+push-notice path — both spawn `claude` the same way. Passing `model="sonnet"`
+explicitly resolves to the same model but is a *different* caller intent
+than omitting it, so it takes the full telemetry path below (returning
+`actual_model`, usage, etc.) instead of the plain `ok`/`reply` shortcut — the
+same as any other explicit `model=`.
 
 For model-aware calls, set `model`, `effort`, or `mode`:
 
@@ -200,6 +249,57 @@ fresh neutral directory with a fixed minimal system prompt; and removes
 Anthropic API-key/base-URL plus Bedrock/Vertex/Foundry overrides from the child
 environment. This reduces accidental API-provider routing, but trusted command
 wrappers and admin-managed Claude settings remain outside Hardline's control.
+
+### Claude write access and background dispatch
+
+Parity with Codex: unless `write=True` is passed, every `ask_claude` call —
+including the bare `ask_claude(prompt)` path — denies Claude the
+`Edit`/`Write`/`NotebookEdit` tools (`--disallowedTools Edit,Write,
+NotebookEdit`). Read/Grep/Bash and the rest of the built-in toolset still
+work, the same way Codex's read-only sandbox permits inspection but not
+mutation — this is a closer analog than advisory mode's zero-tools
+restriction, which is a separate, stricter concept for isolated opinions.
+
+`write=True` requires an explicit `workdir` (never write into hardline-mcp's
+own cwd) and is rejected with `mode="advisory"`. It grants full tool access
+and adds `--permission-mode bypassPermissions`: approvals are disabled
+because a spawned Claude process's stdin is `/dev/null`, so an interactive
+permission prompt would hang until timeout instead of ever being answered —
+the same rationale as Codex's `-a never`.
+
+```text
+ask_claude(
+  prompt="Add input validation to the login handler.",
+  workdir="C:/src/project",
+  write=True,
+)
+```
+
+`workdir` also works without `write` — Claude has no `-C`/`--cd` flag, so
+hardline targets it by launching the child process with that directory as
+its `cwd`; omitted, `ask_claude` inherits whatever directory hardline-mcp
+itself was started from, same as before this option existed.
+
+`ask_claude_async` mirrors `ask_codex_async` exactly: runs `ask_claude` on a
+background thread and delivers the result through the mailbox (`sender=
+"claude"`, `recipient=from_agent`) once it finishes.
+
+```text
+ask_claude_async(
+  prompt="Refactor the retry loop; write the diff.",
+  from_agent="codex",
+  workdir="C:/src/project",
+  write=True,
+  label="retry-refactor",
+)
+# later:
+inbox(agent="codex")
+```
+
+Same caveats as the Codex version: `label` is echoed back for matching
+concurrent dispatches, and this is fire-and-forget — a hardline-mcp restart
+before completion loses the task, since only the existing mailbox holds the
+eventual result, not a task table.
 After execution, advisory calls therefore fail closed unless runtime telemetry
 verifies first-party account auth with no overage. This is post-call evidence;
 it cannot undo a request already made by a misconfigured trusted wrapper.

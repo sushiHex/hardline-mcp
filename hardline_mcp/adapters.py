@@ -225,6 +225,40 @@ def _run_agent_cmd(agent: str, argv: list[str], **kwargs) -> dict:
     return _run_cmd(argv, timeout_s=timeout_s, **kwargs)
 
 
+def _validate_workdir_write(
+    name: str, mode: str, workdir: str | None, write: bool
+) -> tuple[dict | None, str | None]:
+    """Shared workdir/write/advisory validation for ask_codex/ask_claude.
+
+    Returns ``(error, resolved_workdir)``: ``error`` is an
+    ``{"ok": False, "error"}`` dict on failure (the caller returns it
+    immediately) and ``None`` on success, in which case ``resolved_workdir``
+    is the absolute path, or ``None`` if no workdir was given.
+    """
+    if mode == "advisory" and workdir is not None:
+        return {
+            "ok": False,
+            "error": f"{name} advisory mode uses a neutral directory and cannot accept workdir",
+        }, None
+    if write and mode == "advisory":
+        return {
+            "ok": False,
+            "error": f"{name} write mode is incompatible with advisory mode",
+        }, None
+    if write and workdir is None:
+        return {
+            "ok": False,
+            "error": f"{name} write mode requires an explicit workdir",
+        }, None
+    if workdir is not None and (
+        not isinstance(workdir, str) or not Path(workdir).is_dir()
+    ):
+        return {"ok": False, "error": f"{name} workdir must be an existing directory"}, None
+    if workdir is not None:
+        return None, str(Path(workdir).resolve())
+    return None, None
+
+
 def ask(agent: str, text: str) -> dict:
     """Run ``text`` through ``agent``'s native CLI and return its output.
 
@@ -343,8 +377,17 @@ def ask_codex(
     effort: str = "default",
     mode: str = "default",
     workdir: str | None = None,
+    write: bool = False,
 ) -> dict:
-    """Query Codex with explicit routing and optional structured telemetry."""
+    """Query Codex with explicit routing and optional structured telemetry.
+
+    ``write=True`` opts into a workspace-write sandbox with approvals
+    disabled (unattended - stdin is DEVNULL, so any approval prompt would
+    just hang to timeout instead of ever being answered). It requires an
+    explicit ``workdir`` (never write into an implicit cwd) and is
+    incompatible with ``mode="advisory"`` (advisory is fixed read-only by
+    design). Omitted, Codex stays read-only exactly as before.
+    """
     if effort not in _CODEX_EFFORTS:
         return {
             "ok": False,
@@ -355,17 +398,9 @@ def ask_codex(
             "ok": False,
             "error": f"unsupported Codex mode {mode!r}; expected one of {sorted(_CODEX_MODES)}",
         }
-    if mode == "advisory" and workdir is not None:
-        return {
-            "ok": False,
-            "error": "Codex advisory mode uses a neutral directory and cannot accept workdir",
-        }
-    if workdir is not None and (
-        not isinstance(workdir, str) or not Path(workdir).is_dir()
-    ):
-        return {"ok": False, "error": "Codex workdir must be an existing directory"}
-    if workdir is not None:
-        workdir = str(Path(workdir).resolve())
+    error, workdir = _validate_workdir_write("Codex", mode, workdir, write)
+    if error is not None:
+        return error
     model_omitted = model is None
     if model_omitted:
         model = _CODEX_DEFAULT_MODEL
@@ -380,7 +415,13 @@ def ask_codex(
             "error": "Codex model must be a non-empty, non-option identifier without whitespace",
         }
     argv = _prefix_for("codex") + ["--model", model, "--ephemeral"]
-    if model_omitted and effort == "default" and mode == "default" and workdir is None:
+    if (
+        model_omitted
+        and effort == "default"
+        and mode == "default"
+        and workdir is None
+        and not write
+    ):
         return _run_agent_cmd("codex", argv + ["--", prompt])
     argv.append("--json")
     if effort != "default":
@@ -392,6 +433,8 @@ def ask_codex(
     subscription_configured = None
     if workdir is not None:
         argv += ["-C", workdir]
+    if write:
+        argv += ["--sandbox", "workspace-write", "-a", "never"]
     if mode == "advisory":
         child_env = dict(os.environ)
         if _codex_auth_mode(child_env) != "chatgpt":
@@ -571,6 +614,8 @@ def ask_claude(
     model: str | None = None,
     effort: str = "default",
     mode: str = "default",
+    workdir: str | None = None,
+    write: bool = False,
 ) -> dict:
     """Query Claude Code with optional model/effort selection and telemetry.
 
@@ -581,13 +626,22 @@ def ask_claude(
     whatever the installed Claude CLI's own global settings currently select
     for un-flagged ``claude -p`` calls - that default is ambient, mutable
     state (e.g. an interactive ``/model`` switch) hardline must not silently
-    inherit. Supplying model/effort, or selecting advisory mode, enables
-    stream-json so callers can distinguish the requested model from the model
-    actually served. Advisory mode additionally strips API-provider
-    overrides, disables tools and project customizations, and runs in a
-    neutral temporary directory. The parsed result fails closed unless
-    telemetry verifies first-party account auth without overage; command
-    wrappers and admin policy remain trusted.
+    inherit. Supplying model/effort/workdir/write, or selecting advisory mode,
+    enables stream-json so callers can distinguish the requested model from
+    the model actually served. Advisory mode additionally strips
+    API-provider overrides, disables tools and project customizations, and
+    runs in a neutral temporary directory. The parsed result fails closed
+    unless telemetry verifies first-party account auth without overage;
+    command wrappers and admin policy remain trusted.
+
+    Parity with ``ask_codex``: unless ``write=True``, Claude is denied
+    Edit/Write/NotebookEdit (the closer analog of Codex's read-only sandbox
+    than advisory's zero-tools mode - inspection tools like Read/Grep/Bash
+    still work). ``write=True`` requires an explicit ``workdir`` (never write
+    into an implicit cwd), is rejected with ``mode="advisory"``, and passes
+    ``--permission-mode bypassPermissions`` - stdin is ``/dev/null``, so any
+    interactive permission prompt would otherwise hang until timeout instead
+    of ever being answered.
     """
     if effort not in _CLAUDE_EFFORTS:
         return {
@@ -599,6 +653,9 @@ def ask_claude(
             "ok": False,
             "error": f"unsupported Claude mode {mode!r}; expected one of {sorted(_CLAUDE_MODES)}",
         }
+    error, workdir = _validate_workdir_write("Claude", mode, workdir, write)
+    if error is not None:
+        return error
     model_omitted = model is None
     if model_omitted:
         model = _CLAUDE_DEFAULT_MODEL
@@ -615,13 +672,29 @@ def ask_claude(
 
     # Exact backward-compatible reply SHAPE ({"ok","reply"}, no stream-json
     # telemetry) for the unqualified default call only - a lightweight plain
-    # `claude -p` invocation, just with the model pinned explicitly. An
-    # *explicit* model="sonnet" still gets full telemetry below, same as any
-    # other explicit model selection - "omitted" and "happens to equal the
-    # default" are different caller intents.
-    if model_omitted and effort == "default" and mode == "default":
+    # `claude -p` invocation, just with the model pinned explicitly and
+    # Edit/Write/NotebookEdit denied (read-only by default, matching Codex).
+    # An *explicit* model="sonnet" still gets full telemetry below, same as
+    # any other explicit model selection - "omitted" and "happens to equal
+    # the default" are different caller intents.
+    if (
+        model_omitted
+        and effort == "default"
+        and mode == "default"
+        and workdir is None
+        and not write
+    ):
         return _run_agent_cmd(
-            "claude", _prefix_for("claude") + ["--model", model, "--", prompt]
+            "claude",
+            _prefix_for("claude")
+            + [
+                "--model",
+                model,
+                "--disallowedTools",
+                "Edit,Write,NotebookEdit",
+                "--",
+                prompt,
+            ],
         )
 
     argv = _prefix_for("claude") + ["--model", model]
@@ -636,6 +709,7 @@ def ask_claude(
 
     child_env = None
     neutral_cwd = None
+    run_cwd = workdir
     if mode == "advisory":
         child_env = dict(os.environ)
         for name in _CLAUDE_AUTH_OVERRIDE_ENV:
@@ -655,6 +729,11 @@ def ask_claude(
             "--system-prompt",
             _CLAUDE_ADVISORY_SYSTEM_PROMPT,
         ]
+        run_cwd = neutral_cwd
+    elif write:
+        argv += ["--permission-mode", "bypassPermissions"]
+    else:
+        argv += ["--disallowedTools", "Edit,Write,NotebookEdit"]
     # Stop option parsing before the untrusted prompt. Otherwise a prompt that
     # begins with ``--`` can be interpreted as another Claude CLI flag.
     argv += ["--", prompt]
@@ -664,7 +743,7 @@ def ask_claude(
             "claude",
             argv,
             env=child_env,
-            cwd=neutral_cwd,
+            cwd=run_cwd,
         )
     finally:
         if neutral_cwd:
