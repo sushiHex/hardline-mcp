@@ -19,6 +19,8 @@ the same posture as the sibling vram-mcp's claim ledger.
 from __future__ import annotations
 
 import functools
+import json
+import threading
 from typing import Literal
 
 import anyio.to_thread
@@ -30,6 +32,8 @@ mcp = FastMCP("hardline-mcp")
 
 ClaudeEffort = Literal["default", "low", "medium", "high", "xhigh", "max"]
 ClaudeMode = Literal["default", "advisory"]
+CodexEffort = Literal["default", "low", "medium", "high", "xhigh", "max", "ultra"]
+CodexMode = Literal["default", "advisory"]
 
 
 async def _in_thread(fn, *args, **kwargs):
@@ -127,13 +131,107 @@ async def ask_hermes(prompt: str) -> dict:
 
 
 @mcp.tool()
-async def ask_codex(prompt: str) -> dict:
+async def ask_codex(
+    prompt: str,
+    model: str | None = None,
+    effort: CodexEffort = "default",
+    mode: CodexMode = "default",
+    workdir: str | None = None,
+    write: bool = False,
+) -> dict:
     """Ask Codex a question and wait for its reply.
 
-    Spawns a one-shot ``codex exec``. Slower/heavier than the mailbox; use for
-    live answers. Returns ``{"ok", "reply"}`` or ``{"ok": false, "error"}``.
+    Spawns an ephemeral ``codex exec`` pinned to GPT-5.6 Sol by default.
+    Optional model/effort selection enables JSONL usage/thread telemetry.
+    Advisory mode uses ChatGPT auth preflight, a temporary auth-only CODEX_HOME,
+    a neutral read-only directory, ignored user/project configuration, and
+    stripped API-provider overrides.
+    ``workdir`` targets a repository in default mode and is rejected in advisory
+    mode. ``write=True`` opts into a workspace-write sandbox with approvals
+    disabled (unattended) — it requires ``workdir`` and is rejected in advisory
+    mode; omitted, Codex stays read-only. Codex JSONL does not currently report
+    served model/effective effort, so those telemetry fields remain null rather
+    than being guessed.
     """
-    return await _in_thread(adapters.ask, "codex", prompt)
+    return await _in_thread(
+        adapters.ask_codex,
+        prompt,
+        model=model,
+        effort=effort,
+        mode=mode,
+        workdir=workdir,
+        write=write,
+    )
+
+
+def _ask_async_impl(
+    agent: str,
+    ask_fn,
+    prompt: str,
+    from_agent: str,
+    *,
+    label: str | None,
+    model: str | None,
+    effort: str,
+    workdir: str | None,
+    write: bool,
+) -> dict:
+    """Shared body for ask_codex_async/ask_claude_async - only the adapter
+    function and the mailbox sender identity differ between agents.
+
+    Does not block (validation is trivial, and starting a thread returns
+    immediately), so callers invoke this directly rather than through
+    _in_thread - routing a call this cheap through the worker-thread pool
+    would just add a wasted thread-pool round trip.
+    """
+    known = adapters.known_agents()
+    if from_agent not in known:
+        return {
+            "ok": False,
+            "error": f"unknown from_agent {from_agent!r}; known: {sorted(known)}",
+        }
+
+    def _run() -> None:
+        result = ask_fn(prompt, model=model, effort=effort, workdir=workdir, write=write)
+        if label is not None:
+            result["label"] = label
+        mailbox.send(agent, from_agent, json.dumps(result))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "dispatched": True, "label": label}
+
+
+@mcp.tool()
+async def ask_codex_async(
+    prompt: str,
+    from_agent: str,
+    label: str | None = None,
+    model: str | None = None,
+    effort: CodexEffort = "default",
+    workdir: str | None = None,
+    write: bool = False,
+) -> dict:
+    """Dispatch a Codex task in the background; returns immediately.
+
+    Runs the same ``ask_codex`` in a background thread, then delivers the
+    result through the existing mailbox as a message from "codex" to
+    ``from_agent`` — poll it with ``inbox(agent=from_agent)``. The delivered
+    message body is the JSON-encoded ``ask_codex`` result, plus ``label`` if
+    supplied (use it to match results when firing several concurrent
+    dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
+    persisted, so a hardline-mcp restart before completion loses the task.
+    """
+    return _ask_async_impl(
+        "codex",
+        adapters.ask_codex,
+        prompt,
+        from_agent,
+        label=label,
+        model=model,
+        effort=effort,
+        workdir=workdir,
+        write=write,
+    )
 
 
 @mcp.tool()
@@ -142,17 +240,26 @@ async def ask_claude(
     model: str | None = None,
     effort: ClaudeEffort = "default",
     mode: ClaudeMode = "default",
+    workdir: str | None = None,
+    write: bool = False,
 ) -> dict:
     """Ask Claude Code a question and wait for its reply.
 
-    With no options, preserves the original one-shot ``claude -p`` behavior.
+    With no options, preserves the original one-shot ``claude -p`` behavior
+    and response shape, plus (parity with Codex) Edit/Write/NotebookEdit are
+    denied by default — inspection tools like Read/Grep/Bash still work.
     ``model`` pins a Claude alias/full model ID. ``effort`` is one of
-    ``default|low|medium|high|xhigh|max``; ``default`` omits the flag. Mode
-    ``advisory`` disables tools/project customizations, runs in a neutral cwd,
-    strips API-provider overrides, and fails closed unless response telemetry
-    verifies first-party account auth without overage. Optioned calls return
-    actual-model, usage, rate-limit, auth-verification, and safeguard fallback
-    metadata in addition to ``ok``/``reply``.
+    ``default|low|medium|high|xhigh|max``; ``default`` omits the flag.
+    ``workdir`` targets a repository in default mode and is rejected in
+    advisory mode. ``write=True`` opts into full tool access plus
+    ``--permission-mode bypassPermissions`` (unattended — stdin is
+    ``/dev/null``, so an interactive prompt would hang to timeout instead of
+    being answered); it requires ``workdir`` and is rejected in advisory
+    mode. Mode ``advisory`` disables tools/project customizations, runs in a
+    neutral cwd, strips API-provider overrides, and fails closed unless
+    response telemetry verifies first-party account auth without overage.
+    Optioned calls return actual-model, usage, rate-limit, auth-verification,
+    and safeguard fallback metadata in addition to ``ok``/``reply``.
     """
     return await _in_thread(
         adapters.ask_claude,
@@ -160,6 +267,41 @@ async def ask_claude(
         model=model,
         effort=effort,
         mode=mode,
+        workdir=workdir,
+        write=write,
+    )
+
+
+@mcp.tool()
+async def ask_claude_async(
+    prompt: str,
+    from_agent: str,
+    label: str | None = None,
+    model: str | None = None,
+    effort: ClaudeEffort = "default",
+    workdir: str | None = None,
+    write: bool = False,
+) -> dict:
+    """Dispatch a Claude task in the background; returns immediately.
+
+    Runs the same ``ask_claude`` in a background thread, then delivers the
+    result through the existing mailbox as a message from "claude" to
+    ``from_agent`` — poll it with ``inbox(agent=from_agent)``. The delivered
+    message body is the JSON-encoded ``ask_claude`` result, plus ``label`` if
+    supplied (use it to match results when firing several concurrent
+    dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
+    persisted, so a hardline-mcp restart before completion loses the task.
+    """
+    return _ask_async_impl(
+        "claude",
+        adapters.ask_claude,
+        prompt,
+        from_agent,
+        label=label,
+        model=model,
+        effort=effort,
+        workdir=workdir,
+        write=write,
     )
 
 

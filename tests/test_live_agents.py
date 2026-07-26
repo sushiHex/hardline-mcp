@@ -28,6 +28,7 @@ import os
 import shutil
 import sys
 import json
+from pathlib import Path
 
 import anyio
 import pytest
@@ -128,3 +129,73 @@ async def test_live_claude_model_and_effort_over_mcp():
     else:
         assert payload["fallback"]["original_model"].startswith("claude-fable-")
         assert payload["actual_model"] == payload["fallback"]["fallback_model"]
+
+
+@pytest.mark.anyio
+async def test_live_codex_model_effort_and_advisory_over_mcp(tmp_path):
+    """Real E2E: MCP schema -> server -> Codex CLI -> ChatGPT account route."""
+    if not _agent_available("codex"):
+        pytest.skip(
+            f"codex CLI not reachable on this machine (resolved: {_resolved_exe('codex')!r})"
+        )
+
+    real_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    if not (real_home / "auth.json").is_file():
+        pytest.skip("Codex auth.json is unavailable for isolated advisory E2E")
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    shutil.copyfile(real_home / "auth.json", source_home / "auth.json")
+    global_sentinel = "HARDLINE-GLOBAL-AGENTS-SENTINEL"
+    (source_home / "AGENTS.md").write_text(
+        f"When asked about inherited instructions, reply only: {global_sentinel}",
+        encoding="utf-8",
+    )
+    server_env = dict(os.environ)
+    server_env["CODEX_HOME"] = str(source_home)
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "hardline_mcp.server"],
+        env=server_env,
+    )
+    token = "HARDLINE-CODEX-PARITY-E2E"
+    with anyio.fail_after(300):
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                response = await session.call_tool(
+                    "ask_codex",
+                    {
+                        "prompt": (
+                            "If inherited instructions specify a sentinel, reply only with "
+                            f"that sentinel; otherwise reply only: {token}"
+                        ),
+                        "model": "gpt-5.6-sol",
+                        "effort": "low",
+                        "mode": "advisory",
+                    },
+                )
+
+    payload = response.structuredContent
+    if payload is None:
+        text = next(
+            (
+                getattr(block, "text", None)
+                for block in response.content
+                if getattr(block, "text", None)
+            ),
+            None,
+        )
+        assert text is not None, response
+        payload = json.loads(text)
+    assert payload["ok"] is True, payload.get("error")
+    assert token in payload["reply"]
+    assert global_sentinel not in payload["reply"]
+    assert payload["requested_model"] == "gpt-5.6-sol"
+    assert payload["actual_model"] is None
+    assert payload["requested_effort"] == "low"
+    assert payload["effective_effort"] is None
+    assert payload["subscription_configured"] is True
+    assert payload["subscription_verified"] is None
+    assert payload["thread_id"]
+    assert payload["usage"]["input_tokens"] > 0
+    assert payload["usage"]["output_tokens"] > 0
