@@ -17,7 +17,15 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "mcp>=1.2.0",
+    # mcp 2.0.0 (2026-07) removed mcp.server.fastmcp entirely (confirmed: no
+    # FastMCP anywhere under mcp.server's namespace in 2.0.0) - server.py's
+    # `from mcp.server.fastmcp import FastMCP` only works on the 1.x line.
+    # An unbounded >=1.2.0 constraint let a fresh `pip install` grab 2.0.0 and
+    # break at import time (caught via CI failing on a fresh env while local
+    # dev passed, pinned to an older resolution by uv.lock). Migrating to
+    # whatever replaces FastMCP in 2.x is a separate, larger piece of work;
+    # this is the stopgap that keeps installs working today.
+    "mcp>=1.2.0,<2.0.0",
     "anyio>=4.0",
 ]
 
