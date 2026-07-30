@@ -7,16 +7,19 @@ import pytest
 from hardline_mcp import server
 
 
-class _ImmediateThread:
-    """Stand-in for threading.Thread that runs target() synchronously on
-    start() — makes ask_codex_async's background dispatch deterministic to
-    test instead of racing a real OS thread."""
+def _immediate_submit(fn, *args, **kwargs):
+    """Stand-in for _async_executor.submit that runs fn synchronously instead
+    of on a pool thread — makes ask_*_async's background dispatch
+    deterministic to test instead of racing a real worker thread."""
+    fn(*args, **kwargs)
 
-    def __init__(self, target=None, daemon=None):
-        self._target = target
 
-    def start(self):
-        self._target()
+def test_async_dispatch_is_bounded_not_unbounded():
+    # A raw threading.Thread-per-call has no ceiling; ask_*_async must go
+    # through a fixed-size pool so repeated dispatches queue instead of
+    # spawning unlimited concurrent agent subprocesses.
+    assert server._async_executor._max_workers == server._ASYNC_MAX_WORKERS
+    assert server._ASYNC_MAX_WORKERS > 0
 
 
 @pytest.mark.anyio
@@ -84,10 +87,21 @@ async def test_ask_claude_forwards_model_effort_and_mode(monkeypatch):
     captured = {}
 
     def fake_ask_claude(
-        prompt, *, model=None, effort="default", mode="default", workdir=None, write=False
+        prompt,
+        *,
+        model=None,
+        effort="default",
+        mode="default",
+        workdir=None,
+        write=False,
     ):
         captured.update(
-            prompt=prompt, model=model, effort=effort, mode=mode, workdir=workdir, write=write
+            prompt=prompt,
+            model=model,
+            effort=effort,
+            mode=mode,
+            workdir=workdir,
+            write=write,
         )
         return {"ok": True, "reply": "reviewed", "actual_model": "claude-fable-5"}
 
@@ -114,10 +128,21 @@ async def test_ask_claude_defaults_remain_backward_compatible(monkeypatch):
     captured = {}
 
     def fake_ask_claude(
-        prompt, *, model=None, effort="default", mode="default", workdir=None, write=False
+        prompt,
+        *,
+        model=None,
+        effort="default",
+        mode="default",
+        workdir=None,
+        write=False,
     ):
         captured.update(
-            prompt=prompt, model=model, effort=effort, mode=mode, workdir=workdir, write=write
+            prompt=prompt,
+            model=model,
+            effort=effort,
+            mode=mode,
+            workdir=workdir,
+            write=write,
         )
         return {"ok": True, "reply": "old shape still works"}
 
@@ -207,9 +232,11 @@ def test_ask_codex_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
 @pytest.mark.anyio
 async def test_ask_codex_async_delivers_result_via_mailbox(monkeypatch, tmp_path):
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
-    def fake_ask_codex(prompt, *, model=None, effort="default", workdir=None, write=False):
+    def fake_ask_codex(
+        prompt, *, model=None, effort="default", workdir=None, write=False
+    ):
         return {"ok": True, "reply": f"handled: {prompt}"}
 
     monkeypatch.setattr(server.adapters, "ask_codex", fake_ask_codex)
@@ -227,9 +254,40 @@ async def test_ask_codex_async_delivers_result_via_mailbox(monkeypatch, tmp_path
 
 
 @pytest.mark.anyio
+async def test_ask_codex_async_survives_adapter_exception(monkeypatch, tmp_path):
+    # ask_codex/ask_claude are designed to never raise (every recognized
+    # failure already comes back as {"ok": False, "error"}), but if one ever
+    # did, the dispatch must still notify the caller via mailbox rather than
+    # dying silently on the pool thread - a caller polling inbox() would
+    # otherwise wait forever with no error surfaced anywhere.
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+
+    def raising_ask_codex(
+        prompt, *, model=None, effort="default", workdir=None, write=False
+    ):
+        raise RuntimeError("unexpected adapter failure")
+
+    monkeypatch.setattr(server.adapters, "ask_codex", raising_ask_codex)
+
+    dispatched = await server.ask_codex_async(
+        prompt="review the diff", from_agent="claude"
+    )
+    assert dispatched == {"ok": True, "dispatched": True, "label": None}
+
+    inb = await server.inbox(agent="claude")
+    assert inb["count"] == 1
+    body = json.loads(inb["messages"][0]["body"])
+    assert body["ok"] is False
+    assert "unexpected adapter failure" in body["error"]
+    assert "RuntimeError" in body["error"]
+    assert "traceback" in body
+
+
+@pytest.mark.anyio
 async def test_ask_codex_async_omits_label_when_not_supplied(monkeypatch, tmp_path):
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     monkeypatch.setattr(
         server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
     )
@@ -259,9 +317,11 @@ def test_ask_claude_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
 @pytest.mark.anyio
 async def test_ask_claude_async_delivers_result_via_mailbox(monkeypatch, tmp_path):
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
-    def fake_ask_claude(prompt, *, model=None, effort="default", workdir=None, write=False):
+    def fake_ask_claude(
+        prompt, *, model=None, effort="default", workdir=None, write=False
+    ):
         return {"ok": True, "reply": f"handled: {prompt}"}
 
     monkeypatch.setattr(server.adapters, "ask_claude", fake_ask_claude)
@@ -275,13 +335,17 @@ async def test_ask_claude_async_delivers_result_via_mailbox(monkeypatch, tmp_pat
     assert inb["count"] == 1
     assert inb["messages"][0]["sender"] == "claude"
     body = json.loads(inb["messages"][0]["body"])
-    assert body == {"ok": True, "reply": "handled: refactor the retry loop", "label": "task-1"}
+    assert body == {
+        "ok": True,
+        "reply": "handled: refactor the retry loop",
+        "label": "task-1",
+    }
 
 
 @pytest.mark.anyio
 async def test_ask_claude_async_omits_label_when_not_supplied(monkeypatch, tmp_path):
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     monkeypatch.setattr(
         server.adapters, "ask_claude", lambda prompt, **k: {"ok": True, "reply": "done"}
     )

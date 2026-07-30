@@ -1,7 +1,7 @@
 """Tests for hardline_mcp.adapters — subprocess is monkeypatched (no real spawns)."""
 
-import subprocess
 import json
+import subprocess
 
 import pytest
 
@@ -53,12 +53,14 @@ def test_ask_codex_shells_codex_exec(monkeypatch):
     assert out["reply"] == "codex reply"
     argv = calls[0]["cmd"]
     assert argv[0] == "codex" and "exec" in argv
-    assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    # Omitted model -> no --model flag at all; Codex's own configured default
+    # applies, same posture ask_hermes already has toward Hermes's default.
+    assert "--model" not in argv
     assert "--ephemeral" in argv
     assert argv[-2:] == ["--", "summarize"]
 
 
-def test_deliver_to_codex_uses_safe_pinned_default(monkeypatch):
+def test_deliver_to_codex_defers_to_codex_own_default(monkeypatch):
     monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="delivered"))
@@ -67,7 +69,7 @@ def test_deliver_to_codex_uses_safe_pinned_default(monkeypatch):
 
     assert out["ok"] is True
     argv = calls[0]["cmd"]
-    assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    assert "--model" not in argv
     assert "--ephemeral" in argv
     assert argv[-2:] == ["--", "--dangerously-bypass-approvals-and-sandbox"]
 
@@ -79,31 +81,25 @@ def test_ask_claude_shells_claude_p(monkeypatch):
     assert out["reply"] == "claude reply"
     argv = calls[0]["cmd"]
     assert argv[0] == "claude" and "-p" in argv
-    # Default calls must pin an explicit model - never the bare command,
-    # which would silently inherit the installed Claude CLI's own global
-    # default (ambient, mutable state; see test_default_model_is_not_hardcoded_version).
-    assert argv[argv.index("--model") + 1] == "sonnet"
+    # Omitted model -> no --model flag at all; Claude Code's own configured
+    # default applies (it previously pinned an explicit alias, added when a
+    # stale global settings.json override was found governing unflagged
+    # calls - that override has since been removed, so there is no longer a
+    # reason for hardline to second-guess Claude Code's own default).
+    assert "--model" not in argv
     # Prompt is separated so a prompt starting with "-" can't be read as a flag.
     assert argv[-2:] == ["--", "hello"]
 
 
-def test_deliver_to_claude_also_pins_default_model(monkeypatch):
+def test_deliver_to_claude_also_defers_to_claude_own_default(monkeypatch):
     """The send(deliver=true) push-notice path uses deliver() == ask(), which
-    must get the same model pin as a direct ask_claude() call - not the raw,
-    unpinned claude -p dispatch other agents use."""
+    must behave identically to a direct ask_claude() call - not some other
+    unpinned claude -p dispatch."""
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="delivered"))
     out = adapters.deliver("claude", "[hardline] new message #1 from hermes.")
     assert out["ok"] is True
     argv = calls[0]["cmd"]
-    assert argv[argv.index("--model") + 1] == "sonnet"
-
-
-def test_default_model_is_not_hardcoded_version():
-    """`sonnet` is a tier alias Claude Code itself resolves, not a versioned
-    id like "claude-sonnet-5" - so this constant never needs bumping when a
-    new Sonnet ships, matching how explicit model="fable"/"opus" already work."""
-    assert adapters._CLAUDE_DEFAULT_MODEL == "sonnet"
-    assert not any(char.isdigit() for char in adapters._CLAUDE_DEFAULT_MODEL)
+    assert "--model" not in argv
 
 
 def test_ask_claude_explicit_sonnet_still_gets_full_telemetry(monkeypatch):
@@ -368,24 +364,52 @@ def test_ask_codex_resolves_relative_workdir_once(monkeypatch, tmp_path):
     assert argv[argv.index("-C") + 1] == expected
 
 
+def test_ask_codex_write_disabled_by_default(monkeypatch, tmp_path):
+    # write=True must be refused outright unless this process's environment
+    # explicitly opts in - closes the gap where any hardline caller (e.g.
+    # Hermes, driven by inbound Discord messages with no approval gate on MCP
+    # tool calls) could otherwise reach unattended file writes with zero
+    # operator opt-in.
+    monkeypatch.delenv("HARDLINE_ALLOW_WRITE", raising=False)
+    calls = _capture_run(monkeypatch)
+
+    out = adapters.ask_codex("patch it", workdir=str(tmp_path), write=True)
+
+    assert out["ok"] is False
+    assert "HARDLINE_ALLOW_WRITE" in out["error"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("value", ["0", "false", "yes", "True", ""])
+def test_ask_codex_write_disabled_for_non_1_values(monkeypatch, tmp_path, value):
+    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", value)
+    out = adapters.ask_codex("patch it", workdir=str(tmp_path), write=True)
+    assert out["ok"] is False
+    assert "HARDLINE_ALLOW_WRITE" in out["error"]
+
+
 def test_ask_codex_write_requires_workdir(monkeypatch):
+    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
     out = adapters.ask_codex("patch it", write=True)
     assert out["ok"] is False
     assert "workdir" in out["error"].lower()
 
 
 def test_ask_codex_write_rejects_advisory_mode(monkeypatch, tmp_path):
-    out = adapters.ask_codex(
-        "patch it", write=True, mode="advisory"
-    )
+    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
+    out = adapters.ask_codex("patch it", write=True, mode="advisory")
     assert out["ok"] is False
     assert "advisory" in out["error"].lower()
 
 
 def test_ask_codex_write_adds_workspace_write_sandbox(monkeypatch, tmp_path):
+    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
     stdout = _codex_stream(
         {"type": "thread.started", "thread_id": "thread-write"},
-        {"type": "item.completed", "item": {"type": "agent_message", "text": "patched"}},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "patched"},
+        },
         {"type": "turn.completed", "usage": {}},
     )
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
@@ -686,7 +710,9 @@ def test_ask_claude_default_denies_edit_write(monkeypatch):
     assert "--permission-mode" not in argv
 
 
-def test_ask_claude_optioned_call_also_denies_edit_write_by_default(monkeypatch, tmp_path):
+def test_ask_claude_optioned_call_also_denies_edit_write_by_default(
+    monkeypatch, tmp_path
+):
     stdout = _claude_stream(
         {"type": "system", "subtype": "init", "model": "claude-fable-5"},
         {"type": "result", "subtype": "success", "result": "reviewed"},
@@ -700,19 +726,38 @@ def test_ask_claude_optioned_call_also_denies_edit_write_by_default(monkeypatch,
     assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,NotebookEdit"
 
 
+def test_ask_claude_write_disabled_by_default(monkeypatch, tmp_path):
+    # Same gate as Codex's write path - a hardline registration that never
+    # sets HARDLINE_ALLOW_WRITE (e.g. Hermes's) cannot reach bypassPermissions
+    # regardless of what a caller (or a message that reached it) asks for.
+    monkeypatch.delenv("HARDLINE_ALLOW_WRITE", raising=False)
+    calls = _capture_run(monkeypatch)
+
+    out = adapters.ask_claude("edit it", workdir=str(tmp_path), write=True)
+
+    assert out["ok"] is False
+    assert "HARDLINE_ALLOW_WRITE" in out["error"]
+    assert calls == []
+
+
 def test_ask_claude_write_requires_workdir(monkeypatch):
+    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
     out = adapters.ask_claude("edit it", write=True)
     assert out["ok"] is False
     assert "workdir" in out["error"].lower()
 
 
 def test_ask_claude_write_rejects_advisory_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
     out = adapters.ask_claude("edit it", write=True, mode="advisory")
     assert out["ok"] is False
     assert "advisory" in out["error"].lower()
 
 
-def test_ask_claude_write_grants_full_tools_and_bypasses_permissions(monkeypatch, tmp_path):
+def test_ask_claude_write_grants_full_tools_and_bypasses_permissions(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
     stdout = _claude_stream(
         {"type": "system", "subtype": "init", "model": "claude-fable-5"},
         {"type": "result", "subtype": "success", "result": "edited"},
@@ -725,7 +770,9 @@ def test_ask_claude_write_grants_full_tools_and_bypasses_permissions(monkeypatch
     argv = calls[0]["cmd"]
     assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--disallowedTools" not in argv
-    assert "-C" not in argv  # claude has no -C flag; cwd is set via the subprocess kwarg
+    assert (
+        "-C" not in argv
+    )  # claude has no -C flag; cwd is set via the subprocess kwarg
     assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
 
 

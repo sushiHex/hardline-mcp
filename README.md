@@ -43,10 +43,10 @@ splits the problem:
 | `ack(message_id)` | Mark read (idempotent). |
 | `history(limit=50, agent=None)` | Recent messages newest-first; `agent` matches sender or recipient. |
 | `ask_hermes(prompt)` | Live query → `hermes chat -Q -q`. |
-| `ask_codex(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Ephemeral live query → `codex exec --model gpt-5.6-sol`; optional routing, isolation, telemetry, and opt-in write access. |
-| `ask_codex_async(prompt, from_agent, label=None, model=None, effort="default", workdir=None, write=False)` | Fire-and-forget `ask_codex` on a background thread; result is delivered through the mailbox (`sender="codex"`, `recipient=from_agent`) — poll it with `inbox`. |
-| `ask_claude(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Live query → `claude -p --model sonnet`; optional routing, isolation, telemetry, and opt-in write access (parity with `ask_codex`). |
-| `ask_claude_async(prompt, from_agent, label=None, model=None, effort="default", workdir=None, write=False)` | Fire-and-forget `ask_claude` on a background thread; result is delivered through the mailbox (`sender="claude"`, `recipient=from_agent`) — poll it with `inbox`. |
+| `ask_codex(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Ephemeral live query → `codex exec` (omitted `model` defers to Codex's own configured default); optional routing, isolation, telemetry, and opt-in write access. |
+| `ask_codex_async(prompt, from_agent, label=None, model=None, effort="default", workdir=None, write=False)` | Fire-and-forget `ask_codex` dispatched on a bounded background thread pool; result is delivered through the mailbox (`sender="codex"`, `recipient=from_agent`) — poll it with `inbox`. |
+| `ask_claude(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Live query → `claude -p` (omitted `model` defers to Claude Code's own configured default); optional routing, isolation, telemetry, and opt-in write access (parity with `ask_codex`). |
+| `ask_claude_async(prompt, from_agent, label=None, model=None, effort="default", workdir=None, write=False)` | Fire-and-forget `ask_claude` dispatched on a bounded background thread pool; result is delivered through the mailbox (`sender="claude"`, `recipient=from_agent`) — poll it with `inbox`. |
 
 Agents are the fixed set `claude`, `hermes`, `codex`. Identity is self-declared
 (`from_agent`) — convention, not enforced auth; every process runs as the same
@@ -99,14 +99,22 @@ HARDLINE_CODEX_TIMEOUT_S=1200
 
 An invalid or non-positive value fails the tool call before spawning the agent.
 
+`ask_*_async` dispatch through a small fixed-size background thread pool
+(default 4 workers) rather than an unbounded thread per call, so repeated or
+concurrent dispatches queue instead of piling up unlimited agent subprocesses.
+Override the pool size with `HARDLINE_ASYNC_MAX_WORKERS`.
+
 ### Codex model, effort, isolation, and telemetry
 
-`ask_codex(prompt)` preserves the original compact `ok`/`reply` response but
-now explicitly pins `gpt-5.6-sol`, creates an ephemeral session, and terminates
-option parsing before the prompt. The same safe pinned path applies to
-`send(..., to_agent="codex", deliver=true)`. Hardline therefore no longer
-inherits Codex CLI's mutable ambient model, persists one-shot review sessions,
-or interprets a flag-shaped prompt as a CLI option.
+`ask_codex(prompt)` preserves the original compact `ok`/`reply` response,
+creates an ephemeral session, and terminates option parsing before the
+prompt. Omitting `model` passes no `--model` flag at all, so Codex's own
+configured default applies — the same posture `ask_hermes` already has
+toward Hermes's default; hardline does not second-guess it. The same path
+applies to `send(..., to_agent="codex", deliver=true)`. Hardline therefore
+no longer persists one-shot review sessions or interprets a flag-shaped
+prompt as a CLI option, while leaving model selection to Codex itself unless
+a caller explicitly asks for a specific one.
 
 Pass `model`, `effort`, `mode`, or `workdir` for the structured path:
 
@@ -151,16 +159,34 @@ does not expose runtime auth-source or overage telemetry. This distinction is
 intentional; local configuration is not post-call billing proof. Trusted binary
 overrides and platform sandbox enforcement remain outside Hardline's control.
 
+### Write access requires an explicit opt-in
+
+`write=True` (on either `ask_codex` or `ask_claude`) is refused outright
+unless **this hardline-mcp process's environment** has `HARDLINE_ALLOW_WRITE=1`
+set — regardless of what a caller asks for. Write mode is unattended (stdin
+is `/dev/null`, so no approval prompt is ever answered) and, once a workdir
+is reachable, no more restricted than what the OS user running hardline-mcp
+could already do directly — a categorically different exposure from every
+other hardline tool, which only ever runs read-only or self-contained calls.
+Without a gate, any hardline registration with no per-tool allow-list (unlike
+[vram-mcp](https://github.com/sushiHex/vram-mcp)'s) would let any caller
+reach it with zero human approval step — including an always-on registration
+driven by inbound messages from an external platform. Set
+`HARDLINE_ALLOW_WRITE=1` only on registrations where that's actually wanted;
+leave it unset (the default) everywhere else, e.g. an always-on gateway's
+registration.
+
 ### Codex write access and background dispatch
 
-`ask_codex` is read-only unless `write=True` is passed explicitly — omit it
-and behavior is unchanged from before this option existed. `write=True`
-requires an explicit `workdir` (never an implicit cwd) and is rejected with
-`mode="advisory"` (advisory is fixed read-only by design). It adds
-`--sandbox workspace-write -a never`: approvals are disabled because a
-spawned Codex process's stdin is `/dev/null`, so any approval prompt would
-just hang until timeout instead of ever being answered — the sandbox
-boundary is what keeps an unattended, un-approvable run safe.
+`ask_codex` is read-only unless `write=True` is passed explicitly (and
+`HARDLINE_ALLOW_WRITE=1` is set — see above) — omit `write` and behavior is
+unchanged from before this option existed. `write=True` requires an explicit
+`workdir` (never an implicit cwd) and is rejected with `mode="advisory"`
+(advisory is fixed read-only by design). It adds `--sandbox workspace-write
+-a never`: approvals are disabled because a spawned Codex process's stdin is
+`/dev/null`, so any approval prompt would just hang until timeout instead of
+ever being answered — the sandbox boundary is what keeps an unattended,
+un-approvable run safe.
 
 ```text
 ask_codex(
@@ -170,9 +196,10 @@ ask_codex(
 )
 ```
 
-For a task that shouldn't block the caller, `ask_codex_async` runs the same
-`ask_codex` on a background thread and returns `{"ok": true, "dispatched":
-true, "label": ...}` immediately. The result lands in the mailbox as a
+For a task that shouldn't block the caller, `ask_codex_async` dispatches the
+same `ask_codex` through the bounded background thread pool (see
+*Configuration*) and returns `{"ok": true, "dispatched": true, "label": ...}`
+immediately. The result lands in the mailbox as a
 message from `"codex"` to `from_agent` once the run finishes — poll it the
 same way you'd poll for any other mailbox message:
 
@@ -201,21 +228,17 @@ compatible: a prompt with no additional options still returns the plain
 `ok`/`reply` object, not the fuller telemetry shape. Tool access is not part
 of that compatibility promise — see *Claude write access and background
 dispatch* below for the one behavior change (Edit/Write/NotebookEdit are now
-denied unless `write=True`). The bare path *always* explicitly pins `--model
-sonnet` rather than omitting `--model` — a bare `claude -p` inherits whatever
-the installed Claude CLI's own global settings currently default to, which is
-ambient, mutable state (an interactive `/model` switch changes it for every
-unflagged invocation, including hardline's). `sonnet` is Claude Code's own
-tier alias, not a versioned model id, so it tracks whichever model Claude
-Code itself currently resolves `sonnet` to — the same mechanism
-`model="fable"`/`model="opus"` already rely on — and never needs bumping in
-code when a new Sonnet ships. This pin applies uniformly to
+denied unless `write=True`). Omitting `model` passes no `--model` flag at
+all, so Claude Code's own configured default applies — the same posture
+`ask_hermes`/`ask_codex` already have toward their own CLI's default;
+hardline does not second-guess it. This applies uniformly to
 `ask_claude(prompt)` and to `send(..., to_agent="claude", deliver=true)`'s
-push-notice path — both spawn `claude` the same way. Passing `model="sonnet"`
-explicitly resolves to the same model but is a *different* caller intent
-than omitting it, so it takes the full telemetry path below (returning
-`actual_model`, usage, etc.) instead of the plain `ok`/`reply` shortcut — the
-same as any other explicit `model=`.
+push-notice path — both spawn `claude` the same way. Passing an *explicit*
+`model=` (including `model="sonnet"`, which is Claude Code's own tier alias
+and tracks whichever model it currently resolves that to) is a different
+caller intent than omitting it, so it takes the full telemetry path below
+(returning `actual_model`, usage, etc.) instead of the plain `ok`/`reply`
+shortcut.
 
 For model-aware calls, set `model`, `effort`, or `mode`:
 
@@ -261,11 +284,13 @@ mutation — this is a closer analog than advisory mode's zero-tools
 restriction, which is a separate, stricter concept for isolated opinions.
 
 `write=True` requires an explicit `workdir` (never write into hardline-mcp's
-own cwd) and is rejected with `mode="advisory"`. It grants full tool access
-and adds `--permission-mode bypassPermissions`: approvals are disabled
-because a spawned Claude process's stdin is `/dev/null`, so an interactive
-permission prompt would hang until timeout instead of ever being answered —
-the same rationale as Codex's `-a never`.
+own cwd), is rejected with `mode="advisory"`, and is refused unless
+`HARDLINE_ALLOW_WRITE=1` is set for this process (see *Write access requires
+an explicit opt-in* above). It grants full tool access and adds
+`--permission-mode bypassPermissions`: approvals are disabled because a
+spawned Claude process's stdin is `/dev/null`, so an interactive permission
+prompt would hang until timeout instead of ever being answered — the same
+rationale as Codex's `-a never`.
 
 ```text
 ask_claude(
@@ -280,9 +305,10 @@ hardline targets it by launching the child process with that directory as
 its `cwd`; omitted, `ask_claude` inherits whatever directory hardline-mcp
 itself was started from, same as before this option existed.
 
-`ask_claude_async` mirrors `ask_codex_async` exactly: runs `ask_claude` on a
-background thread and delivers the result through the mailbox (`sender=
-"claude"`, `recipient=from_agent`) once it finishes.
+`ask_claude_async` mirrors `ask_codex_async` exactly: dispatches `ask_claude`
+through the same bounded background thread pool and delivers the result
+through the mailbox (`sender="claude"`, `recipient=from_agent`) once it
+finishes.
 
 ```text
 ask_claude_async(
