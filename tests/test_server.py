@@ -35,7 +35,9 @@ def test_async_dispatch_is_bounded_not_unbounded():
         # be queued, so a further acquire times out until the others finish.
         for _ in range(workers):
             assert running.acquire(timeout=5)
-        assert not running.acquire(timeout=0.2), "pool ran more than max_workers at once"
+        assert not running.acquire(timeout=0.2), (
+            "pool ran more than max_workers at once"
+        )
     finally:
         release.set()
 

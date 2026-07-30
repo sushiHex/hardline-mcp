@@ -51,6 +51,7 @@ _async_executor = ThreadPoolExecutor(
     max_workers=_ASYNC_MAX_WORKERS, thread_name_prefix="hardline-async"
 )
 
+
 def _drain_async_executor_at_exit() -> None:
     """Drop queued-but-unstarted dispatches so shutdown isn't unbounded.
 

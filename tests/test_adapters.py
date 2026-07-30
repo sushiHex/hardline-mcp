@@ -408,7 +408,9 @@ def test_ask_codex_write_rejects_advisory_mode(allow_write, tmp_path):
     assert "advisory" in out["error"].lower()
 
 
-def test_ask_codex_write_adds_workspace_write_sandbox(allow_write, monkeypatch, tmp_path):
+def test_ask_codex_write_adds_workspace_write_sandbox(
+    allow_write, monkeypatch, tmp_path
+):
     stdout = _codex_stream(
         {"type": "thread.started", "thread_id": "thread-write"},
         {
