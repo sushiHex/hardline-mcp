@@ -18,9 +18,12 @@ the same posture as the sibling vram-mcp's claim ledger.
 
 from __future__ import annotations
 
+import atexit
 import functools
 import json
 import threading
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
 import anyio.to_thread
@@ -34,6 +37,52 @@ ClaudeEffort = Literal["default", "low", "medium", "high", "xhigh", "max"]
 ClaudeMode = Literal["default", "advisory"]
 CodexEffort = Literal["default", "low", "medium", "high", "xhigh", "max", "ultra"]
 CodexMode = Literal["default", "advisory"]
+
+# ask_*_async fire real ask_claude/ask_codex subprocess calls (each bounded by
+# its own _CLAUDE_TIMEOUT_S/_CODEX_TIMEOUT_S, up to 900s) in the background.
+# A bare `threading.Thread` per call has no ceiling - repeated dispatches (a
+# runaway caller, or several concurrent write=True requests) would pile up
+# unbounded concurrent agent subprocesses. Route through a small fixed-size
+# pool instead: excess dispatches queue rather than spawning without limit.
+# Override for local tuning; not exposed as a per-call parameter since it
+# bounds the whole hardline-mcp process, not one request.
+_ASYNC_MAX_WORKERS = adapters.positive_int_env("HARDLINE_ASYNC_MAX_WORKERS", 4)
+_async_executor = ThreadPoolExecutor(
+    max_workers=_ASYNC_MAX_WORKERS, thread_name_prefix="hardline-async"
+)
+
+
+def _drain_async_executor_at_exit() -> None:
+    """Drop queued-but-unstarted dispatches so shutdown isn't unbounded.
+
+    ThreadPoolExecutor's workers are non-daemon and it joins every one of
+    them at interpreter shutdown, so a full queue would run to completion
+    before the process could exit - serially, each up to the 900s agent
+    timeout. The per-call ``threading.Thread(daemon=True)`` this pool
+    replaced was never joined and exited instantly, so that ceiling is a
+    regression this restores: teardown is now bounded by the longest
+    *already-running* call rather than by everything still queued behind
+    it. A running dispatch is deliberately still awaited - its subprocess
+    can't be interrupted safely mid-call. A queued one never started, so
+    the mailbox result it would have written isn't owed to anyone.
+
+    Registered through threading's registry, not ``atexit``: verified
+    empirically that ``threading._shutdown()`` (where ThreadPoolExecutor's
+    own joining hook lives) runs *before* ``atexit`` callbacks, so an
+    ``atexit`` registration here is a silent no-op - the join has already
+    happened by the time it fires. Registering after ``concurrent.futures``
+    is imported puts this ahead of that hook, since the registry is LIFO.
+    The API is private, so treat its absence on some future Python as
+    merely losing this optimization rather than an import-time crash.
+    """
+    _async_executor.shutdown(wait=False, cancel_futures=True)
+
+
+_register_threading_atexit = getattr(threading, "_register_atexit", None)
+if _register_threading_atexit is not None:  # pragma: no branch - present on 3.10+
+    _register_threading_atexit(_drain_async_executor_at_exit)
+else:  # pragma: no cover - only on a Python that dropped the private hook
+    atexit.register(_drain_async_executor_at_exit)
 
 
 async def _in_thread(fn, *args, **kwargs):
@@ -141,17 +190,19 @@ async def ask_codex(
 ) -> dict:
     """Ask Codex a question and wait for its reply.
 
-    Spawns an ephemeral ``codex exec`` pinned to GPT-5.6 Sol by default.
-    Optional model/effort selection enables JSONL usage/thread telemetry.
+    Spawns an ephemeral ``codex exec``. Omitting ``model`` passes no
+    ``--model`` flag, so Codex's own configured default applies. Optional
+    model/effort selection enables JSONL usage/thread telemetry.
     Advisory mode uses ChatGPT auth preflight, a temporary auth-only CODEX_HOME,
     a neutral read-only directory, ignored user/project configuration, and
     stripped API-provider overrides.
     ``workdir`` targets a repository in default mode and is rejected in advisory
     mode. ``write=True`` opts into a workspace-write sandbox with approvals
-    disabled (unattended) — it requires ``workdir`` and is rejected in advisory
-    mode; omitted, Codex stays read-only. Codex JSONL does not currently report
-    served model/effective effort, so those telemetry fields remain null rather
-    than being guessed.
+    disabled (unattended) — it requires ``workdir``, is rejected in advisory
+    mode, and is refused unless this hardline-mcp process has
+    ``HARDLINE_ALLOW_WRITE=1`` set; omitted, Codex stays read-only. Codex
+    JSONL does not currently report served model/effective effort, so those
+    telemetry fields remain null rather than being guessed.
     """
     return await _in_thread(
         adapters.ask_codex,
@@ -179,8 +230,8 @@ def _ask_async_impl(
     """Shared body for ask_codex_async/ask_claude_async - only the adapter
     function and the mailbox sender identity differ between agents.
 
-    Does not block (validation is trivial, and starting a thread returns
-    immediately), so callers invoke this directly rather than through
+    Does not block (validation is trivial, and submitting to the executor
+    returns immediately), so callers invoke this directly rather than through
     _in_thread - routing a call this cheap through the worker-thread pool
     would just add a wasted thread-pool round trip.
     """
@@ -192,12 +243,28 @@ def _ask_async_impl(
         }
 
     def _run() -> None:
-        result = ask_fn(prompt, model=model, effort=effort, workdir=workdir, write=write)
+        # ask_fn (adapters.ask_claude/ask_codex) is designed to never raise -
+        # every failure mode it recognizes already comes back as an
+        # {"ok": False, "error"} dict. This is a backstop for whatever it
+        # doesn't recognize: without it, an uncaught exception here would
+        # kill this pool thread silently, mailbox.send would never run, and
+        # a caller polling inbox(from_agent) would wait forever with no
+        # error ever surfacing anywhere.
+        try:
+            result = ask_fn(
+                prompt, model=model, effort=effort, workdir=workdir, write=write
+            )
+        except Exception as exc:  # noqa: BLE001 - last-resort dispatch backstop
+            result = {
+                "ok": False,
+                "error": f"{agent} async dispatch raised {type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(),
+            }
         if label is not None:
             result["label"] = label
         mailbox.send(agent, from_agent, json.dumps(result))
 
-    threading.Thread(target=_run, daemon=True).start()
+    _async_executor.submit(_run)
     return {"ok": True, "dispatched": True, "label": label}
 
 
@@ -246,20 +313,23 @@ async def ask_claude(
     """Ask Claude Code a question and wait for its reply.
 
     With no options, preserves the original one-shot ``claude -p`` behavior
-    and response shape, plus (parity with Codex) Edit/Write/NotebookEdit are
-    denied by default — inspection tools like Read/Grep/Bash still work.
-    ``model`` pins a Claude alias/full model ID. ``effort`` is one of
-    ``default|low|medium|high|xhigh|max``; ``default`` omits the flag.
-    ``workdir`` targets a repository in default mode and is rejected in
-    advisory mode. ``write=True`` opts into full tool access plus
+    and response shape — omitting ``model`` passes no ``--model`` flag, so
+    Claude Code's own configured default applies — plus (parity with Codex)
+    Edit/Write/NotebookEdit are denied by default — inspection tools like
+    Read/Grep/Bash still work. ``model`` pins a Claude alias/full model ID.
+    ``effort`` is one of ``default|low|medium|high|xhigh|max``; ``default``
+    omits the flag. ``workdir`` targets a repository in default mode and is
+    rejected in advisory mode. ``write=True`` opts into full tool access plus
     ``--permission-mode bypassPermissions`` (unattended — stdin is
     ``/dev/null``, so an interactive prompt would hang to timeout instead of
-    being answered); it requires ``workdir`` and is rejected in advisory
-    mode. Mode ``advisory`` disables tools/project customizations, runs in a
-    neutral cwd, strips API-provider overrides, and fails closed unless
-    response telemetry verifies first-party account auth without overage.
-    Optioned calls return actual-model, usage, rate-limit, auth-verification,
-    and safeguard fallback metadata in addition to ``ok``/``reply``.
+    being answered); it requires ``workdir``, is rejected in advisory mode,
+    and is refused unless this hardline-mcp process has
+    ``HARDLINE_ALLOW_WRITE=1`` set. Mode ``advisory`` disables tools/project
+    customizations, runs in a neutral cwd, strips API-provider overrides, and
+    fails closed unless response telemetry verifies first-party account auth
+    without overage. Optioned calls return actual-model, usage, rate-limit,
+    auth-verification, and safeguard fallback metadata in addition to
+    ``ok``/``reply``.
     """
     return await _in_thread(
         adapters.ask_claude,

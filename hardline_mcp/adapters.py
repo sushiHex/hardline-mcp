@@ -3,22 +3,25 @@ reached.
 
 - hermes -> ``hermes chat -Q -q <prompt>``  (quiet one-shot query; -Q strips
                                              the banner/box-chrome, -q = query)
-- codex  -> ``codex exec --model gpt-5.6-sol --ephemeral -- <prompt>``
-                                            (non-interactive execution; with
-                                             model/effort/advisory telemetry)
-- claude -> ``claude -p --model sonnet <prompt>``  (headless print mode; the
-                                             model is always pinned explicitly
-                                             - never left to whatever the
-                                             installed Claude CLI's own global
-                                             settings currently default to -
-                                             with an optioned model/effort path)
+- codex  -> ``codex exec --ephemeral -- <prompt>``  (non-interactive execution;
+                                            omitted ``model`` defers to Codex's
+                                            own configured default, exactly
+                                            like ``ask_hermes`` defers to
+                                            Hermes's; with optional model/
+                                            effort/advisory telemetry)
+- claude -> ``claude -p <prompt>``           (headless print mode; omitted
+                                             ``model`` likewise defers to
+                                             Claude Code's own configured
+                                             default, with an optioned model/
+                                             effort path)
 
 ``ask()`` runs the command and returns the reply synchronously; ``deliver()``
 pushes a one-shot notice through the same dispatch. Both are pure subprocess
 wrappers (no ``mcp`` import) so the server layer can run them off-thread.
-``ask("claude", ...)``/``deliver("claude", ...)`` both route through
-``ask_claude()`` rather than dispatching claude directly, so the model pin
-applies uniformly.
+``ask("claude", ...)``/``deliver("claude", ...)`` and ``ask("codex", ...)``/
+``deliver("codex", ...)`` all route through ``ask_claude()``/``ask_codex()``
+rather than dispatching directly, so behavior (including the read-only-by-
+default posture) applies uniformly regardless of call site.
 
 Executable resolution, in precedence order, per agent:
 
@@ -92,12 +95,6 @@ _TIMEOUT_S = 180
 _CLAUDE_TIMEOUT_S = 900
 _CODEX_TIMEOUT_S = 900
 
-# A bare `claude -p` with no --model inherits whatever the installed Claude
-# CLI's own global settings currently default to - ambient, mutable state
-# (e.g. an interactive `/model` switch) that hardline must not silently
-# depend on. Every unqualified claude call pins this explicitly instead.
-_CLAUDE_DEFAULT_MODEL = "sonnet"
-_CODEX_DEFAULT_MODEL = "gpt-5.6-sol"
 _CODEX_EFFORTS = frozenset(
     {"default", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
@@ -122,6 +119,11 @@ _CODEX_ADVISORY_DEVELOPER_INSTRUCTIONS = (
 
 _CLAUDE_EFFORTS = frozenset({"default", "low", "medium", "high", "xhigh", "max"})
 _CLAUDE_MODES = frozenset({"default", "advisory"})
+# Denied unless write=True, so Claude matches Codex's read-only-by-default
+# posture. Inspection tools (Read/Grep/Bash) stay available - this is the
+# narrower "can't mutate the workspace" line, not advisory mode's no-tools-
+# at-all isolation.
+_CLAUDE_READONLY_DENIED_TOOLS = "Edit,Write,NotebookEdit"
 _CLAUDE_AUTH_OVERRIDE_ENV = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -155,21 +157,34 @@ def known_agents() -> tuple[str, ...]:
     return tuple(_DISPATCH)
 
 
+def positive_int_env(key: str, default: int, *, unit: str = "") -> int:
+    """Read a positive-integer ``HARDLINE_*`` knob, or ``default`` if unset.
+
+    Every such knob validates the same way, so they fail the same way: a
+    typo'd or non-positive value raises ValueError naming the variable
+    rather than silently falling back to the default (which would hide the
+    typo) or surfacing a bare ``invalid literal for int()``.
+    """
+    if key not in os.environ:
+        return default
+    suffix = f" number of {unit}" if unit else ""
+    message = f"{key} must be a positive integer{suffix}"
+    try:
+        value = int(os.environ[key].strip())
+    except ValueError as exc:
+        raise ValueError(message) from exc
+    if value <= 0:
+        raise ValueError(message)
+    return value
+
+
 def _timeout_for(agent: str) -> int:
     if agent not in {"claude", "codex"}:
         return _TIMEOUT_S
-    key = f"HARDLINE_{agent.upper()}_TIMEOUT_S"
     default = _CLAUDE_TIMEOUT_S if agent == "claude" else _CODEX_TIMEOUT_S
-    if key not in os.environ:
-        return default
-    raw = os.environ[key].strip()
-    try:
-        timeout_s = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{key} must be a positive integer number of seconds") from exc
-    if timeout_s <= 0:
-        raise ValueError(f"{key} must be a positive integer number of seconds")
-    return timeout_s
+    return positive_int_env(
+        f"HARDLINE_{agent.upper()}_TIMEOUT_S", default, unit="seconds"
+    )
 
 
 def _run_cmd(
@@ -225,6 +240,62 @@ def _run_agent_cmd(agent: str, argv: list[str], **kwargs) -> dict:
     return _run_cmd(argv, timeout_s=timeout_s, **kwargs)
 
 
+def _write_enabled() -> bool:
+    """``write=True`` requests bypassPermissions/workspace-write - unattended
+    (stdin is DEVNULL, so no prompt is ever answered) and, once workdir is
+    reachable, no more restricted than what the OS user could already do
+    directly. That is a categorically different exposure from every other
+    hardline tool, which only ever runs read-only or self-contained calls:
+    it removes the human-approval step from destructive actions, and a
+    hardline registration with no per-tool allow-list (unlike vram-mcp's)
+    would otherwise let any caller reach it with zero gating. Require an
+    explicit opt-in per hardline-mcp *process* so a registration that never
+    sets this (e.g. Hermes's, driven by inbound Discord messages) cannot use
+    write mode at all, regardless of what a caller asks for."""
+    return os.environ.get("HARDLINE_ALLOW_WRITE") == "1"
+
+
+def _validate_model(name: str, model: str | None) -> dict | None:
+    """Shared model-identifier validation for ask_codex/ask_claude.
+
+    Returns an ``{"ok": False, "error"}`` dict on failure (the caller returns
+    it immediately) or ``None`` when the model is absent or acceptable.
+    ``None`` is always valid: omitting the model passes no ``--model`` flag
+    at all, deferring to that CLI's own configured default.
+    """
+    if model is None:
+        return None
+    if (
+        not isinstance(model, str)
+        or not model
+        or model.startswith("-")
+        or any(char.isspace() for char in model)
+    ):
+        return {
+            "ok": False,
+            "error": f"{name} model must be a non-empty, non-option identifier without whitespace",
+        }
+    return None
+
+
+def _is_plain_call(
+    model: str | None, effort: str, mode: str, workdir: str | None, write: bool
+) -> bool:
+    """Whether this is the unqualified default call - no option set at all.
+
+    That call keeps a lightweight one-shot invocation and the original
+    compact ``{"ok", "reply"}`` reply shape; any option at all opts into the
+    structured/telemetry path instead.
+    """
+    return (
+        model is None
+        and effort == "default"
+        and mode == "default"
+        and workdir is None
+        and not write
+    )
+
+
 def _validate_workdir_write(
     name: str, mode: str, workdir: str | None, write: bool
 ) -> tuple[dict | None, str | None]:
@@ -235,6 +306,14 @@ def _validate_workdir_write(
     immediately) and ``None`` on success, in which case ``resolved_workdir``
     is the absolute path, or ``None`` if no workdir was given.
     """
+    if write and not _write_enabled():
+        return {
+            "ok": False,
+            "error": (
+                f"{name} write mode is disabled for this hardline-mcp process; "
+                "set HARDLINE_ALLOW_WRITE=1 in its environment to enable it"
+            ),
+        }, None
     if mode == "advisory" and workdir is not None:
         return {
             "ok": False,
@@ -253,7 +332,10 @@ def _validate_workdir_write(
     if workdir is not None and (
         not isinstance(workdir, str) or not Path(workdir).is_dir()
     ):
-        return {"ok": False, "error": f"{name} workdir must be an existing directory"}, None
+        return {
+            "ok": False,
+            "error": f"{name} workdir must be an existing directory",
+        }, None
     if workdir is not None:
         return None, str(Path(workdir).resolve())
     return None, None
@@ -271,8 +353,9 @@ def ask(agent: str, text: str) -> dict:
         }
     if agent == "claude":
         # Route through ask_claude so every claude invocation - including
-        # deliver()'s push-notice path - pins the explicit default model
-        # instead of falling through to the bare claude -p dispatch below.
+        # deliver()'s push-notice path - gets the same read-only-by-default
+        # posture instead of falling through to the bare claude -p dispatch
+        # below, which would carry no tool restrictions at all.
         return ask_claude(text)
     if agent == "codex":
         return ask_codex(text)
@@ -282,7 +365,7 @@ def ask(agent: str, text: str) -> dict:
 def _parse_codex_jsonl(
     output: str,
     *,
-    requested_model: str,
+    requested_model: str | None,
     requested_effort: str,
     subscription_configured: bool | None = None,
 ) -> dict:
@@ -381,12 +464,18 @@ def ask_codex(
 ) -> dict:
     """Query Codex with explicit routing and optional structured telemetry.
 
+    Omitting ``model`` passes no ``--model`` flag at all, so Codex's own
+    configured default applies - the same posture ``ask_hermes`` already has
+    toward Hermes's default; hardline does not second-guess it.
+
     ``write=True`` opts into a workspace-write sandbox with approvals
     disabled (unattended - stdin is DEVNULL, so any approval prompt would
     just hang to timeout instead of ever being answered). It requires an
-    explicit ``workdir`` (never write into an implicit cwd) and is
-    incompatible with ``mode="advisory"`` (advisory is fixed read-only by
-    design). Omitted, Codex stays read-only exactly as before.
+    explicit ``workdir`` (never write into an implicit cwd), is incompatible
+    with ``mode="advisory"`` (advisory is fixed read-only by design), and is
+    rejected outright unless ``HARDLINE_ALLOW_WRITE=1`` is set in this
+    process's environment (see ``_write_enabled``) - omitted, Codex stays
+    read-only exactly as before.
     """
     if effort not in _CODEX_EFFORTS:
         return {
@@ -401,28 +490,14 @@ def ask_codex(
     error, workdir = _validate_workdir_write("Codex", mode, workdir, write)
     if error is not None:
         return error
-    model_omitted = model is None
-    if model_omitted:
-        model = _CODEX_DEFAULT_MODEL
-    if (
-        not isinstance(model, str)
-        or not model
-        or model.startswith("-")
-        or any(char.isspace() for char in model)
-    ):
-        return {
-            "ok": False,
-            "error": "Codex model must be a non-empty, non-option identifier without whitespace",
-        }
-    argv = _prefix_for("codex") + ["--model", model, "--ephemeral"]
-    if (
-        model_omitted
-        and effort == "default"
-        and mode == "default"
-        and workdir is None
-        and not write
-    ):
+    error = _validate_model("Codex", model)
+    if error is not None:
+        return error
+    argv = _prefix_for("codex") + ["--ephemeral"]
+    if _is_plain_call(model, effort, mode, workdir, write):
         return _run_agent_cmd("codex", argv + ["--", prompt])
+    if model is not None:
+        argv += ["--model", model]
     argv.append("--json")
     if effort != "default":
         argv += ["-c", f'model_reasoning_effort="{effort}"']
@@ -619,29 +694,27 @@ def ask_claude(
 ) -> dict:
     """Query Claude Code with optional model/effort selection and telemetry.
 
-    Omitting ``model`` still pins an explicit default (the ``sonnet`` alias,
-    not a versioned model id - it resolves the same way an explicit
-    ``model="sonnet"`` would, so it tracks whatever Claude Code's own alias
-    resolution currently considers "sonnet") rather than falling through to
-    whatever the installed Claude CLI's own global settings currently select
-    for un-flagged ``claude -p`` calls - that default is ambient, mutable
-    state (e.g. an interactive ``/model`` switch) hardline must not silently
-    inherit. Supplying model/effort/workdir/write, or selecting advisory mode,
-    enables stream-json so callers can distinguish the requested model from
-    the model actually served. Advisory mode additionally strips
-    API-provider overrides, disables tools and project customizations, and
-    runs in a neutral temporary directory. The parsed result fails closed
-    unless telemetry verifies first-party account auth without overage;
-    command wrappers and admin policy remain trusted.
+    Omitting ``model`` passes no ``--model`` flag at all, so Claude Code's own
+    configured default applies - the same posture ``ask_hermes``/``ask_codex``
+    already have toward their own CLI's default; hardline does not
+    second-guess it. Supplying model/effort/workdir/write, or selecting
+    advisory mode, enables stream-json so callers can distinguish the
+    requested model from the model actually served. Advisory mode
+    additionally strips API-provider overrides, disables tools and project
+    customizations, and runs in a neutral temporary directory. The parsed
+    result fails closed unless telemetry verifies first-party account auth
+    without overage; command wrappers and admin policy remain trusted.
 
     Parity with ``ask_codex``: unless ``write=True``, Claude is denied
     Edit/Write/NotebookEdit (the closer analog of Codex's read-only sandbox
     than advisory's zero-tools mode - inspection tools like Read/Grep/Bash
     still work). ``write=True`` requires an explicit ``workdir`` (never write
-    into an implicit cwd), is rejected with ``mode="advisory"``, and passes
-    ``--permission-mode bypassPermissions`` - stdin is ``/dev/null``, so any
-    interactive permission prompt would otherwise hang until timeout instead
-    of ever being answered.
+    into an implicit cwd), is rejected with ``mode="advisory"``, is rejected
+    outright unless ``HARDLINE_ALLOW_WRITE=1`` is set in this process's
+    environment (see ``_write_enabled``), and passes ``--permission-mode
+    bypassPermissions`` - stdin is ``/dev/null``, so any interactive
+    permission prompt would otherwise hang until timeout instead of ever
+    being answered.
     """
     if effort not in _CLAUDE_EFFORTS:
         return {
@@ -656,48 +729,33 @@ def ask_claude(
     error, workdir = _validate_workdir_write("Claude", mode, workdir, write)
     if error is not None:
         return error
-    model_omitted = model is None
-    if model_omitted:
-        model = _CLAUDE_DEFAULT_MODEL
-    if (
-        not isinstance(model, str)
-        or not model
-        or model.startswith("-")
-        or any(char.isspace() for char in model)
-    ):
-        return {
-            "ok": False,
-            "error": "Claude model must be a non-empty, non-option identifier without whitespace",
-        }
+    error = _validate_model("Claude", model)
+    if error is not None:
+        return error
 
     # Exact backward-compatible reply SHAPE ({"ok","reply"}, no stream-json
     # telemetry) for the unqualified default call only - a lightweight plain
-    # `claude -p` invocation, just with the model pinned explicitly and
-    # Edit/Write/NotebookEdit denied (read-only by default, matching Codex).
-    # An *explicit* model="sonnet" still gets full telemetry below, same as
-    # any other explicit model selection - "omitted" and "happens to equal
-    # the default" are different caller intents.
-    if (
-        model_omitted
-        and effort == "default"
-        and mode == "default"
-        and workdir is None
-        and not write
-    ):
+    # `claude -p` invocation, no --model flag (Claude Code's own default
+    # applies), with Edit/Write/NotebookEdit denied (read-only by default,
+    # matching Codex). An *explicit* model="sonnet" still gets full telemetry
+    # below, same as any other explicit model selection - "omitted" and
+    # "happens to equal Claude's own current default" are different caller
+    # intents.
+    if _is_plain_call(model, effort, mode, workdir, write):
         return _run_agent_cmd(
             "claude",
             _prefix_for("claude")
             + [
-                "--model",
-                model,
                 "--disallowedTools",
-                "Edit,Write,NotebookEdit",
+                _CLAUDE_READONLY_DENIED_TOOLS,
                 "--",
                 prompt,
             ],
         )
 
-    argv = _prefix_for("claude") + ["--model", model]
+    argv = _prefix_for("claude")
+    if model is not None:
+        argv += ["--model", model]
     if effort != "default":
         argv += ["--effort", effort]
     argv += [
@@ -733,7 +791,7 @@ def ask_claude(
     elif write:
         argv += ["--permission-mode", "bypassPermissions"]
     else:
-        argv += ["--disallowedTools", "Edit,Write,NotebookEdit"]
+        argv += ["--disallowedTools", _CLAUDE_READONLY_DENIED_TOOLS]
     # Stop option parsing before the untrusted prompt. Otherwise a prompt that
     # begins with ``--`` can be interpreted as another Claude CLI flag.
     argv += ["--", prompt]
