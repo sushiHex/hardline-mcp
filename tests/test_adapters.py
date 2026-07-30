@@ -8,6 +8,14 @@ import pytest
 from hardline_mcp import adapters
 
 
+@pytest.fixture
+def allow_write(monkeypatch):
+    """Opt this hardline-mcp process into write mode, the way an operator
+    would. Tests of the gate *itself* set the variable explicitly instead —
+    for them its value is the thing under test, not setup."""
+    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
+
+
 class _FakeCompleted:
     def __init__(self, stdout="", stderr="", returncode=0):
         self.stdout = stdout
@@ -388,22 +396,19 @@ def test_ask_codex_write_disabled_for_non_1_values(monkeypatch, tmp_path, value)
     assert "HARDLINE_ALLOW_WRITE" in out["error"]
 
 
-def test_ask_codex_write_requires_workdir(monkeypatch):
-    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
+def test_ask_codex_write_requires_workdir(allow_write):
     out = adapters.ask_codex("patch it", write=True)
     assert out["ok"] is False
     assert "workdir" in out["error"].lower()
 
 
-def test_ask_codex_write_rejects_advisory_mode(monkeypatch, tmp_path):
-    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
+def test_ask_codex_write_rejects_advisory_mode(allow_write, tmp_path):
     out = adapters.ask_codex("patch it", write=True, mode="advisory")
     assert out["ok"] is False
     assert "advisory" in out["error"].lower()
 
 
-def test_ask_codex_write_adds_workspace_write_sandbox(monkeypatch, tmp_path):
-    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
+def test_ask_codex_write_adds_workspace_write_sandbox(allow_write, monkeypatch, tmp_path):
     stdout = _codex_stream(
         {"type": "thread.started", "thread_id": "thread-write"},
         {
@@ -740,24 +745,21 @@ def test_ask_claude_write_disabled_by_default(monkeypatch, tmp_path):
     assert calls == []
 
 
-def test_ask_claude_write_requires_workdir(monkeypatch):
-    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
+def test_ask_claude_write_requires_workdir(allow_write):
     out = adapters.ask_claude("edit it", write=True)
     assert out["ok"] is False
     assert "workdir" in out["error"].lower()
 
 
-def test_ask_claude_write_rejects_advisory_mode(monkeypatch, tmp_path):
-    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
+def test_ask_claude_write_rejects_advisory_mode(allow_write, tmp_path):
     out = adapters.ask_claude("edit it", write=True, mode="advisory")
     assert out["ok"] is False
     assert "advisory" in out["error"].lower()
 
 
 def test_ask_claude_write_grants_full_tools_and_bypasses_permissions(
-    monkeypatch, tmp_path
+    allow_write, monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
     stdout = _claude_stream(
         {"type": "system", "subtype": "init", "model": "claude-fable-5"},
         {"type": "result", "subtype": "success", "result": "edited"},

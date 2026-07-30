@@ -95,16 +95,6 @@ _TIMEOUT_S = 180
 _CLAUDE_TIMEOUT_S = 900
 _CODEX_TIMEOUT_S = 900
 
-# Omitting `model` on ask_claude/ask_codex means exactly that: no --model flag
-# is passed at all, and each CLI's own configured default applies - the same
-# posture ask_hermes already has toward Hermes's default. This was previously
-# an explicit pin (e.g. "sonnet"), added when a stale global Claude Code
-# settings.json default ("model": "claude-fable-5[1m]") was found silently
-# governing unflagged calls. That stale override has since been removed, and
-# Claude Code's true native default (verified via `--setting-sources ""`,
-# which bypasses it entirely) is itself the latest Opus - so there is no
-# longer a reason for hardline to second-guess either CLI's own default.
-
 _CODEX_EFFORTS = frozenset(
     {"default", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
@@ -129,6 +119,11 @@ _CODEX_ADVISORY_DEVELOPER_INSTRUCTIONS = (
 
 _CLAUDE_EFFORTS = frozenset({"default", "low", "medium", "high", "xhigh", "max"})
 _CLAUDE_MODES = frozenset({"default", "advisory"})
+# Denied unless write=True, so Claude matches Codex's read-only-by-default
+# posture. Inspection tools (Read/Grep/Bash) stay available - this is the
+# narrower "can't mutate the workspace" line, not advisory mode's no-tools-
+# at-all isolation.
+_CLAUDE_READONLY_DENIED_TOOLS = "Edit,Write,NotebookEdit"
 _CLAUDE_AUTH_OVERRIDE_ENV = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -162,21 +157,34 @@ def known_agents() -> tuple[str, ...]:
     return tuple(_DISPATCH)
 
 
+def positive_int_env(key: str, default: int, *, unit: str = "") -> int:
+    """Read a positive-integer ``HARDLINE_*`` knob, or ``default`` if unset.
+
+    Every such knob validates the same way, so they fail the same way: a
+    typo'd or non-positive value raises ValueError naming the variable
+    rather than silently falling back to the default (which would hide the
+    typo) or surfacing a bare ``invalid literal for int()``.
+    """
+    if key not in os.environ:
+        return default
+    suffix = f" number of {unit}" if unit else ""
+    message = f"{key} must be a positive integer{suffix}"
+    try:
+        value = int(os.environ[key].strip())
+    except ValueError as exc:
+        raise ValueError(message) from exc
+    if value <= 0:
+        raise ValueError(message)
+    return value
+
+
 def _timeout_for(agent: str) -> int:
     if agent not in {"claude", "codex"}:
         return _TIMEOUT_S
-    key = f"HARDLINE_{agent.upper()}_TIMEOUT_S"
     default = _CLAUDE_TIMEOUT_S if agent == "claude" else _CODEX_TIMEOUT_S
-    if key not in os.environ:
-        return default
-    raw = os.environ[key].strip()
-    try:
-        timeout_s = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{key} must be a positive integer number of seconds") from exc
-    if timeout_s <= 0:
-        raise ValueError(f"{key} must be a positive integer number of seconds")
-    return timeout_s
+    return positive_int_env(
+        f"HARDLINE_{agent.upper()}_TIMEOUT_S", default, unit="seconds"
+    )
 
 
 def _run_cmd(
@@ -247,6 +255,47 @@ def _write_enabled() -> bool:
     return os.environ.get("HARDLINE_ALLOW_WRITE") == "1"
 
 
+def _validate_model(name: str, model: str | None) -> dict | None:
+    """Shared model-identifier validation for ask_codex/ask_claude.
+
+    Returns an ``{"ok": False, "error"}`` dict on failure (the caller returns
+    it immediately) or ``None`` when the model is absent or acceptable.
+    ``None`` is always valid: omitting the model passes no ``--model`` flag
+    at all, deferring to that CLI's own configured default.
+    """
+    if model is None:
+        return None
+    if (
+        not isinstance(model, str)
+        or not model
+        or model.startswith("-")
+        or any(char.isspace() for char in model)
+    ):
+        return {
+            "ok": False,
+            "error": f"{name} model must be a non-empty, non-option identifier without whitespace",
+        }
+    return None
+
+
+def _is_plain_call(
+    model: str | None, effort: str, mode: str, workdir: str | None, write: bool
+) -> bool:
+    """Whether this is the unqualified default call - no option set at all.
+
+    That call keeps a lightweight one-shot invocation and the original
+    compact ``{"ok", "reply"}`` reply shape; any option at all opts into the
+    structured/telemetry path instead.
+    """
+    return (
+        model is None
+        and effort == "default"
+        and mode == "default"
+        and workdir is None
+        and not write
+    )
+
+
 def _validate_workdir_write(
     name: str, mode: str, workdir: str | None, write: bool
 ) -> tuple[dict | None, str | None]:
@@ -304,8 +353,9 @@ def ask(agent: str, text: str) -> dict:
         }
     if agent == "claude":
         # Route through ask_claude so every claude invocation - including
-        # deliver()'s push-notice path - pins the explicit default model
-        # instead of falling through to the bare claude -p dispatch below.
+        # deliver()'s push-notice path - gets the same read-only-by-default
+        # posture instead of falling through to the bare claude -p dispatch
+        # below, which would carry no tool restrictions at all.
         return ask_claude(text)
     if agent == "codex":
         return ask_codex(text)
@@ -315,7 +365,7 @@ def ask(agent: str, text: str) -> dict:
 def _parse_codex_jsonl(
     output: str,
     *,
-    requested_model: str,
+    requested_model: str | None,
     requested_effort: str,
     subscription_configured: bool | None = None,
 ) -> dict:
@@ -440,28 +490,14 @@ def ask_codex(
     error, workdir = _validate_workdir_write("Codex", mode, workdir, write)
     if error is not None:
         return error
-    model_omitted = model is None
-    if not model_omitted and (
-        not isinstance(model, str)
-        or not model
-        or model.startswith("-")
-        or any(char.isspace() for char in model)
-    ):
-        return {
-            "ok": False,
-            "error": "Codex model must be a non-empty, non-option identifier without whitespace",
-        }
+    error = _validate_model("Codex", model)
+    if error is not None:
+        return error
     argv = _prefix_for("codex") + ["--ephemeral"]
-    if not model_omitted:
-        argv += ["--model", model]
-    if (
-        model_omitted
-        and effort == "default"
-        and mode == "default"
-        and workdir is None
-        and not write
-    ):
+    if _is_plain_call(model, effort, mode, workdir, write):
         return _run_agent_cmd("codex", argv + ["--", prompt])
+    if model is not None:
+        argv += ["--model", model]
     argv.append("--json")
     if effort != "default":
         argv += ["-c", f'model_reasoning_effort="{effort}"']
@@ -693,17 +729,9 @@ def ask_claude(
     error, workdir = _validate_workdir_write("Claude", mode, workdir, write)
     if error is not None:
         return error
-    model_omitted = model is None
-    if not model_omitted and (
-        not isinstance(model, str)
-        or not model
-        or model.startswith("-")
-        or any(char.isspace() for char in model)
-    ):
-        return {
-            "ok": False,
-            "error": "Claude model must be a non-empty, non-option identifier without whitespace",
-        }
+    error = _validate_model("Claude", model)
+    if error is not None:
+        return error
 
     # Exact backward-compatible reply SHAPE ({"ok","reply"}, no stream-json
     # telemetry) for the unqualified default call only - a lightweight plain
@@ -713,26 +741,20 @@ def ask_claude(
     # below, same as any other explicit model selection - "omitted" and
     # "happens to equal Claude's own current default" are different caller
     # intents.
-    if (
-        model_omitted
-        and effort == "default"
-        and mode == "default"
-        and workdir is None
-        and not write
-    ):
+    if _is_plain_call(model, effort, mode, workdir, write):
         return _run_agent_cmd(
             "claude",
             _prefix_for("claude")
             + [
                 "--disallowedTools",
-                "Edit,Write,NotebookEdit",
+                _CLAUDE_READONLY_DENIED_TOOLS,
                 "--",
                 prompt,
             ],
         )
 
     argv = _prefix_for("claude")
-    if not model_omitted:
+    if model is not None:
         argv += ["--model", model]
     if effort != "default":
         argv += ["--effort", effort]
@@ -769,7 +791,7 @@ def ask_claude(
     elif write:
         argv += ["--permission-mode", "bypassPermissions"]
     else:
-        argv += ["--disallowedTools", "Edit,Write,NotebookEdit"]
+        argv += ["--disallowedTools", _CLAUDE_READONLY_DENIED_TOOLS]
     # Stop option parsing before the untrusted prompt. Otherwise a prompt that
     # begins with ``--`` can be interpreted as another Claude CLI flag.
     argv += ["--", prompt]

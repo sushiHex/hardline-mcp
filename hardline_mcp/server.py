@@ -18,9 +18,10 @@ the same posture as the sibling vram-mcp's claim ledger.
 
 from __future__ import annotations
 
+import atexit
 import functools
 import json
-import os
+import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
@@ -45,10 +46,42 @@ CodexMode = Literal["default", "advisory"]
 # pool instead: excess dispatches queue rather than spawning without limit.
 # Override for local tuning; not exposed as a per-call parameter since it
 # bounds the whole hardline-mcp process, not one request.
-_ASYNC_MAX_WORKERS = int(os.environ.get("HARDLINE_ASYNC_MAX_WORKERS", "4"))
+_ASYNC_MAX_WORKERS = adapters.positive_int_env("HARDLINE_ASYNC_MAX_WORKERS", 4)
 _async_executor = ThreadPoolExecutor(
     max_workers=_ASYNC_MAX_WORKERS, thread_name_prefix="hardline-async"
 )
+
+def _drain_async_executor_at_exit() -> None:
+    """Drop queued-but-unstarted dispatches so shutdown isn't unbounded.
+
+    ThreadPoolExecutor's workers are non-daemon and it joins every one of
+    them at interpreter shutdown, so a full queue would run to completion
+    before the process could exit - serially, each up to the 900s agent
+    timeout. The per-call ``threading.Thread(daemon=True)`` this pool
+    replaced was never joined and exited instantly, so that ceiling is a
+    regression this restores: teardown is now bounded by the longest
+    *already-running* call rather than by everything still queued behind
+    it. A running dispatch is deliberately still awaited - its subprocess
+    can't be interrupted safely mid-call. A queued one never started, so
+    the mailbox result it would have written isn't owed to anyone.
+
+    Registered through threading's registry, not ``atexit``: verified
+    empirically that ``threading._shutdown()`` (where ThreadPoolExecutor's
+    own joining hook lives) runs *before* ``atexit`` callbacks, so an
+    ``atexit`` registration here is a silent no-op - the join has already
+    happened by the time it fires. Registering after ``concurrent.futures``
+    is imported puts this ahead of that hook, since the registry is LIFO.
+    The API is private, so treat its absence on some future Python as
+    merely losing this optimization rather than an import-time crash.
+    """
+    _async_executor.shutdown(wait=False, cancel_futures=True)
+
+
+_register_threading_atexit = getattr(threading, "_register_atexit", None)
+if _register_threading_atexit is not None:  # pragma: no branch - present on 3.10+
+    _register_threading_atexit(_drain_async_executor_at_exit)
+else:  # pragma: no cover - only on a Python that dropped the private hook
+    atexit.register(_drain_async_executor_at_exit)
 
 
 async def _in_thread(fn, *args, **kwargs):

@@ -17,9 +17,37 @@ def _immediate_submit(fn, *args, **kwargs):
 def test_async_dispatch_is_bounded_not_unbounded():
     # A raw threading.Thread-per-call has no ceiling; ask_*_async must go
     # through a fixed-size pool so repeated dispatches queue instead of
-    # spawning unlimited concurrent agent subprocesses.
-    assert server._async_executor._max_workers == server._ASYNC_MAX_WORKERS
-    assert server._ASYNC_MAX_WORKERS > 0
+    # spawning unlimited concurrent agent subprocesses. Asserted by
+    # submitting more work than the pool can run at once and observing that
+    # the excess waits, rather than by reading the pool's private
+    # _max_workers back (which only restates the constructor argument).
+    import threading
+
+    workers = server._ASYNC_MAX_WORKERS
+    assert workers > 0
+
+    running = threading.Semaphore(0)
+    release = threading.Event()
+    try:
+        for _ in range(workers + 1):
+            server._async_executor.submit(lambda: (running.release(), release.wait(5)))
+        # Exactly `workers` tasks can be in flight; the extra one must still
+        # be queued, so a further acquire times out until the others finish.
+        for _ in range(workers):
+            assert running.acquire(timeout=5)
+        assert not running.acquire(timeout=0.2), "pool ran more than max_workers at once"
+    finally:
+        release.set()
+
+
+def test_async_executor_shutdown_is_registered_so_teardown_is_bounded():
+    """ThreadPoolExecutor joins its non-daemon workers at interpreter exit,
+    so without an explicit drain a full queue runs to completion before the
+    process can exit. Verified separately that an `atexit` registration is a
+    no-op here (threading's shutdown runs first), hence threading's own
+    registry."""
+    assert server._register_threading_atexit is not None
+    assert callable(server._drain_async_executor_at_exit)
 
 
 @pytest.mark.anyio

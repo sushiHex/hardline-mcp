@@ -102,7 +102,14 @@ An invalid or non-positive value fails the tool call before spawning the agent.
 `ask_*_async` dispatch through a small fixed-size background thread pool
 (default 4 workers) rather than an unbounded thread per call, so repeated or
 concurrent dispatches queue instead of piling up unlimited agent subprocesses.
-Override the pool size with `HARDLINE_ASYNC_MAX_WORKERS`.
+Override the pool size with `HARDLINE_ASYNC_MAX_WORKERS` — validated the same
+way as the timeouts above, except that this one is read once at startup, so an
+invalid value fails the server at launch rather than a single tool call.
+
+At shutdown, dispatches still queued are dropped rather than run; one already
+in flight is awaited, since its agent subprocess can't be interrupted safely
+mid-call. Without that, teardown would block until *every* queued dispatch had
+run in turn — each up to its own 900-second ceiling.
 
 ### Codex model, effort, isolation, and telemetry
 
