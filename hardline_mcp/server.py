@@ -200,9 +200,10 @@ async def ask_codex(
     mode. ``write=True`` opts into a workspace-write sandbox with approvals
     disabled (unattended) — it requires ``workdir``, is rejected in advisory
     mode, and is refused unless this hardline-mcp process has
-    ``HARDLINE_ALLOW_WRITE=1`` set; omitted, Codex stays read-only. Codex
-    JSONL does not currently report served model/effective effort, so those
-    telemetry fields remain null rather than being guessed.
+    ``HARDLINE_ALLOW_WRITE`` set to a recognized truthy value
+    (``1``/``true``/``yes``, case-insensitive); omitted, Codex stays
+    read-only. Codex JSONL does not currently report served model/effective
+    effort, so those telemetry fields remain null rather than being guessed.
     """
     return await _in_thread(
         adapters.ask_codex,
@@ -324,7 +325,8 @@ async def ask_claude(
     ``/dev/null``, so an interactive prompt would hang to timeout instead of
     being answered); it requires ``workdir``, is rejected in advisory mode,
     and is refused unless this hardline-mcp process has
-    ``HARDLINE_ALLOW_WRITE=1`` set. Mode ``advisory`` disables tools/project
+    ``HARDLINE_ALLOW_WRITE`` set to a recognized truthy value
+    (``1``/``true``/``yes``, case-insensitive). Mode ``advisory`` disables tools/project
     customizations, runs in a neutral cwd, strips API-provider overrides, and
     fails closed unless response telemetry verifies first-party account auth
     without overage. Optioned calls return actual-model, usage, rate-limit,

@@ -169,19 +169,22 @@ overrides and platform sandbox enforcement remain outside Hardline's control.
 ### Write access requires an explicit opt-in
 
 `write=True` (on either `ask_codex` or `ask_claude`) is refused outright
-unless **this hardline-mcp process's environment** has `HARDLINE_ALLOW_WRITE=1`
-set — regardless of what a caller asks for. Write mode is unattended (stdin
-is `/dev/null`, so no approval prompt is ever answered) and, once a workdir
-is reachable, no more restricted than what the OS user running hardline-mcp
-could already do directly — a categorically different exposure from every
-other hardline tool, which only ever runs read-only or self-contained calls.
-Without a gate, any hardline registration with no per-tool allow-list (unlike
+unless **this hardline-mcp process's environment** has `HARDLINE_ALLOW_WRITE`
+set to a recognized truthy value — regardless of what a caller asks for.
+Write mode is unattended (stdin is `/dev/null`, so no approval prompt is ever
+answered) and, once a workdir is reachable, no more restricted than what the
+OS user running hardline-mcp could already do directly — a categorically
+different exposure from every other hardline tool, which only ever runs
+read-only or self-contained calls. Without a gate, any hardline registration
+with no per-tool allow-list (unlike
 [vram-mcp](https://github.com/sushiHex/vram-mcp)'s) would let any caller
 reach it with zero human approval step — including an always-on registration
 driven by inbound messages from an external platform. Set
-`HARDLINE_ALLOW_WRITE=1` only on registrations where that's actually wanted;
-leave it unset (the default) everywhere else, e.g. an always-on gateway's
-registration.
+`HARDLINE_ALLOW_WRITE=1` (also accepts `true`/`yes`, case-insensitive; `0`,
+`false`, `no`, or unset all mean disabled — anything else fails loud naming
+the bad value rather than silently staying disabled) only on registrations
+where write access is actually wanted; leave it unset (the default)
+everywhere else, e.g. an always-on gateway's registration.
 
 ### Codex write access and background dispatch
 
