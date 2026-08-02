@@ -240,7 +240,15 @@ def _run_agent_cmd(agent: str, argv: list[str], **kwargs) -> dict:
     return _run_cmd(argv, timeout_s=timeout_s, **kwargs)
 
 
-def _write_enabled() -> bool:
+# Recognized tokens for HARDLINE_ALLOW_WRITE, matched case-insensitively
+# after stripping whitespace. Anything else (a typo like "TRUE " -> fine,
+# but "enabled"/"tru" -> neither set) is a misconfiguration, not silently
+# "disabled" - see _write_enabled.
+_WRITE_ENABLED_VALUES = frozenset({"1", "true", "yes"})
+_WRITE_DISABLED_VALUES = frozenset({"", "0", "false", "no"})
+
+
+def _write_enabled() -> tuple[bool, str | None]:
     """``write=True`` requests bypassPermissions/workspace-write - unattended
     (stdin is DEVNULL, so no prompt is ever answered) and, once workdir is
     reachable, no more restricted than what the OS user could already do
@@ -251,8 +259,26 @@ def _write_enabled() -> bool:
     would otherwise let any caller reach it with zero gating. Require an
     explicit opt-in per hardline-mcp *process* so a registration that never
     sets this (e.g. Hermes's, driven by inbound Discord messages) cannot use
-    write mode at all, regardless of what a caller asks for."""
-    return os.environ.get("HARDLINE_ALLOW_WRITE") == "1"
+    write mode at all, regardless of what a caller asks for.
+
+    Returns ``(enabled, error)``. ``error`` is set only when the variable is
+    set to something outside both recognized sets - a plausible-looking typo
+    (e.g. ``HARDLINE_ALLOW_WRITE=enabled``) must fail loud naming the bad
+    value, the same way every other ``HARDLINE_*`` knob does (see
+    ``positive_int_env``), rather than silently behaving as disabled with no
+    indication why write mode didn't turn on.
+    """
+    raw = os.environ.get("HARDLINE_ALLOW_WRITE", "")
+    normalized = raw.strip().lower()
+    if normalized in _WRITE_ENABLED_VALUES:
+        return True, None
+    if normalized in _WRITE_DISABLED_VALUES:
+        return False, None
+    return False, (
+        f"HARDLINE_ALLOW_WRITE={raw!r} is not a recognized value; use one of "
+        f"{sorted(_WRITE_ENABLED_VALUES)} to enable write mode or one of "
+        f"{sorted(_WRITE_DISABLED_VALUES)} (or leave it unset) to disable it"
+    )
 
 
 def _validate_model(name: str, model: str | None) -> dict | None:
@@ -306,14 +332,18 @@ def _validate_workdir_write(
     immediately) and ``None`` on success, in which case ``resolved_workdir``
     is the absolute path, or ``None`` if no workdir was given.
     """
-    if write and not _write_enabled():
-        return {
-            "ok": False,
-            "error": (
-                f"{name} write mode is disabled for this hardline-mcp process; "
-                "set HARDLINE_ALLOW_WRITE=1 in its environment to enable it"
-            ),
-        }, None
+    if write:
+        enabled, error = _write_enabled()
+        if error is not None:
+            return {"ok": False, "error": f"{name} {error}"}, None
+        if not enabled:
+            return {
+                "ok": False,
+                "error": (
+                    f"{name} write mode is disabled for this hardline-mcp process; "
+                    "set HARDLINE_ALLOW_WRITE=1 in its environment to enable it"
+                ),
+            }, None
     if mode == "advisory" and workdir is not None:
         return {
             "ok": False,
@@ -473,8 +503,10 @@ def ask_codex(
     just hang to timeout instead of ever being answered). It requires an
     explicit ``workdir`` (never write into an implicit cwd), is incompatible
     with ``mode="advisory"`` (advisory is fixed read-only by design), and is
-    rejected outright unless ``HARDLINE_ALLOW_WRITE=1`` is set in this
-    process's environment (see ``_write_enabled``) - omitted, Codex stays
+    rejected outright unless ``HARDLINE_ALLOW_WRITE`` is set to a recognized
+    truthy value (``1``/``true``/``yes``, case-insensitive) in this process's
+    environment (see ``_write_enabled``; an unrecognized value fails loud
+    rather than silently behaving as disabled) - omitted, Codex stays
     read-only exactly as before.
     """
     if effort not in _CODEX_EFFORTS:
@@ -710,8 +742,10 @@ def ask_claude(
     than advisory's zero-tools mode - inspection tools like Read/Grep/Bash
     still work). ``write=True`` requires an explicit ``workdir`` (never write
     into an implicit cwd), is rejected with ``mode="advisory"``, is rejected
-    outright unless ``HARDLINE_ALLOW_WRITE=1`` is set in this process's
-    environment (see ``_write_enabled``), and passes ``--permission-mode
+    outright unless ``HARDLINE_ALLOW_WRITE`` is set to a recognized truthy
+    value (``1``/``true``/``yes``, case-insensitive) in this process's
+    environment (see ``_write_enabled``; an unrecognized value fails loud
+    rather than silently behaving as disabled), and passes ``--permission-mode
     bypassPermissions`` - stdin is ``/dev/null``, so any interactive
     permission prompt would otherwise hang until timeout instead of ever
     being answered.

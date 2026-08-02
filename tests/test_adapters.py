@@ -388,12 +388,48 @@ def test_ask_codex_write_disabled_by_default(monkeypatch, tmp_path):
     assert calls == []
 
 
-@pytest.mark.parametrize("value", ["0", "false", "yes", "True", ""])
-def test_ask_codex_write_disabled_for_non_1_values(monkeypatch, tmp_path, value):
+@pytest.mark.parametrize("value", ["0", "false", "False", "no", "No", ""])
+def test_ask_codex_write_disabled_for_falsy_values(monkeypatch, tmp_path, value):
     monkeypatch.setenv("HARDLINE_ALLOW_WRITE", value)
     out = adapters.ask_codex("patch it", workdir=str(tmp_path), write=True)
     assert out["ok"] is False
     assert "HARDLINE_ALLOW_WRITE" in out["error"]
+
+
+@pytest.mark.parametrize("value", ["1", " 1 ", "true", "True", "TRUE", "yes", "Yes"])
+def test_ask_codex_write_enabled_for_truthy_synonyms(monkeypatch, tmp_path, value):
+    # A typo'd-but-plausible value (e.g. HARDLINE_ALLOW_WRITE=true) must not
+    # be a silent footgun that leaves write mode looking "on" to an operator
+    # but actually off - accept the common spellings, case-insensitively.
+    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", value)
+    stdout = _codex_stream(
+        {"type": "thread.started", "thread_id": "thread-write"},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "patched"},
+        },
+        {"type": "turn.completed", "usage": {}},
+    )
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_codex("patch it", workdir=str(tmp_path), write=True)
+
+    assert out["ok"] is True
+
+
+@pytest.mark.parametrize("value", ["2", "enabled", "tru", "on"])
+def test_ask_codex_write_rejects_unrecognized_value(monkeypatch, tmp_path, value):
+    # Neither truthy nor falsy: must fail loud naming the bad value, not
+    # silently behave as disabled with no indication anything was wrong.
+    monkeypatch.setenv("HARDLINE_ALLOW_WRITE", value)
+    calls = _capture_run(monkeypatch)
+
+    out = adapters.ask_codex("patch it", workdir=str(tmp_path), write=True)
+
+    assert out["ok"] is False
+    assert "HARDLINE_ALLOW_WRITE" in out["error"]
+    assert value in out["error"]
+    assert calls == []
 
 
 def test_ask_codex_write_requires_workdir(allow_write):
