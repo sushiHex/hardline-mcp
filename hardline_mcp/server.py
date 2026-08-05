@@ -191,7 +191,11 @@ async def ask_codex(
     """Ask Codex a question and wait for its reply.
 
     Spawns an ephemeral ``codex exec``. Omitting ``model`` passes no
-    ``--model`` flag, so Codex's own configured default applies. Optional
+    ``--model`` flag, so Codex's own configured default applies. When set,
+    ``model`` must be Codex's full model identifier (e.g. ``gpt-5.6-sol``,
+    ``gpt-5.6-terra``) — not a shorthand like ``"sol"``. hardline does not
+    validate or expand it; an unrecognized value is rejected by Codex itself
+    with a clear error rather than silently substituted. Optional
     model/effort selection enables JSONL usage/thread telemetry.
     Advisory mode uses ChatGPT auth preflight, a temporary auth-only CODEX_HOME,
     a neutral read-only directory, ignored user/project configuration, and

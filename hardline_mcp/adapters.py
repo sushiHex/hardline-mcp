@@ -496,7 +496,11 @@ def ask_codex(
 
     Omitting ``model`` passes no ``--model`` flag at all, so Codex's own
     configured default applies - the same posture ``ask_hermes`` already has
-    toward Hermes's default; hardline does not second-guess it.
+    toward Hermes's default; hardline does not second-guess it. When given,
+    ``model`` must be Codex's full model identifier (e.g. ``"gpt-5.6-sol"``,
+    ``"gpt-5.6-terra"``), not a shorthand like ``"sol"`` - hardline does not
+    validate or expand it against any alias table (see ``_validate_model``),
+    so an unrecognized value is rejected by Codex itself at execution time.
 
     ``write=True`` opts into a workspace-write sandbox with approvals
     disabled (unattended - stdin is DEVNULL, so any approval prompt would

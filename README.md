@@ -123,7 +123,11 @@ no longer persists one-shot review sessions or interprets a flag-shaped
 prompt as a CLI option, while leaving model selection to Codex itself unless
 a caller explicitly asks for a specific one.
 
-Pass `model`, `effort`, `mode`, or `workdir` for the structured path:
+Pass `model`, `effort`, `mode`, or `workdir` for the structured path. `model`
+must be Codex's full identifier (`gpt-5.6-sol`, `gpt-5.6-terra`, ...), not a
+shorthand like `"sol"` — hardline doesn't validate or expand it against any
+alias table, so an unrecognized value is rejected by Codex itself at
+execution time rather than silently substituted:
 
 ```text
 ask_codex(
