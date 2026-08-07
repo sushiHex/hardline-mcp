@@ -39,7 +39,7 @@ CodexEffort = Literal["default", "low", "medium", "high", "xhigh", "max", "ultra
 CodexMode = Literal["default", "advisory"]
 
 # ask_*_async fire real ask_claude/ask_codex subprocess calls (each bounded by
-# its own _CLAUDE_TIMEOUT_S/_CODEX_TIMEOUT_S, up to 900s) in the background.
+# its own _CLAUDE_TIMEOUT_S/_CODEX_TIMEOUT_S) in the background.
 # A bare `threading.Thread` per call has no ceiling - repeated dispatches (a
 # runaway caller, or several concurrent write=True requests) would pile up
 # unbounded concurrent agent subprocesses. Route through a small fixed-size
@@ -57,7 +57,7 @@ def _drain_async_executor_at_exit() -> None:
 
     ThreadPoolExecutor's workers are non-daemon and it joins every one of
     them at interpreter shutdown, so a full queue would run to completion
-    before the process could exit - serially, each up to the 900s agent
+    before the process could exit - serially, each up to its configured agent
     timeout. The per-call ``threading.Thread(daemon=True)`` this pool
     replaced was never joined and exited instantly, so that ceiling is a
     regression this restores: teardown is now bounded by the longest

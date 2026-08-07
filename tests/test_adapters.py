@@ -232,6 +232,17 @@ def test_ask_codex_routes_model_effort_and_reports_json_telemetry(monkeypatch):
     assert argv[-2:] == ["--", "review this"]
 
 
+def test_ask_codex_allows_hour_long_reviews_by_default(monkeypatch):
+    monkeypatch.delenv("HARDLINE_CODEX_TIMEOUT_S", raising=False)
+    monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="reply"))
+
+    out = adapters.ask("codex", "substantive review")
+
+    assert out["ok"] is True
+    assert calls[0]["kwargs"]["timeout"] == 3600
+
+
 def test_ask_codex_uses_configurable_long_timeout(monkeypatch):
     monkeypatch.setenv("HARDLINE_CODEX_TIMEOUT_S", "1200")
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
