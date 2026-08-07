@@ -89,12 +89,12 @@ bare command on `PATH`.
 
 Live queries are bounded so a hung CLI cannot wedge its MCP caller. Hermes
 retains a 180-second default. Claude defaults to 900 seconds; Codex defaults to
-3600 seconds because deep repository reviews can legitimately exceed fifteen
-minutes. Override either ceiling with a positive integer number of seconds:
+14400 seconds because deep repository reviews can legitimately run for hours.
+Override either ceiling with a positive integer number of seconds:
 
 ```text
 HARDLINE_CLAUDE_TIMEOUT_S=1200
-HARDLINE_CODEX_TIMEOUT_S=3600
+HARDLINE_CODEX_TIMEOUT_S=14400
 ```
 
 An invalid or non-positive value fails the tool call before spawning the agent.

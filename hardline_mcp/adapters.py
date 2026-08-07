@@ -93,10 +93,10 @@ _DISPATCH = {
 # longer than the lightweight live-message adapters.
 _TIMEOUT_S = 180
 _CLAUDE_TIMEOUT_S = 900
-# Deep Codex repository reviews routinely exceed 15 minutes. Keep them bounded,
-# but allow one hour by default; HARDLINE_CODEX_TIMEOUT_S remains the operator
+# Deep Codex repository reviews can run for multiple hours. Keep them bounded,
+# but allow four hours by default; HARDLINE_CODEX_TIMEOUT_S remains the operator
 # override for installations that need a tighter or looser ceiling.
-_CODEX_TIMEOUT_S = 3600
+_CODEX_TIMEOUT_S = 14400
 
 _CODEX_EFFORTS = frozenset(
     {"default", "low", "medium", "high", "xhigh", "max", "ultra"}
