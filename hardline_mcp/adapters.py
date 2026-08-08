@@ -1008,11 +1008,20 @@ def ask_claude(
             argv,
             env=child_env,
             cwd=run_cwd,
+            capture_failed_output=True,
         )
     finally:
         if neutral_cwd:
             shutil.rmtree(neutral_cwd, ignore_errors=True)
+    failed_output = run.pop("_stdout", "")
     if not run.get("ok"):
+        # _run_cmd reports `stderr or stdout`, so a nonzero exit that wrote
+        # anything to stderr discarded stdout entirely - losing a reply Claude
+        # had already produced and been paid for. Codex's path was fixed for
+        # exactly this; leaving Claude's twin unfixed was an inconsistency,
+        # not a decision.
+        if failed_output:
+            run.update(_raw_evidence(failed_output))
         return run
     return _parse_claude_stream(
         run.get("reply", ""),

@@ -1,17 +1,33 @@
 """Server wiring smoke tests — import, tool registration, send/deliver glue."""
 
 import json
+import threading
 
 import pytest
 
 from hardline_mcp import server
 
 
+class _ImmediateFuture:
+    """Minimal Future stand-in: the work already ran, so result() is instant."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def result(self, timeout=None):
+        return self._value
+
+
 def _immediate_submit(fn, *args, **kwargs):
     """Stand-in for _async_executor.submit that runs fn synchronously instead
     of on a pool thread — makes ask_*_async's background dispatch
-    deterministic to test instead of racing a real worker thread."""
-    fn(*args, **kwargs)
+    deterministic to test instead of racing a real worker thread.
+
+    Returns a Future-like so the early-failure check has something to await;
+    a bare None here meant every async test exercised a code path the real
+    executor never takes.
+    """
+    return _ImmediateFuture(fn(*args, **kwargs))
 
 
 @pytest.mark.anyio
@@ -152,6 +168,36 @@ async def test_async_delivery_failure_falls_back_to_a_minimal_payload(
     assert body["ok"] is False
     assert "could not be delivered" in body["error"]
     assert body["label"] == "t"
+
+
+@pytest.mark.anyio
+async def test_slow_dispatch_still_reports_dispatched(monkeypatch, tmp_path):
+    """The early-failure check must not turn a genuinely running dispatch into
+    a failure, or ask_*_async stops being async at all. Uses the REAL executor
+    with a task slower than the wait - the immediate-submit stub always
+    completes instantly, so it cannot exercise this branch."""
+    import time
+
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setattr(server, "_ASYNC_EARLY_FAILURE_S", 0.2)
+
+    started = threading.Event()
+
+    def slow_ask(prompt, **kwargs):
+        started.set()
+        time.sleep(1.0)  # outlives the early-failure window
+        return {"ok": True, "reply": "eventually"}
+
+    monkeypatch.setattr(server.adapters, "ask_codex", slow_ask)
+
+    began = time.monotonic()
+    dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
+    elapsed = time.monotonic() - began
+
+    assert dispatched["ok"] is True
+    assert dispatched["dispatched"] is True
+    assert started.is_set(), "the task should actually be running"
+    assert elapsed < 0.9, "must return while the task runs, not wait it out"
 
 
 def test_unlaned_process_cannot_ack_a_lane(monkeypatch, tmp_path):
@@ -502,13 +548,15 @@ async def test_ask_codex_async_survives_adapter_exception(monkeypatch, tmp_path)
     dispatched = await server.ask_codex_async(
         prompt="review the diff", from_agent="claude"
     )
-    assert dispatched == {
-        "ok": True,
-        "dispatched": True,
-        "label": None,
-        "lane": "claude",
-    }
+    # A dispatch that died on arrival must NOT report itself as dispatched.
+    # Returning {"ok": true, "dispatched": true} here is what convinced two
+    # sessions that work was running when nothing was; one believed five
+    # agents were in flight and waited on results that never existed.
+    assert dispatched["ok"] is False
+    assert dispatched["dispatched"] is False
+    assert "unexpected adapter failure" in dispatched["error"]
 
+    # ...and the mailbox copy is still written, so the record survives too.
     inb = await server.inbox(agent="claude")
     assert inb["count"] == 1
     body = json.loads(inb["messages"][0]["body"])
