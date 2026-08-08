@@ -104,6 +104,12 @@ def _ensure_initialized(db_path: Path) -> None:
                     conn.commit()
                 break
             except sqlite3.OperationalError as exc:
+                # Only the contention this retry exists for. A permanent fault
+                # (unwritable path, corrupt file, disk full) is not going to
+                # resolve in 500ms, and retrying it just delays a clear error
+                # behind a misleading one.
+                if "locked" not in str(exc) and "busy" not in str(exc):
+                    raise
                 last_error = exc
                 if attempt == _INIT_ATTEMPTS - 1:
                     raise
@@ -256,6 +262,15 @@ def history(
 
     A lane-qualified ``agent`` still matches only itself - ``claude:a`` does
     not gain sublanes.
+
+    DELIBERATE: this sees every lane, so it is NOT session-isolated the way
+    ``inbox`` and ``ack`` are. That is the point of an audit feed on a
+    single-user machine - lanes exist to stop sessions clobbering each other
+    by accident, not to keep one person's sessions secret from themselves,
+    and full visibility here is exactly what let one session's lost results
+    be recovered for another. Isolation lives in ``inbox``/``ack``; if this
+    ever needs to be confidential, that is a different feature with a
+    different threat model.
     """
     db_path = _resolve_db(db_path)
     params: tuple = ()

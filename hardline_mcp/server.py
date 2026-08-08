@@ -236,6 +236,13 @@ async def ask_codex(
     (``1``/``true``/``yes``, case-insensitive); omitted, Codex stays
     read-only. Codex JSONL does not currently report served model/effective
     effort, so those telemetry fields remain null rather than being guessed.
+
+    DAMAGED OUTPUT: if any output line could not be parsed, the result comes
+    back ``ok: false`` with ``malformed_lines`` and the recovered text under
+    ``partial_reply`` instead of ``reply`` — content preserved but NOT
+    certified, because a skipped line may have been a later answer or the
+    terminal event, making the survivor stale. Do not discard a
+    ``partial_reply`` on ``ok: false`` alone; read it and judge it.
     """
     return await _in_thread(
         adapters.ask_codex,
@@ -391,6 +398,13 @@ async def ask_claude(
     without overage. Optioned calls return actual-model, usage, rate-limit,
     auth-verification, and safeguard fallback metadata in addition to
     ``ok``/``reply``.
+
+    DAMAGED OUTPUT: if any output line could not be parsed, the result comes
+    back ``ok: false`` with ``malformed_lines`` and the recovered text under
+    ``partial_reply`` instead of ``reply`` — content preserved but NOT
+    certified, because a skipped line may have been a later answer or the
+    terminal event, making the survivor stale. Do not discard a
+    ``partial_reply`` on ``ok: false`` alone; read it and judge it.
     """
     return await _in_thread(
         adapters.ask_claude,

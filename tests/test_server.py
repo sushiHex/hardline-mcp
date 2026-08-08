@@ -92,12 +92,18 @@ async def test_history_survives_an_ack_by_another_session(
 ):
     db = tmp_path / "mb.db"
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
-    msg = server.mailbox.send("codex", f"claude:{in_session}", "mine", db_path=db)
-    server.mailbox.ack(msg["message_id"], lane_suffix=in_session, db_path=db)
+    # A message to the SHARED name, which any session may ack - this is the
+    # real incident: five results were addressed to bare "claude" and another
+    # session acked them before their owner read them.
+    msg = server.mailbox.send("codex", "claude", "shared result", db_path=db)
+    # The OTHER session acks it, using ITS suffix, not ours. (Previously this
+    # test passed in_session here - its own lane - so it never exercised
+    # another session at all, despite the name.)
+    server.mailbox.ack(msg["message_id"], lane_suffix="other.9999zzzz", db_path=db)
 
     assert (await server.inbox(agent="claude"))["count"] == 0  # acked, hidden
     hist = await server.history(agent="claude")
-    assert [m["body"] for m in hist["messages"]] == ["mine"]  # still recoverable
+    assert [m["body"] for m in hist["messages"]] == ["shared result"]  # recoverable
 
 
 @pytest.mark.anyio
@@ -111,6 +117,41 @@ async def test_explicit_lane_reads_only_that_lane(monkeypatch, tmp_path, in_sess
 
     got = await server.inbox(agent="claude:other.9999zzzz")
     assert [m["body"] for m in got["messages"]] == ["theirs"]
+
+
+@pytest.mark.anyio
+async def test_async_delivery_failure_falls_back_to_a_minimal_payload(
+    monkeypatch, tmp_path
+):
+    """The delivery itself sat outside the exception backstop, so a failure
+    there discarded an expensive completed run inside an unobserved future
+    while the caller polled an inbox that would never fill."""
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+
+    real_send = server.mailbox.send
+    calls = {"n": 0}
+
+    def flaky_send(sender, recipient, body, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("mailbox write failed")  # e.g. lock/disk/serialization
+        return real_send(sender, recipient, body, **kw)
+
+    monkeypatch.setattr(server.mailbox, "send", flaky_send)
+
+    await server.ask_codex_async(prompt="go", from_agent="claude", label="t")
+
+    monkeypatch.setattr(server.mailbox, "send", real_send)
+    inb = await server.inbox(agent="claude")
+    assert inb["count"] == 1, "a failed delivery must still reach the caller"
+    body = json.loads(inb["messages"][0]["body"])
+    assert body["ok"] is False
+    assert "could not be delivered" in body["error"]
+    assert body["label"] == "t"
 
 
 def test_unlaned_process_cannot_ack_a_lane(monkeypatch, tmp_path):

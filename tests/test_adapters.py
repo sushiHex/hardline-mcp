@@ -1034,11 +1034,23 @@ def test_raw_excerpt_keeps_both_ends_and_stays_bounded(monkeypatch):
     assert out["raw_length"] == len(stdout)
 
 
-def test_short_output_is_not_split_into_head_and_tail(monkeypatch):
-    _capture_run(monkeypatch, _FakeCompleted(stdout="not json but short\n"))
+def test_nonzero_exit_still_surfaces_the_agents_output(monkeypatch):
+    """A nonzero exit with unparseable stdout computed the evidence and then
+    discarded it unless a thread_id happened to be present, so the caller saw
+    only "exit 1: ..." and the agent's output was gone - the unrecoverable
+    shape this evidence exists to prevent."""
+    _capture_run(
+        monkeypatch,
+        _FakeCompleted(
+            stdout="some unparseable but valuable output", stderr="boom", returncode=1
+        ),
+    )
+
     out = adapters.ask_codex("review", model="gpt-5.6-sol")
-    assert out["raw_excerpt"] == "not json but short"
-    assert "omitted" not in out["raw_excerpt"]
+
+    assert out["ok"] is False
+    assert "valuable output" in out["raw_excerpt"]
+    assert out["raw_length"] > 0
 
 
 def test_ask_unknown_agent_rejected(monkeypatch):
@@ -1195,7 +1207,9 @@ def test_lane_depends_on_nothing_process_specific(monkeypatch, in_session):
     assert first  # fixture put us in a session
 
     # Everything a respawn actually changes.
-    monkeypatch.setattr(adapters.os, "getpid", lambda: 999999)
+    # NOT os.getpid - lane_suffix never calls it, so patching it was the dead
+    # assertion that made the previous version of this test vacuous. Perturb
+    # what the derivation actually touches instead.
     monkeypatch.chdir(tempfile.mkdtemp())
     monkeypatch.setenv("PWD", "/somewhere/else")
 
