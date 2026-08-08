@@ -96,9 +96,11 @@ async def _in_thread(fn, *args, **kwargs):
 def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> dict:
     # Reject unknown agents up front: a typo'd recipient would otherwise persist
     # forever, unread and undeliverable — a silent black hole. Validate before
-    # writing anything.
+    # writing anything. A lane-qualified name ("claude:fonts.1a2b3c4d") is
+    # validated on its base, so lanes are addressable while "clod:x" is still
+    # caught — the guard's actual purpose is preserved.
     known = adapters.known_agents()
-    unknown = [a for a in (from_agent, to_agent) if a not in known]
+    unknown = [a for a in (from_agent, to_agent) if adapters.base_agent(a) not in known]
     if unknown:
         return {
             "ok": False,
@@ -137,10 +139,18 @@ async def send(
 async def inbox(agent: str, unread_only: bool = True) -> dict:
     """Read messages addressed to ``agent``, oldest first.
 
+    Reads this session's own lane AND the shared unqualified name, so
+    ``inbox(agent="claude")`` returns results dispatched by THIS session plus
+    anything broadcast to every claude — without seeing other sessions'
+    results. Nothing to opt into: the lane comes from the session that spawned
+    this server. Passing an explicit lane reads only that lane.
+
     ``unread_only`` (default true) hides messages already ack'd. Returns
     ``{"messages": [...], "count": N}``.
     """
-    msgs = await _in_thread(mailbox.inbox, agent, unread_only=unread_only)
+    lane = adapters.lane_for(agent)
+    agents = [agent] if lane == agent else [agent, lane]
+    msgs = await _in_thread(mailbox.inbox, agents, unread_only=unread_only)
     return {"messages": msgs, "count": len(msgs)}
 
 
@@ -148,10 +158,15 @@ async def inbox(agent: str, unread_only: bool = True) -> dict:
 async def ack(message_id: int) -> dict:
     """Mark a message read so it stops appearing in the unread inbox.
 
+    Refuses messages belonging to a DIFFERENT session's lane — one session
+    can no longer hide another's results. Unqualified messages stay shared
+    and ackable by anyone.
+
     Returns ``{"ok": true}`` only if a still-unread message with that id
-    existed (idempotent — a second ack returns false).
+    existed and was ackable by this session (idempotent — a second ack
+    returns false).
     """
-    return await _in_thread(mailbox.ack, message_id)
+    return await _in_thread(mailbox.ack, message_id, lane_suffix=adapters.lane_suffix())
 
 
 @mcp.tool()
@@ -241,11 +256,15 @@ def _ask_async_impl(
     would just add a wasted thread-pool round trip.
     """
     known = adapters.known_agents()
-    if from_agent not in known:
+    if adapters.base_agent(from_agent) not in known:
         return {
             "ok": False,
             "error": f"unknown from_agent {from_agent!r}; known: {sorted(known)}",
         }
+    # Deliver back to THIS session's lane, not the shared name. A result is
+    # owed to the session that asked for it; addressing it to bare "claude"
+    # is what let another session ack it out of sight.
+    recipient = adapters.lane_for(from_agent)
 
     def _run() -> None:
         # ask_fn (adapters.ask_claude/ask_codex) is designed to never raise -
@@ -267,10 +286,10 @@ def _ask_async_impl(
             }
         if label is not None:
             result["label"] = label
-        mailbox.send(agent, from_agent, json.dumps(result))
+        mailbox.send(agent, recipient, json.dumps(result))
 
     _async_executor.submit(_run)
-    return {"ok": True, "dispatched": True, "label": label}
+    return {"ok": True, "dispatched": True, "label": label, "lane": recipient}
 
 
 @mcp.tool()

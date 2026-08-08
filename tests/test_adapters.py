@@ -1007,3 +1007,55 @@ def test_run_cmd_isolates_stdin_and_decodes_utf8(monkeypatch):
 
 def test_known_agents_is_the_fixed_roster():
     assert set(adapters.known_agents()) == {"claude", "hermes", "codex"}
+
+
+# --------------------------------------------------------------------------
+# Session lanes. Every Claude Code session spawns its own hardline process, so
+# the process IS the session and can derive its own identity - no caller
+# declares anything.
+# --------------------------------------------------------------------------
+
+
+def test_lane_is_empty_outside_a_session(monkeypatch):
+    """Hermes and Codex set none of these, so they keep their plain
+    identities and cross-agent messaging is untouched."""
+    assert adapters.lane_suffix() == ""
+    assert adapters.lane_for("hermes") == "hermes"
+
+
+def test_lane_combines_project_and_session_id(in_session):
+    # Readable enough to scan in `history`, unique enough that two sessions
+    # in the SAME repo don't collide - which project name alone can't do.
+    assert adapters.lane_suffix() == "fonts.1a2b3c4d"
+    assert adapters.lane_for("claude") == "claude:fonts.1a2b3c4d"
+
+
+def test_lane_is_stable_across_reconnect(monkeypatch, in_session):
+    """A /mcp reconnect respawns this process but keeps the session, so the
+    lane must not change - otherwise every in-flight result is orphaned. This
+    is why the session id is keyed on rather than anything per-process."""
+    first = adapters.lane_suffix()
+    monkeypatch.setattr(adapters.os, "getpid", lambda: 999999)  # "new process"
+    assert adapters.lane_suffix() == first
+
+
+def test_explicit_label_overrides_derivation(monkeypatch, in_session):
+    monkeypatch.setenv("HARDLINE_AGENT_LABEL", "review-bot")
+    assert adapters.lane_for("claude") == "claude:review-bot"
+
+
+def test_lane_falls_back_to_cwd_when_project_dir_absent(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abcdefgh-0000-0000-0000-000000000000")
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    workdir = tmp_path / "someproject"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    assert adapters.lane_suffix() == "someproject.abcdefgh"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("claude", "claude"), ("claude:fonts.1a2b3c4d", "claude"), ("hermes", "hermes")],
+)
+def test_base_agent_strips_the_lane(name, expected):
+    assert adapters.base_agent(name) == expected
