@@ -890,6 +890,111 @@ def test_ask_claude_rejects_malformed_stream(monkeypatch):
     assert "stream-json" in out["error"]
 
 
+# --------------------------------------------------------------------------
+# JSONL line splitting. str.splitlines() splits on characters JSONL does not
+# treat as delimiters and JSON does not require escaping, so one of them
+# inside any string value cut a valid line in half and discarded the entire
+# result. This destroyed a completed, already-paid-for agent review.
+# --------------------------------------------------------------------------
+
+# Only separators that can actually reach us RAW. JSON mandates escaping for
+# U+0000-001F, so every conforming encoder escapes \v \f \x1c \x1d \x1e -
+# including them would add cases that pass whether or not this is fixed.
+# These three sit ABOVE that range: JSON does not require escaping them, and
+# encoders emitting UTF-8 directly (Codex, Claude) leave them raw, while
+# str.splitlines() treats all three as line breaks. Verified against the
+# unfixed parser: each fails with "Unterminated string"; each parses now.
+_RAW_SEPARATORS = ["\u2028", "\u2029", "\x85"]
+
+
+def _raw_jsonl(*events):
+    """Encode events the way Codex/Claude do: UTF-8, not \\u-escaped."""
+    return "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n"
+
+
+@pytest.mark.parametrize("sep", _RAW_SEPARATORS)
+def test_codex_jsonl_survives_raw_separator_in_a_string(monkeypatch, sep):
+    text = f"before{sep}after"
+    stdout = _raw_jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+        {"type": "turn.completed", "usage": {}},
+    )
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_codex("review", model="gpt-5.6-sol")
+
+    assert out["ok"] is True, out.get("error")
+    assert out["reply"] == text  # separator preserved, not truncated at it
+    assert "malformed_lines" not in out
+
+
+@pytest.mark.parametrize("sep", _RAW_SEPARATORS)
+def test_claude_stream_survives_raw_separator_in_a_string(monkeypatch, sep):
+    text = f"before{sep}after"
+    stdout = _raw_jsonl(
+        {"type": "system", "subtype": "init", "model": "claude-fable-5"},
+        {"type": "result", "subtype": "success", "result": text},
+    )
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_claude("review", model="fable")
+
+    assert out["ok"] is True, out.get("error")
+    assert out["reply"] == text
+
+
+def test_one_damaged_line_does_not_discard_the_whole_result(monkeypatch):
+    """Previously any unparseable line aborted the parse and threw away every
+    other event - including the completed answer."""
+    stdout = (
+        json.dumps({"type": "thread.started", "thread_id": "t-2"})
+        + "\n{ this line is truncated and unparseable\n"
+        + json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "answer"},
+            }
+        )
+        + "\n"
+        + json.dumps({"type": "turn.completed", "usage": {}})
+        + "\n"
+    )
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_codex("review", model="gpt-5.6-sol")
+
+    assert out["ok"] is True
+    assert out["reply"] == "answer"
+    # A partial parse must never look like a clean one.
+    assert out["malformed_lines"] == 1
+
+
+def test_unparseable_output_returns_evidence_not_just_an_error(monkeypatch):
+    """The raw output used to be dropped, making a parse failure
+    unrecoverable. Keep a bounded excerpt so it stays diagnosable."""
+    _capture_run(monkeypatch, _FakeCompleted(stdout="totally not json at all\n"))
+
+    out = adapters.ask_codex("review", model="gpt-5.6-sol")
+
+    assert out["ok"] is False
+    assert out["malformed_lines"] == 1
+    assert "totally not json" in out["raw_excerpt"]
+    assert out["raw_length"] > 0
+
+
+def test_raw_excerpt_is_bounded(monkeypatch):
+    """Salvage must not hand the caller a payload big enough to blow up its
+    own context - the failure this whole area keeps producing."""
+    _capture_run(monkeypatch, _FakeCompleted(stdout="x" * 500_000))
+
+    out = adapters.ask_codex("review", model="gpt-5.6-sol")
+
+    assert out["ok"] is False
+    assert len(out["raw_excerpt"]) <= 2000
+    assert out["raw_length"] == 500_000
+
+
 def test_ask_unknown_agent_rejected(monkeypatch):
     calls = _capture_run(monkeypatch)
     out = adapters.ask("nobody", "hi")
