@@ -141,8 +141,8 @@ def test_concurrent_writers_do_not_lose_or_duplicate(tmp_path):
 
     assert errors == [], f"concurrent writers raised: {errors}"
     rows = mailbox.history(limit=10_000, db_path=db)
-    assert len(rows) == n_threads * per_thread          # nothing lost
+    assert len(rows) == n_threads * per_thread  # nothing lost
     ids = [r["message_id"] for r in rows]
-    assert len(set(ids)) == len(ids)                    # nothing duplicated
+    assert len(set(ids)) == len(ids)  # nothing duplicated
     bodies = {r["body"] for r in rows}
-    assert len(bodies) == n_threads * per_thread        # every distinct message present
+    assert len(bodies) == n_threads * per_thread  # every distinct message present

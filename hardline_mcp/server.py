@@ -114,7 +114,12 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
             f"[hardline] new message #{result['message_id']} from {from_agent}. "
             f"Call hardline-mcp inbox(agent='{to_agent}') to read it."
         )
-        result["delivery"] = adapters.deliver(to_agent, notice)
+        # Push to the CLI behind the lane, not the lane name: adapters.deliver
+        # dispatches on exact roster membership, so a qualified recipient
+        # ("claude:fonts.1a2b3c4d") persisted fine and then failed delivery
+        # with "unknown agent" - a half-succeeded send. The notice still
+        # carries the full lane so the reader queries the right inbox.
+        result["delivery"] = adapters.deliver(adapters.base_agent(to_agent), notice)
     return result
 
 
@@ -143,13 +148,21 @@ async def inbox(agent: str, unread_only: bool = True) -> dict:
     ``inbox(agent="claude")`` returns results dispatched by THIS session plus
     anything broadcast to every claude — without seeing other sessions'
     results. Nothing to opt into: the lane comes from the session that spawned
-    this server. Passing an explicit lane reads only that lane.
+    this server. An already lane-qualified ``agent`` reads ONLY that lane.
 
     ``unread_only`` (default true) hides messages already ack'd. Returns
     ``{"messages": [...], "count": N}``.
     """
-    lane = adapters.lane_for(agent)
-    agents = [agent] if lane == agent else [agent, lane]
+    # An explicit lane means exactly that lane. Previously this still unioned
+    # in the caller's OWN lane (lane_for strips the qualifier and re-adds this
+    # process's), so inbox("claude:other") quietly returned this session's
+    # messages too - contradicting the documented behavior and widening rather
+    # than narrowing the read.
+    if ":" in agent:
+        agents = [agent]
+    else:
+        lane = adapters.lane_for(agent)
+        agents = [agent] if lane == agent else [agent, lane]
     msgs = await _in_thread(mailbox.inbox, agents, unread_only=unread_only)
     return {"messages": msgs, "count": len(msgs)}
 
@@ -286,7 +299,30 @@ def _ask_async_impl(
             }
         if label is not None:
             result["label"] = label
-        mailbox.send(agent, recipient, json.dumps(result))
+        # The delivery itself was outside the backstop above, so a failure
+        # here - lock contention, a full disk, an unserializable result -
+        # discarded an expensive completed run inside an unobserved future,
+        # leaving the caller polling an inbox that would never fill. Retry
+        # with a minimal payload, which fails only if the mailbox is
+        # unreachable entirely; then at least the traceback reaches a log.
+        try:
+            mailbox.send(agent, recipient, json.dumps(result))
+        except Exception:  # noqa: BLE001 - delivery is the last thing owed
+            traceback.print_exc()
+            try:
+                mailbox.send(
+                    agent,
+                    recipient,
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": f"{agent} result could not be delivered",
+                            "label": label,
+                        }
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - mailbox itself is unreachable
+                traceback.print_exc()
 
     _async_executor.submit(_run)
     return {"ok": True, "dispatched": True, "label": label, "lane": recipient}

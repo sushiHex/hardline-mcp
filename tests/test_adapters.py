@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import tempfile
 
 import pytest
 
@@ -964,10 +965,41 @@ def test_one_damaged_line_does_not_discard_the_whole_result(monkeypatch):
 
     out = adapters.ask_codex("review", model="gpt-5.6-sol")
 
-    assert out["ok"] is True
-    assert out["reply"] == "answer"
-    # A partial parse must never look like a clean one.
+    # Content is preserved - but NOT certified. Skipping a damaged line cannot
+    # tell which event was lost, so a surviving "answer" may be a stale
+    # earlier one; presenting that as ok=True would be worse than the total
+    # failure this replaced, because it is undetectable downstream.
+    assert out["ok"] is False
+    assert out["partial_reply"] == "answer"
+    assert "reply" not in out
     assert out["malformed_lines"] == 1
+
+
+def test_damaged_terminal_event_is_not_reported_as_success(monkeypatch):
+    """The stale-success case specifically: the damage destroys the LAST
+    answer, so the survivor is an earlier, superseded one. The previous test
+    only damaged a line that carried nothing, so it could not catch this."""
+    stdout = (
+        json.dumps({"type": "thread.started", "thread_id": "t-3"})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "EARLY draft answer"},
+            }
+        )
+        + "\n{ the FINAL answer's line was truncated here\n"
+        + json.dumps({"type": "turn.completed", "usage": {}})
+        + "\n"
+    )
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+
+    out = adapters.ask_codex("review", model="gpt-5.6-sol")
+
+    assert out["ok"] is False, "a superseded answer must not be certified"
+    assert out["partial_reply"] == "EARLY draft answer"
+    assert out["malformed_lines"] == 1
+    assert "partial_reply" in out and "reply" not in out
 
 
 def test_unparseable_output_returns_evidence_not_just_an_error(monkeypatch):
@@ -983,16 +1015,30 @@ def test_unparseable_output_returns_evidence_not_just_an_error(monkeypatch):
     assert out["raw_length"] > 0
 
 
-def test_raw_excerpt_is_bounded(monkeypatch):
-    """Salvage must not hand the caller a payload big enough to blow up its
-    own context - the failure this whole area keeps producing."""
-    _capture_run(monkeypatch, _FakeCompleted(stdout="x" * 500_000))
+def test_raw_excerpt_keeps_both_ends_and_stays_bounded(monkeypatch):
+    """Head-only was near-useless for salvage: a JSONL stream's terminal event
+    and final answer are at the END, so the first 2KB of a 600KB review is
+    startup chatter. Keep both ends, and stay bounded so the payload cannot
+    blow up the caller's context - the failure this area keeps producing."""
+    stdout = "HEAD-MARKER" + ("x" * 500_000) + "TAIL-MARKER"
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
 
     out = adapters.ask_codex("review", model="gpt-5.6-sol")
 
     assert out["ok"] is False
-    assert len(out["raw_excerpt"]) <= 2000
-    assert out["raw_length"] == 500_000
+    assert "HEAD-MARKER" in out["raw_excerpt"]
+    assert "TAIL-MARKER" in out["raw_excerpt"], "the end is where the answer lives"
+    assert "omitted" in out["raw_excerpt"], "must say what was dropped"
+    budget = adapters._EVIDENCE_HEAD + adapters._EVIDENCE_TAIL + 100
+    assert len(out["raw_excerpt"]) <= budget
+    assert out["raw_length"] == len(stdout)
+
+
+def test_short_output_is_not_split_into_head_and_tail(monkeypatch):
+    _capture_run(monkeypatch, _FakeCompleted(stdout="not json but short\n"))
+    out = adapters.ask_codex("review", model="gpt-5.6-sol")
+    assert out["raw_excerpt"] == "not json but short"
+    assert "omitted" not in out["raw_excerpt"]
 
 
 def test_ask_unknown_agent_rejected(monkeypatch):
@@ -1135,13 +1181,29 @@ def test_lane_combines_project_and_session_id(in_session):
     assert adapters.lane_for("claude") == "claude:fonts.1a2b3c4d"
 
 
-def test_lane_is_stable_across_reconnect(monkeypatch, in_session):
+def test_lane_depends_on_nothing_process_specific(monkeypatch, in_session):
     """A /mcp reconnect respawns this process but keeps the session, so the
-    lane must not change - otherwise every in-flight result is orphaned. This
-    is why the session id is keyed on rather than anything per-process."""
+    lane must not change - otherwise every in-flight result is orphaned.
+
+    The previous version of this test monkeypatched os.getpid and asserted the
+    lane was unchanged. lane_suffix() never calls getpid, so it passed
+    regardless and proved nothing. Assert the real property instead: the
+    derivation reads ONLY the session-scoped environment, so anything a
+    respawn changes (pid, cwd, process start time) cannot move it.
+    """
     first = adapters.lane_suffix()
-    monkeypatch.setattr(adapters.os, "getpid", lambda: 999999)  # "new process"
+    assert first  # fixture put us in a session
+
+    # Everything a respawn actually changes.
+    monkeypatch.setattr(adapters.os, "getpid", lambda: 999999)
+    monkeypatch.chdir(tempfile.mkdtemp())
+    monkeypatch.setenv("PWD", "/somewhere/else")
+
     assert adapters.lane_suffix() == first
+
+    # And prove the test can fail: the lane MUST move when the session does.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "99999999-0000-0000-0000-000000000000")
+    assert adapters.lane_suffix() != first
 
 
 def test_explicit_label_overrides_derivation(monkeypatch, in_session):

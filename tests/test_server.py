@@ -72,6 +72,91 @@ async def test_ack_refuses_another_sessions_message(monkeypatch, tmp_path, in_se
 
 
 @pytest.mark.anyio
+async def test_history_still_finds_lane_messages(monkeypatch, tmp_path, in_session):
+    """history() is the ack-proof recovery path - ack only sets acked_at and
+    history ignores it. Filtering by exact equality silently stopped showing
+    lane-addressed async results the moment lanes shipped, breaking the one
+    way to retrieve a result another session had already acked."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("codex", f"claude:{in_session}", "lane result", db_path=db)
+    server.mailbox.send("hermes", "claude", "broadcast", db_path=db)
+
+    bodies = {m["body"] for m in (await server.history(agent="claude"))["messages"]}
+    assert bodies == {"lane result", "broadcast"}
+
+
+@pytest.mark.anyio
+async def test_history_survives_an_ack_by_another_session(
+    monkeypatch, tmp_path, in_session
+):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    msg = server.mailbox.send("codex", f"claude:{in_session}", "mine", db_path=db)
+    server.mailbox.ack(msg["message_id"], lane_suffix=in_session, db_path=db)
+
+    assert (await server.inbox(agent="claude"))["count"] == 0  # acked, hidden
+    hist = await server.history(agent="claude")
+    assert [m["body"] for m in hist["messages"]] == ["mine"]  # still recoverable
+
+
+@pytest.mark.anyio
+async def test_explicit_lane_reads_only_that_lane(monkeypatch, tmp_path, in_session):
+    """Documented as reading only that lane; it also unioned in the caller's
+    OWN lane, so inbox("claude:other") leaked this session's messages."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("codex", f"claude:{in_session}", "mine", db_path=db)
+    server.mailbox.send("codex", "claude:other.9999zzzz", "theirs", db_path=db)
+
+    got = await server.inbox(agent="claude:other.9999zzzz")
+    assert [m["body"] for m in got["messages"]] == ["theirs"]
+
+
+def test_unlaned_process_cannot_ack_a_lane(monkeypatch, tmp_path):
+    """An unlaned process (Hermes, Codex, or a session missing the env)
+    previously applied NO guard at all and could ack every session's mail -
+    reachable by exactly the callers most likely to poll a shared mailbox."""
+    db = tmp_path / "mb.db"
+    laned = server.mailbox.send("codex", "claude:fonts.1a2b3c4d", "theirs", db_path=db)
+    bare = server.mailbox.send("codex", "claude", "shared", db_path=db)
+
+    assert (
+        server.mailbox.ack(laned["message_id"], lane_suffix="", db_path=db)["ok"]
+        is False
+    )
+    assert (
+        server.mailbox.ack(bare["message_id"], lane_suffix="", db_path=db)["ok"] is True
+    )
+    assert len(server.mailbox.inbox("claude:fonts.1a2b3c4d", db_path=db)) == 1
+
+
+@pytest.mark.anyio
+async def test_deliver_to_a_lane_pushes_to_the_real_cli(monkeypatch, tmp_path):
+    """send(to_agent="claude:lane", deliver=True) persisted but then failed
+    delivery: the full lane name was handed to a dispatcher that matches the
+    roster exactly, so the send half-succeeded."""
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    seen = {}
+
+    def fake_deliver(agent, notice):
+        seen["agent"] = agent
+        seen["notice"] = notice
+        return {"ok": True}
+
+    monkeypatch.setattr(server.adapters, "deliver", fake_deliver)
+
+    r = server._send_impl("codex", "claude:fonts.1a2b3c4d", "hi", deliver=True)
+
+    assert r["ok"] is True
+    assert r["delivery"] == {"ok": True}
+    assert seen["agent"] == "claude"  # the CLI, not the lane
+    # ...but the notice must still point at the lane, or the reader polls the
+    # wrong inbox and never sees it.
+    assert "claude:fonts.1a2b3c4d" in seen["notice"]
+
+
+@pytest.mark.anyio
 async def test_send_accepts_lane_qualified_names_but_still_rejects_typos(
     monkeypatch, tmp_path
 ):

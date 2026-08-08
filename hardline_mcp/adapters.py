@@ -120,6 +120,10 @@ _CODEX_ADVISORY_DEVELOPER_INSTRUCTIONS = (
     "resources outside the isolated working directory."
 )
 
+# Head+tail bounds for the raw-output evidence returned on a parse failure.
+_EVIDENCE_HEAD = 1000
+_EVIDENCE_TAIL = 2000
+
 _CLAUDE_EFFORTS = frozenset({"default", "low", "medium", "high", "xhigh", "max"})
 _CLAUDE_MODES = frozenset({"default", "advisory"})
 # Denied unless write=True, so Claude matches Codex's read-only-by-default
@@ -496,11 +500,72 @@ def _unparsed_error(
     response: dict = {"ok": False, "error": detail}
     if malformed:
         response["malformed_lines"] = malformed
-    excerpt = output.strip()
-    if excerpt:
-        response["raw_excerpt"] = excerpt[:2000]
-        response["raw_length"] = len(output)
+    response.update(_raw_evidence(output))
     return response
+
+
+def _raw_evidence(output: str) -> dict:
+    """Bounded head AND tail of the raw output, for diagnosis and salvage.
+
+    Head-only was close to useless for the salvage case it exists for: the
+    terminal event and the agent's actual answer sit at the END of a JSONL
+    stream, so the first 2KB of a 600KB review is startup chatter. Keep both
+    ends and say how much was dropped between them.
+
+    Bounded in characters, not tokens - a rough proxy, chosen so the payload
+    cannot itself blow up the caller's context (the failure this area keeps
+    producing). It is unredacted agent stdout, so treat it as the agent's own
+    output, not a curated field.
+    """
+    text = output.strip()
+    if not text:
+        return {}
+    evidence: dict = {"raw_length": len(output)}
+    if len(text) <= _EVIDENCE_HEAD + _EVIDENCE_TAIL:
+        evidence["raw_excerpt"] = text
+        return evidence
+    head = text[:_EVIDENCE_HEAD]
+    tail = text[-_EVIDENCE_TAIL:]
+    omitted = len(text) - _EVIDENCE_HEAD - _EVIDENCE_TAIL
+    evidence["raw_excerpt"] = f"{head}\n...[{omitted} characters omitted]...\n{tail}"
+    return evidence
+
+
+def _with_damage(response: dict, malformed: int) -> dict:
+    """Attach the damaged-line count to an already-failing response."""
+    if malformed:
+        response["malformed_lines"] = malformed
+    return response
+
+
+def _demote_if_damaged(response: dict, malformed: int, output: str) -> dict:
+    """Never report ``ok: True`` for a stream we could not fully read.
+
+    Skipping a damaged line rescues the common case, but it cannot tell WHICH
+    event was lost. If the damaged line was a later ``agent_message`` or the
+    terminal event, the surviving "answer" is a stale earlier one - and
+    returning that as a clean success is worse than the total failure this
+    replaced, because a wrong answer presented as authoritative is not
+    detectable downstream.
+
+    So: keep the recovered content, but under ``partial_reply`` with
+    ``ok: False``, so a caller must decide to trust it rather than being told
+    it is trustworthy. The undamaged path - the overwhelming majority - is
+    completely unaffected.
+    """
+    if not malformed:
+        return response
+    demoted = dict(response)
+    demoted["ok"] = False
+    demoted["malformed_lines"] = malformed
+    demoted["error"] = (
+        f"{malformed} unparseable line(s); recovered content may be incomplete "
+        "or stale - see partial_reply"
+    )
+    if "reply" in demoted:
+        demoted["partial_reply"] = demoted.pop("reply")
+    demoted.update(_raw_evidence(output))
+    return demoted
 
 
 def _parse_codex_jsonl(
@@ -526,11 +591,14 @@ def _parse_codex_jsonl(
         detail = terminal.get("error")
         if isinstance(detail, dict):
             detail = detail.get("message") or detail
-        return {
-            "ok": False,
-            "error": f"Codex turn failed: {detail or 'unknown error'}",
-            "thread_id": thread.get("thread_id"),
-        }
+        return _with_damage(
+            {
+                "ok": False,
+                "error": f"Codex turn failed: {detail or 'unknown error'}",
+                "thread_id": thread.get("thread_id"),
+            },
+            malformed,
+        )
     completed = (
         terminal if terminal and terminal.get("type") == "turn.completed" else None
     )
@@ -540,11 +608,14 @@ def _parse_codex_jsonl(
         )
         if error_event is not None:
             detail = error_event.get("message") or error_event.get("error")
-            return {
-                "ok": False,
-                "error": f"Codex turn failed: {detail or 'unknown error'}",
-                "thread_id": thread.get("thread_id"),
-            }
+            return _with_damage(
+                {
+                    "ok": False,
+                    "error": f"Codex turn failed: {detail or 'unknown error'}",
+                    "thread_id": thread.get("thread_id"),
+                },
+                malformed,
+            )
     messages = [
         e.get("item", {}).get("text")
         for e in events
@@ -570,11 +641,7 @@ def _parse_codex_jsonl(
         response["subscription_configured"] = subscription_configured
         # A local auth-file preflight is not post-call runtime evidence.
         response["subscription_verified"] = None
-    if malformed:
-        # Succeeded despite damaged lines - say so rather than let a partial
-        # parse look like a clean one.
-        response["malformed_lines"] = malformed
-    return response
+    return _demote_if_damaged(response, malformed, output)
 
 
 def _codex_auth_mode(env: dict[str, str]) -> str | None:
@@ -720,8 +787,14 @@ def ask_codex(
                 requested_effort=effort,
                 subscription_configured=subscription_configured,
             )
+            # A structured turn.failed is the most useful answer; return it.
             if not parsed.get("ok") and "thread_id" in parsed:
                 return parsed
+            # Otherwise the excerpt was computed and then thrown away, so a
+            # nonzero exit surfaced only "exit 1: ..." and the agent's actual
+            # output vanished - the same unrecoverable-failure shape this
+            # evidence exists to prevent. Attach it to the process error.
+            run.update(_raw_evidence(failed_output))
         return run
     return _parse_codex_jsonl(
         run.get("reply", ""),
@@ -811,11 +884,7 @@ def _parse_claude_stream(
         response["error"] = (
             result.get("result") or result.get("subtype") or "Claude request failed"
         )
-    if malformed:
-        # Parsed a result despite damaged lines - surface that rather than let
-        # a partial parse look like a clean one.
-        response["malformed_lines"] = malformed
-    return response
+    return _demote_if_damaged(response, malformed, output)
 
 
 def ask_claude(
