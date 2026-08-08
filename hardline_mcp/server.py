@@ -39,7 +39,7 @@ CodexEffort = Literal["default", "low", "medium", "high", "xhigh", "max", "ultra
 CodexMode = Literal["default", "advisory"]
 
 # ask_*_async fire real ask_claude/ask_codex subprocess calls (each bounded by
-# its own _CLAUDE_TIMEOUT_S/_CODEX_TIMEOUT_S, up to 900s) in the background.
+# its own _CLAUDE_TIMEOUT_S/_CODEX_TIMEOUT_S) in the background.
 # A bare `threading.Thread` per call has no ceiling - repeated dispatches (a
 # runaway caller, or several concurrent write=True requests) would pile up
 # unbounded concurrent agent subprocesses. Route through a small fixed-size
@@ -57,7 +57,7 @@ def _drain_async_executor_at_exit() -> None:
 
     ThreadPoolExecutor's workers are non-daemon and it joins every one of
     them at interpreter shutdown, so a full queue would run to completion
-    before the process could exit - serially, each up to the 900s agent
+    before the process could exit - serially, each up to its configured agent
     timeout. The per-call ``threading.Thread(daemon=True)`` this pool
     replaced was never joined and exited instantly, so that ceiling is a
     regression this restores: teardown is now bounded by the longest
@@ -191,7 +191,11 @@ async def ask_codex(
     """Ask Codex a question and wait for its reply.
 
     Spawns an ephemeral ``codex exec``. Omitting ``model`` passes no
-    ``--model`` flag, so Codex's own configured default applies. Optional
+    ``--model`` flag, so Codex's own configured default applies. When set,
+    ``model`` must be Codex's full model identifier (e.g. ``gpt-5.6-sol``,
+    ``gpt-5.6-terra``) — not a shorthand like ``"sol"``. hardline does not
+    validate or expand it; an unrecognized value is rejected by Codex itself
+    with a clear error rather than silently substituted. Optional
     model/effort selection enables JSONL usage/thread telemetry.
     Advisory mode uses ChatGPT auth preflight, a temporary auth-only CODEX_HOME,
     a neutral read-only directory, ignored user/project configuration, and

@@ -88,13 +88,13 @@ Resolution precedence per agent: env override → (codex only) auto-discovery �
 bare command on `PATH`.
 
 Live queries are bounded so a hung CLI cannot wedge its MCP caller. Hermes
-retains a 180-second default. Claude and Codex default to 900 seconds because
-high-effort review and reasoning calls routinely exceed three minutes. Override
-either ceiling with a positive integer number of seconds:
+retains a 180-second default. Claude defaults to 900 seconds; Codex defaults to
+14400 seconds because deep repository reviews can legitimately run for hours.
+Override either ceiling with a positive integer number of seconds:
 
 ```text
 HARDLINE_CLAUDE_TIMEOUT_S=1200
-HARDLINE_CODEX_TIMEOUT_S=1200
+HARDLINE_CODEX_TIMEOUT_S=14400
 ```
 
 An invalid or non-positive value fails the tool call before spawning the agent.
@@ -109,7 +109,7 @@ invalid value fails the server at launch rather than a single tool call.
 At shutdown, dispatches still queued are dropped rather than run; one already
 in flight is awaited, since its agent subprocess can't be interrupted safely
 mid-call. Without that, teardown would block until *every* queued dispatch had
-run in turn — each up to its own 900-second ceiling.
+run in turn — each up to its own configured timeout.
 
 ### Codex model, effort, isolation, and telemetry
 
@@ -123,7 +123,11 @@ no longer persists one-shot review sessions or interprets a flag-shaped
 prompt as a CLI option, while leaving model selection to Codex itself unless
 a caller explicitly asks for a specific one.
 
-Pass `model`, `effort`, `mode`, or `workdir` for the structured path:
+Pass `model`, `effort`, `mode`, or `workdir` for the structured path. `model`
+must be Codex's full identifier (`gpt-5.6-sol`, `gpt-5.6-terra`, ...), not a
+shorthand like `"sol"` — hardline doesn't validate or expand it against any
+alias table, so an unrecognized value is rejected by Codex itself at
+execution time rather than silently substituted:
 
 ```text
 ask_codex(
