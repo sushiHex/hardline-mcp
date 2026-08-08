@@ -53,6 +53,25 @@ Agents are the fixed set `claude`, `hermes`, `codex`. Identity is self-declared
 user on one machine, so there's nothing to defend against that it couldn't do
 directly anyway.
 
+### Session lanes
+
+Several Claude Code sessions can run at once, and they'd otherwise all share
+the single `claude` mailbox — every session seeing every other's results, and
+able to `ack` them out of each other's inbox. Since each session spawns its
+**own** hardline process over stdio, the process *is* the session and derives
+its own lane from `CLAUDE_CODE_SESSION_ID` + `CLAUDE_PROJECT_DIR`:
+`claude:fonts.1a2b3c4d`.
+
+Nothing to opt into. `ask_*_async(from_agent="claude")` delivers to the
+calling session's lane, `inbox(agent="claude")` reads that lane **plus** the
+unqualified `claude` (so broadcasts still arrive), and `ack` refuses messages
+belonging to another session's lane. Keying on the session id rather than the
+process means a `/mcp` reconnect doesn't orphan in-flight results.
+
+Hermes and Codex set neither variable, so they keep their plain identities and
+cross-agent messaging is unchanged. `HARDLINE_AGENT_LABEL` overrides the
+derived lane if you want to name one explicitly.
+
 ## Requirements
 
 - Python **3.10+**

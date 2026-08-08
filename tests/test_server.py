@@ -14,6 +14,74 @@ def _immediate_submit(fn, *args, **kwargs):
     fn(*args, **kwargs)
 
 
+@pytest.mark.anyio
+async def test_async_result_goes_to_this_sessions_lane(
+    monkeypatch, tmp_path, in_session
+):
+    """The defect this exists for: two sessions dispatched work, results were
+    addressed to the shared "claude", and one session acked the other's."""
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+
+    dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
+    assert dispatched["lane"] == f"claude:{in_session}"
+
+    # Addressed to the lane, not the shared name.
+    assert server.mailbox.inbox("claude", db_path=tmp_path / "mb.db") == []
+    lane_msgs = server.mailbox.inbox(f"claude:{in_session}", db_path=tmp_path / "mb.db")
+    assert len(lane_msgs) == 1
+
+    # ...but the owning session still finds it through the plain call it
+    # already makes - no new convention to learn.
+    inb = await server.inbox(agent="claude")
+    assert inb["count"] == 1
+
+
+@pytest.mark.anyio
+async def test_inbox_sees_own_lane_and_broadcasts_but_not_other_sessions(
+    monkeypatch, tmp_path, in_session
+):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("codex", f"claude:{in_session}", "mine", db_path=db)
+    server.mailbox.send("codex", "claude:other.9999zzzz", "not mine", db_path=db)
+    server.mailbox.send("hermes", "claude", "broadcast", db_path=db)
+
+    bodies = {m["body"] for m in (await server.inbox(agent="claude"))["messages"]}
+    assert bodies == {"mine", "broadcast"}
+
+
+@pytest.mark.anyio
+async def test_ack_refuses_another_sessions_message(monkeypatch, tmp_path, in_session):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    theirs = server.mailbox.send("codex", "claude:other.9999zzzz", "x", db_path=db)
+    mine = server.mailbox.send("codex", f"claude:{in_session}", "y", db_path=db)
+    shared = server.mailbox.send("codex", "claude", "z", db_path=db)
+
+    assert (await server.ack(message_id=theirs["message_id"]))["ok"] is False
+    assert (await server.ack(message_id=mine["message_id"]))["ok"] is True
+    # Unqualified messages stay shared - cross-agent messaging is unaffected.
+    assert (await server.ack(message_id=shared["message_id"]))["ok"] is True
+
+    still_unread = server.mailbox.inbox("claude:other.9999zzzz", db_path=db)
+    assert len(still_unread) == 1
+
+
+@pytest.mark.anyio
+async def test_send_accepts_lane_qualified_names_but_still_rejects_typos(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    ok = server._send_impl("claude", "claude:fonts.1a2b3c4d", "hi", deliver=False)
+    assert ok["ok"] is True
+    typo = server._send_impl("claude", "clod:fonts.1a2b3c4d", "hi", deliver=False)
+    assert typo["ok"] is False and "unknown" in typo["error"].lower()
+
+
 def test_async_dispatch_is_bounded_not_unbounded():
     # A raw threading.Thread-per-call has no ceiling; ask_*_async must go
     # through a fixed-size pool so repeated dispatches queue instead of
@@ -274,7 +342,12 @@ async def test_ask_codex_async_delivers_result_via_mailbox(monkeypatch, tmp_path
     dispatched = await server.ask_codex_async(
         prompt="review the diff", from_agent="claude", label="task-1"
     )
-    assert dispatched == {"ok": True, "dispatched": True, "label": "task-1"}
+    assert dispatched == {
+        "ok": True,
+        "dispatched": True,
+        "label": "task-1",
+        "lane": "claude",
+    }
 
     inb = await server.inbox(agent="claude")
     assert inb["count"] == 1
@@ -303,7 +376,12 @@ async def test_ask_codex_async_survives_adapter_exception(monkeypatch, tmp_path)
     dispatched = await server.ask_codex_async(
         prompt="review the diff", from_agent="claude"
     )
-    assert dispatched == {"ok": True, "dispatched": True, "label": None}
+    assert dispatched == {
+        "ok": True,
+        "dispatched": True,
+        "label": None,
+        "lane": "claude",
+    }
 
     inb = await server.inbox(agent="claude")
     assert inb["count"] == 1
@@ -359,7 +437,12 @@ async def test_ask_claude_async_delivers_result_via_mailbox(monkeypatch, tmp_pat
     dispatched = await server.ask_claude_async(
         prompt="refactor the retry loop", from_agent="codex", label="task-1"
     )
-    assert dispatched == {"ok": True, "dispatched": True, "label": "task-1"}
+    assert dispatched == {
+        "ok": True,
+        "dispatched": True,
+        "label": "task-1",
+        "lane": "codex",
+    }
 
     inb = await server.inbox(agent="codex")
     assert inb["count"] == 1
