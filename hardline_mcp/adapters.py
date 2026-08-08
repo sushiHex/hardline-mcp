@@ -438,6 +438,71 @@ def ask(agent: str, text: str) -> dict:
     return _run_agent_cmd(agent, _prefix_for(agent) + [text])
 
 
+def _parse_jsonl_events(output: str) -> tuple[list[dict], int, str | None]:
+    """Parse newline-delimited JSON into events, tolerating a damaged line.
+
+    Splits on ``\\n`` ONLY. ``str.splitlines()`` also splits on \\v \\f \\x1c
+    \\x1d \\x1e \\x85 U+2028 and U+2029 - none of which delimit JSONL, and none
+    of which JSON requires escaping inside a string (only ``"``, ``\\`` and
+    U+0000-001F are mandatory). Codex and Claude both emit UTF-8 directly
+    rather than \\u-escaping, so one of those characters appearing in any
+    string value used to cut a valid line in half, and the resulting
+    "Unterminated string" discarded the ENTIRE result - including completed,
+    already-paid-for agent work.
+
+    A line that still fails to parse is counted and skipped rather than
+    aborting: the agent's answer is almost always in a different line than the
+    damaged one, so returning nothing loses far more than it protects. The
+    count is surfaced to the caller so a silent partial parse is impossible.
+
+    Returns ``(events, malformed_count, first_error)``.
+    """
+    events: list[dict] = []
+    malformed = 0
+    first_error: str | None = None
+    for line in output.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            malformed += 1
+            first_error = first_error or str(exc)
+            continue
+        if not isinstance(event, dict):
+            malformed += 1
+            first_error = first_error or f"non-object event: {type(event).__name__}"
+            continue
+        events.append(event)
+    return events, malformed, first_error
+
+
+def _unparsed_error(
+    label: str, malformed: int, first_error: str | None, output: str
+) -> dict:
+    """Error for output that yielded no usable result, WITH evidence.
+
+    The raw output used to be dropped on the floor here, which made a parse
+    failure unrecoverable - the caller got a one-line error and the agent's
+    work was gone. Keep a bounded excerpt so the failure is diagnosable and
+    partially salvageable without returning a payload that could itself blow
+    up the caller's context.
+    """
+    detail = (
+        f"invalid {label}: {first_error}"
+        if first_error
+        else (f"{label} ended without a completed reply")
+    )
+    response: dict = {"ok": False, "error": detail}
+    if malformed:
+        response["malformed_lines"] = malformed
+    excerpt = output.strip()
+    if excerpt:
+        response["raw_excerpt"] = excerpt[:2000]
+        response["raw_length"] = len(output)
+    return response
+
+
 def _parse_codex_jsonl(
     output: str,
     *,
@@ -446,17 +511,7 @@ def _parse_codex_jsonl(
     subscription_configured: bool | None = None,
 ) -> dict:
     """Reduce Codex ``exec --json`` events to Hardline's stable reply shape."""
-    events = []
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError as exc:
-            return {"ok": False, "error": f"invalid Codex JSONL: {exc}"}
-        if not isinstance(event, dict):
-            return {"ok": False, "error": "invalid Codex JSONL event"}
-        events.append(event)
+    events, malformed, first_error = _parse_jsonl_events(output)
 
     thread = next((e for e in events if e.get("type") == "thread.started"), {})
     terminal = next(
@@ -499,7 +554,7 @@ def _parse_codex_jsonl(
         and isinstance(e["item"].get("text"), str)
     ]
     if completed is None or not messages:
-        return {"ok": False, "error": "Codex JSONL ended without a completed reply"}
+        return _unparsed_error("Codex JSONL", malformed, first_error, output)
     response = {
         "ok": True,
         "reply": messages[-1],
@@ -515,6 +570,10 @@ def _parse_codex_jsonl(
         response["subscription_configured"] = subscription_configured
         # A local auth-file preflight is not post-call runtime evidence.
         response["subscription_verified"] = None
+    if malformed:
+        # Succeeded despite damaged lines - say so rather than let a partial
+        # parse look like a clean one.
+        response["malformed_lines"] = malformed
     return response
 
 
@@ -686,17 +745,7 @@ def _parse_claude_stream(
     different model. Claude Code does not echo effective effort, so that field
     remains ``None`` rather than pretending the requested value was honored.
     """
-    events = []
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError as exc:
-            return {"ok": False, "error": f"invalid Claude stream-json: {exc}"}
-        if not isinstance(event, dict):
-            return {"ok": False, "error": "invalid Claude stream-json event"}
-        events.append(event)
+    events, malformed, first_error = _parse_jsonl_events(output)
 
     init = next(
         (e for e in events if e.get("type") == "system" and e.get("subtype") == "init"),
@@ -704,7 +753,7 @@ def _parse_claude_stream(
     )
     result = next((e for e in reversed(events) if e.get("type") == "result"), None)
     if result is None:
-        return {"ok": False, "error": "Claude stream ended without a result event"}
+        return _unparsed_error("Claude stream-json", malformed, first_error, output)
 
     actual_model = None
     for event in events:
@@ -762,6 +811,10 @@ def _parse_claude_stream(
         response["error"] = (
             result.get("result") or result.get("subtype") or "Claude request failed"
         )
+    if malformed:
+        # Parsed a result despite damaged lines - surface that rather than let
+        # a partial parse look like a clean one.
+        response["malformed_lines"] = malformed
     return response
 
 
