@@ -34,6 +34,7 @@ def _resolve_db(db_path: Optional[Path]) -> Path:
     env = os.environ.get("HARDLINE_DB")
     return Path(env) if env else _DEFAULT_PATH
 
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,8 +106,12 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 
 
 def send(
-    from_agent: str, to_agent: str, body: str, *,
-    db_path: Optional[Path] = None, now_fn: Callable[[], datetime] = _default_now,
+    from_agent: str,
+    to_agent: str,
+    body: str,
+    *,
+    db_path: Optional[Path] = None,
+    now_fn: Callable[[], datetime] = _default_now,
 ) -> dict:
     """Persist a message from ``from_agent`` to ``to_agent``.
 
@@ -126,41 +131,79 @@ def send(
 
 
 def inbox(
-    agent: str, *, unread_only: bool = True,
+    agent,
+    *,
+    unread_only: bool = True,
     db_path: Optional[Path] = None,
 ) -> list[dict]:
     """Messages addressed TO ``agent``, oldest first (read in arrival order).
 
+    ``agent`` may be one name or several. Several is how a session reads its
+    own lane AND the shared unqualified one in a single ordered pass, rather
+    than merging two queries at the call site.
+
     ``unread_only`` (default) hides already-acked messages.
     """
     db_path = _resolve_db(db_path)
-    sql = "SELECT * FROM messages WHERE recipient = ?"
+    agents = [agent] if isinstance(agent, str) else list(agent)
+    placeholders = ", ".join("?" for _ in agents)
+    sql = f"SELECT * FROM messages WHERE recipient IN ({placeholders})"
     if unread_only:
         sql += " AND acked_at IS NULL"
     sql += " ORDER BY id ASC"
     with closing(_connect(db_path)) as conn:
-        rows = conn.execute(sql, (agent,)).fetchall()
+        rows = conn.execute(sql, tuple(agents)).fetchall()
         return [_row_to_dict(r) for r in rows]
 
 
-def ack(
-    message_id: int, *,
-    db_path: Optional[Path] = None, now_fn: Callable[[], datetime] = _default_now,
-) -> dict:
-    """Mark one message read. Returns ``{"ok": True}`` only if a still-unread
-    message with that id existed (idempotent: a second ack returns False)."""
+def peek(message_id: int, *, db_path: Optional[Path] = None) -> Optional[dict]:
+    """One message by id, or None. Lets a caller check who a message belongs
+    to before acting on it (see ``ack``'s lane guard)."""
     db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def ack(
+    message_id: int,
+    *,
+    lane_suffix: Optional[str] = None,
+    db_path: Optional[Path] = None,
+    now_fn: Callable[[], datetime] = _default_now,
+) -> dict:
+    """Mark one message read. Returns ``{"ok": True}`` only if a still-unread
+    message with that id existed (idempotent: a second ack returns False).
+
+    ``lane_suffix`` is this process's session lane. When set, a message
+    addressed to a DIFFERENT session's lane is refused rather than acked:
+    one session hiding another's results from its inbox is precisely the
+    failure this guards. Unqualified recipients stay shared and ackable by
+    anyone, so cross-agent messaging is unaffected.
+    """
+    db_path = _resolve_db(db_path)
+    sql = "UPDATE messages SET acked_at = ? WHERE id = ? AND acked_at IS NULL"
+    params: tuple = (_iso(now_fn()), message_id)
+    if lane_suffix:
+        # Bare recipients have no ':' and stay ackable; qualified ones must
+        # match this process's lane.
+        sql += (
+            " AND (instr(recipient, ':') = 0"
+            " OR substr(recipient, instr(recipient, ':') + 1) = ?)"
+        )
+        params = params + (lane_suffix,)
+    with closing(_connect(db_path)) as conn:
         with conn:  # transaction: commit on success, rollback on error
-            cur = conn.execute(
-                "UPDATE messages SET acked_at = ? WHERE id = ? AND acked_at IS NULL",
-                (_iso(now_fn()), message_id),
-            )
+            cur = conn.execute(sql, params)
         return {"ok": cur.rowcount > 0}
 
 
 def history(
-    limit: int = 50, agent: Optional[str] = None, *,
+    limit: int = 50,
+    agent: Optional[str] = None,
+    *,
     db_path: Optional[Path] = None,
 ) -> list[dict]:
     """Recent messages newest-first (the visibility/log feed). ``agent``, if

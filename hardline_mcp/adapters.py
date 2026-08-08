@@ -160,6 +160,49 @@ def known_agents() -> tuple[str, ...]:
     return tuple(_DISPATCH)
 
 
+def base_agent(name: str) -> str:
+    """The dispatchable agent behind a possibly lane-qualified name.
+
+    ``claude:fonts.1a2b3c4d`` -> ``claude``. Lanes only ever affect mailbox
+    addressing; every name still resolves to one of the three real CLIs.
+    """
+    return name.split(":", 1)[0]
+
+
+def lane_suffix() -> str:
+    """This process's session lane, or "" when it isn't in a session.
+
+    Every Claude Code session spawns its OWN hardline process over stdio, so
+    the process IS the session - no caller needs to declare anything. Claude
+    Code hands the child ``CLAUDE_CODE_SESSION_ID`` (unique) and
+    ``CLAUDE_PROJECT_DIR``; combining them gives a lane that is both readable
+    in ``history`` and unique when two sessions share one repo.
+
+    The session id, not the process, is what's keyed on: a ``/mcp`` reconnect
+    respawns this process but keeps the session, so pending results still
+    land in the same lane. A per-process random id would orphan them.
+
+    Hermes and Codex set neither variable, so they fall through to "" and
+    keep their existing unqualified identities.
+    """
+    label = os.environ.get("HARDLINE_AGENT_LABEL", "").strip()
+    if label:
+        return label
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if not session_id:
+        return ""
+    project = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    name = Path(project).name if project else Path.cwd().name
+    short = session_id[:8]
+    return f"{name}.{short}" if name else short
+
+
+def lane_for(agent: str) -> str:
+    """``agent`` qualified with this process's lane, if it has one."""
+    suffix = lane_suffix()
+    return f"{base_agent(agent)}:{suffix}" if suffix else agent
+
+
 def positive_int_env(key: str, default: int, *, unit: str = "") -> int:
     """Read a positive-integer ``HARDLINE_*`` knob, or ``default`` if unset.
 
