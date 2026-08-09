@@ -1,17 +1,33 @@
 """Server wiring smoke tests — import, tool registration, send/deliver glue."""
 
 import json
+import threading
 
 import pytest
 
 from hardline_mcp import server
 
 
+class _ImmediateFuture:
+    """Minimal Future stand-in: the work already ran, so result() is instant."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def result(self, timeout=None):
+        return self._value
+
+
 def _immediate_submit(fn, *args, **kwargs):
     """Stand-in for _async_executor.submit that runs fn synchronously instead
     of on a pool thread — makes ask_*_async's background dispatch
-    deterministic to test instead of racing a real worker thread."""
-    fn(*args, **kwargs)
+    deterministic to test instead of racing a real worker thread.
+
+    Returns a Future-like so the early-failure check has something to await;
+    a bare None here meant every async test exercised a code path the real
+    executor never takes.
+    """
+    return _ImmediateFuture(fn(*args, **kwargs))
 
 
 @pytest.mark.anyio
@@ -69,6 +85,162 @@ async def test_ack_refuses_another_sessions_message(monkeypatch, tmp_path, in_se
 
     still_unread = server.mailbox.inbox("claude:other.9999zzzz", db_path=db)
     assert len(still_unread) == 1
+
+
+@pytest.mark.anyio
+async def test_history_still_finds_lane_messages(monkeypatch, tmp_path, in_session):
+    """history() is the ack-proof recovery path - ack only sets acked_at and
+    history ignores it. Filtering by exact equality silently stopped showing
+    lane-addressed async results the moment lanes shipped, breaking the one
+    way to retrieve a result another session had already acked."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("codex", f"claude:{in_session}", "lane result", db_path=db)
+    server.mailbox.send("hermes", "claude", "broadcast", db_path=db)
+
+    bodies = {m["body"] for m in (await server.history(agent="claude"))["messages"]}
+    assert bodies == {"lane result", "broadcast"}
+
+
+@pytest.mark.anyio
+async def test_history_survives_an_ack_by_another_session(
+    monkeypatch, tmp_path, in_session
+):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    # A message to the SHARED name, which any session may ack - this is the
+    # real incident: five results were addressed to bare "claude" and another
+    # session acked them before their owner read them.
+    msg = server.mailbox.send("codex", "claude", "shared result", db_path=db)
+    # The OTHER session acks it, using ITS suffix, not ours. (Previously this
+    # test passed in_session here - its own lane - so it never exercised
+    # another session at all, despite the name.)
+    server.mailbox.ack(msg["message_id"], lane_suffix="other.9999zzzz", db_path=db)
+
+    assert (await server.inbox(agent="claude"))["count"] == 0  # acked, hidden
+    hist = await server.history(agent="claude")
+    assert [m["body"] for m in hist["messages"]] == ["shared result"]  # recoverable
+
+
+@pytest.mark.anyio
+async def test_explicit_lane_reads_only_that_lane(monkeypatch, tmp_path, in_session):
+    """Documented as reading only that lane; it also unioned in the caller's
+    OWN lane, so inbox("claude:other") leaked this session's messages."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("codex", f"claude:{in_session}", "mine", db_path=db)
+    server.mailbox.send("codex", "claude:other.9999zzzz", "theirs", db_path=db)
+
+    got = await server.inbox(agent="claude:other.9999zzzz")
+    assert [m["body"] for m in got["messages"]] == ["theirs"]
+
+
+@pytest.mark.anyio
+async def test_async_delivery_failure_falls_back_to_a_minimal_payload(
+    monkeypatch, tmp_path
+):
+    """The delivery itself sat outside the exception backstop, so a failure
+    there discarded an expensive completed run inside an unobserved future
+    while the caller polled an inbox that would never fill."""
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+
+    real_send = server.mailbox.send
+    calls = {"n": 0}
+
+    def flaky_send(sender, recipient, body, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("mailbox write failed")  # e.g. lock/disk/serialization
+        return real_send(sender, recipient, body, **kw)
+
+    monkeypatch.setattr(server.mailbox, "send", flaky_send)
+
+    await server.ask_codex_async(prompt="go", from_agent="claude", label="t")
+
+    monkeypatch.setattr(server.mailbox, "send", real_send)
+    inb = await server.inbox(agent="claude")
+    assert inb["count"] == 1, "a failed delivery must still reach the caller"
+    body = json.loads(inb["messages"][0]["body"])
+    assert body["ok"] is False
+    assert "could not be delivered" in body["error"]
+    assert body["label"] == "t"
+
+
+@pytest.mark.anyio
+async def test_slow_dispatch_still_reports_dispatched(monkeypatch, tmp_path):
+    """The early-failure check must not turn a genuinely running dispatch into
+    a failure, or ask_*_async stops being async at all. Uses the REAL executor
+    with a task slower than the wait - the immediate-submit stub always
+    completes instantly, so it cannot exercise this branch."""
+    import time
+
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setattr(server, "_ASYNC_EARLY_FAILURE_S", 0.2)
+
+    started = threading.Event()
+
+    def slow_ask(prompt, **kwargs):
+        started.set()
+        time.sleep(1.0)  # outlives the early-failure window
+        return {"ok": True, "reply": "eventually"}
+
+    monkeypatch.setattr(server.adapters, "ask_codex", slow_ask)
+
+    began = time.monotonic()
+    dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
+    elapsed = time.monotonic() - began
+
+    assert dispatched["ok"] is True
+    assert dispatched["dispatched"] is True
+    assert started.is_set(), "the task should actually be running"
+    assert elapsed < 0.9, "must return while the task runs, not wait it out"
+
+
+def test_unlaned_process_cannot_ack_a_lane(monkeypatch, tmp_path):
+    """An unlaned process (Hermes, Codex, or a session missing the env)
+    previously applied NO guard at all and could ack every session's mail -
+    reachable by exactly the callers most likely to poll a shared mailbox."""
+    db = tmp_path / "mb.db"
+    laned = server.mailbox.send("codex", "claude:fonts.1a2b3c4d", "theirs", db_path=db)
+    bare = server.mailbox.send("codex", "claude", "shared", db_path=db)
+
+    assert (
+        server.mailbox.ack(laned["message_id"], lane_suffix="", db_path=db)["ok"]
+        is False
+    )
+    assert (
+        server.mailbox.ack(bare["message_id"], lane_suffix="", db_path=db)["ok"] is True
+    )
+    assert len(server.mailbox.inbox("claude:fonts.1a2b3c4d", db_path=db)) == 1
+
+
+@pytest.mark.anyio
+async def test_deliver_to_a_lane_pushes_to_the_real_cli(monkeypatch, tmp_path):
+    """send(to_agent="claude:lane", deliver=True) persisted but then failed
+    delivery: the full lane name was handed to a dispatcher that matches the
+    roster exactly, so the send half-succeeded."""
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    seen = {}
+
+    def fake_deliver(agent, notice):
+        seen["agent"] = agent
+        seen["notice"] = notice
+        return {"ok": True}
+
+    monkeypatch.setattr(server.adapters, "deliver", fake_deliver)
+
+    r = server._send_impl("codex", "claude:fonts.1a2b3c4d", "hi", deliver=True)
+
+    assert r["ok"] is True
+    assert r["delivery"] == {"ok": True}
+    assert seen["agent"] == "claude"  # the CLI, not the lane
+    # ...but the notice must still point at the lane, or the reader polls the
+    # wrong inbox and never sees it.
+    assert "claude:fonts.1a2b3c4d" in seen["notice"]
 
 
 @pytest.mark.anyio
@@ -376,13 +548,15 @@ async def test_ask_codex_async_survives_adapter_exception(monkeypatch, tmp_path)
     dispatched = await server.ask_codex_async(
         prompt="review the diff", from_agent="claude"
     )
-    assert dispatched == {
-        "ok": True,
-        "dispatched": True,
-        "label": None,
-        "lane": "claude",
-    }
+    # A dispatch that died on arrival must NOT report itself as dispatched.
+    # Returning {"ok": true, "dispatched": true} here is what convinced two
+    # sessions that work was running when nothing was; one believed five
+    # agents were in flight and waited on results that never existed.
+    assert dispatched["ok"] is False
+    assert dispatched["dispatched"] is False
+    assert "unexpected adapter failure" in dispatched["error"]
 
+    # ...and the mailbox copy is still written, so the record survives too.
     inb = await server.inbox(agent="claude")
     assert inb["count"] == 1
     body = json.loads(inb["messages"][0]["body"])

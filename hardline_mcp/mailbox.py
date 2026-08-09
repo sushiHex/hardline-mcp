@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,11 @@ CREATE TABLE IF NOT EXISTS messages (
 _init_lock = threading.Lock()
 _initialized_paths: set[str] = set()
 
+# Cold-start contention on the WAL transition is brief; a few short retries
+# cover it (see _ensure_initialized).
+_INIT_ATTEMPTS = 5
+_INIT_BACKOFF_S = 0.05
+
 
 def _default_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -67,8 +73,21 @@ def _iso(dt: datetime) -> str:
 
 
 def _ensure_initialized(db_path: Path) -> None:
-    """Create the parent dir, enable WAL, and create the schema exactly once
-    per db file (double-checked lock for thread safety)."""
+    """Create the parent dir, enable WAL, and create the schema once per db
+    file per process, retrying the cross-process race.
+
+    ``_init_lock`` is an in-process lock, and every agent runs its OWN server
+    process against the shared file - so on a cold start (or after the db is
+    deleted) a dozen processes can reach the WAL transition simultaneously,
+    each holding a lock the others cannot see. The journal-mode change takes
+    an exclusive lock and, unlike ordinary writes, does NOT honor
+    busy_timeout, so the losers raise "database is locked" outright.
+
+    Retry with a short backoff rather than adding a lockfile: the transition
+    is idempotent (a process that finds WAL already set does nothing), fast,
+    and only contended in the brief cold-start window, so a few retries close
+    the race without a second locking scheme to keep correct.
+    """
     key = str(db_path)
     if key in _initialized_paths:
         return
@@ -76,10 +95,27 @@ def _ensure_initialized(db_path: Path) -> None:
         if key in _initialized_paths:
             return
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(str(db_path), timeout=10.0)) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute(_SCHEMA)
-            conn.commit()
+        last_error: Optional[sqlite3.OperationalError] = None
+        for attempt in range(_INIT_ATTEMPTS):
+            try:
+                with closing(sqlite3.connect(str(db_path), timeout=10.0)) as conn:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute(_SCHEMA)
+                    conn.commit()
+                break
+            except sqlite3.OperationalError as exc:
+                # Only the contention this retry exists for. A permanent fault
+                # (unwritable path, corrupt file, disk full) is not going to
+                # resolve in 500ms, and retrying it just delays a clear error
+                # behind a misleading one.
+                if "locked" not in str(exc) and "busy" not in str(exc):
+                    raise
+                last_error = exc
+                if attempt == _INIT_ATTEMPTS - 1:
+                    raise
+                time.sleep(_INIT_BACKOFF_S * (attempt + 1))
+        else:  # pragma: no cover - loop always breaks or raises
+            raise last_error  # type: ignore[misc]
         _initialized_paths.add(key)
 
 
@@ -177,23 +213,30 @@ def ack(
     """Mark one message read. Returns ``{"ok": True}`` only if a still-unread
     message with that id existed (idempotent: a second ack returns False).
 
-    ``lane_suffix`` is this process's session lane. When set, a message
-    addressed to a DIFFERENT session's lane is refused rather than acked:
-    one session hiding another's results from its inbox is precisely the
-    failure this guards. Unqualified recipients stay shared and ackable by
-    anyone, so cross-agent messaging is unaffected.
+    ``lane_suffix`` is this process's session lane, or empty when it has
+    none. Unqualified recipients stay shared and ackable by anyone, so
+    cross-agent messaging is unaffected. A LANE-QUALIFIED message is ackable
+    only by the process holding that lane - one session hiding another's
+    results is precisely the failure this guards.
+
+    Note the empty case is guarded too, not skipped. Skipping it left a
+    bypass: any process without a lane (Hermes, Codex, or a Claude session
+    whose environment lacked the variables) applied no condition at all and
+    could ack every other session's mail - the exact defect lanes exist to
+    prevent, reachable by the callers most likely to poll a shared mailbox.
+    A process with no lane owns no lane, so it may ack only bare recipients.
     """
     db_path = _resolve_db(db_path)
     sql = "UPDATE messages SET acked_at = ? WHERE id = ? AND acked_at IS NULL"
     params: tuple = (_iso(now_fn()), message_id)
     if lane_suffix:
-        # Bare recipients have no ':' and stay ackable; qualified ones must
-        # match this process's lane.
         sql += (
             " AND (instr(recipient, ':') = 0"
             " OR substr(recipient, instr(recipient, ':') + 1) = ?)"
         )
         params = params + (lane_suffix,)
+    else:
+        sql += " AND instr(recipient, ':') = 0"
     with closing(_connect(db_path)) as conn:
         with conn:  # transaction: commit on success, rollback on error
             cur = conn.execute(sql, params)
@@ -207,13 +250,35 @@ def history(
     db_path: Optional[Path] = None,
 ) -> list[dict]:
     """Recent messages newest-first (the visibility/log feed). ``agent``, if
-    given, matches messages where it is EITHER sender or recipient."""
+    given, matches messages where it is EITHER sender or recipient - including
+    that agent's session lanes.
+
+    The lane match is what makes this the audit feed it claims to be. Async
+    results are addressed to ``claude:<lane>``, so exact-equality filtering
+    silently stopped showing them the moment lanes shipped: ``history`` is
+    also the ack-proof recovery path (``ack`` only sets ``acked_at``, and this
+    query ignores it), so losing lane messages here quietly broke the one way
+    to retrieve a result another session had already acked.
+
+    A lane-qualified ``agent`` still matches only itself - ``claude:a`` does
+    not gain sublanes.
+
+    DELIBERATE: this sees every lane, so it is NOT session-isolated the way
+    ``inbox`` and ``ack`` are. That is the point of an audit feed on a
+    single-user machine - lanes exist to stop sessions clobbering each other
+    by accident, not to keep one person's sessions secret from themselves,
+    and full visibility here is exactly what let one session's lost results
+    be recovered for another. Isolation lives in ``inbox``/``ack``; if this
+    ever needs to be confidential, that is a different feature with a
+    different threat model.
+    """
     db_path = _resolve_db(db_path)
     params: tuple = ()
     sql = "SELECT * FROM messages"
     if agent is not None:
-        sql += " WHERE sender = ? OR recipient = ?"
-        params = (agent, agent)
+        lane_glob = f"{agent}:%"
+        sql += " WHERE sender = ? OR recipient = ? OR sender LIKE ? OR recipient LIKE ?"
+        params = (agent, agent, lane_glob, lane_glob)
     sql += " ORDER BY id DESC LIMIT ?"
     params = params + (limit,)
     with closing(_connect(db_path)) as conn:

@@ -24,6 +24,7 @@ import json
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Literal
 
 import anyio.to_thread
@@ -47,6 +48,12 @@ CodexMode = Literal["default", "advisory"]
 # Override for local tuning; not exposed as a per-call parameter since it
 # bounds the whole hardline-mcp process, not one request.
 _ASYNC_MAX_WORKERS = adapters.positive_int_env("HARDLINE_ASYNC_MAX_WORKERS", 4)
+
+# How long ask_*_async waits before calling a dispatch "started". Long enough
+# to catch an arrive-and-die failure (a rejected model returns in well under a
+# second), short enough that a real dispatch still returns promptly. Runs off
+# the event loop via _in_thread, so it delays only its own caller.
+_ASYNC_EARLY_FAILURE_S = 2.0
 _async_executor = ThreadPoolExecutor(
     max_workers=_ASYNC_MAX_WORKERS, thread_name_prefix="hardline-async"
 )
@@ -114,7 +121,12 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
             f"[hardline] new message #{result['message_id']} from {from_agent}. "
             f"Call hardline-mcp inbox(agent='{to_agent}') to read it."
         )
-        result["delivery"] = adapters.deliver(to_agent, notice)
+        # Push to the CLI behind the lane, not the lane name: adapters.deliver
+        # dispatches on exact roster membership, so a qualified recipient
+        # ("claude:fonts.1a2b3c4d") persisted fine and then failed delivery
+        # with "unknown agent" - a half-succeeded send. The notice still
+        # carries the full lane so the reader queries the right inbox.
+        result["delivery"] = adapters.deliver(adapters.base_agent(to_agent), notice)
     return result
 
 
@@ -143,13 +155,21 @@ async def inbox(agent: str, unread_only: bool = True) -> dict:
     ``inbox(agent="claude")`` returns results dispatched by THIS session plus
     anything broadcast to every claude — without seeing other sessions'
     results. Nothing to opt into: the lane comes from the session that spawned
-    this server. Passing an explicit lane reads only that lane.
+    this server. An already lane-qualified ``agent`` reads ONLY that lane.
 
     ``unread_only`` (default true) hides messages already ack'd. Returns
     ``{"messages": [...], "count": N}``.
     """
-    lane = adapters.lane_for(agent)
-    agents = [agent] if lane == agent else [agent, lane]
+    # An explicit lane means exactly that lane. Previously this still unioned
+    # in the caller's OWN lane (lane_for strips the qualifier and re-adds this
+    # process's), so inbox("claude:other") quietly returned this session's
+    # messages too - contradicting the documented behavior and widening rather
+    # than narrowing the read.
+    if ":" in agent:
+        agents = [agent]
+    else:
+        lane = adapters.lane_for(agent)
+        agents = [agent] if lane == agent else [agent, lane]
     msgs = await _in_thread(mailbox.inbox, agents, unread_only=unread_only)
     return {"messages": msgs, "count": len(msgs)}
 
@@ -223,6 +243,13 @@ async def ask_codex(
     (``1``/``true``/``yes``, case-insensitive); omitted, Codex stays
     read-only. Codex JSONL does not currently report served model/effective
     effort, so those telemetry fields remain null rather than being guessed.
+
+    DAMAGED OUTPUT: if any output line could not be parsed, the result comes
+    back ``ok: false`` with ``malformed_lines`` and the recovered text under
+    ``partial_reply`` instead of ``reply`` — content preserved but NOT
+    certified, because a skipped line may have been a later answer or the
+    terminal event, making the survivor stale. Do not discard a
+    ``partial_reply`` on ``ok: false`` alone; read it and judge it.
     """
     return await _in_thread(
         adapters.ask_codex,
@@ -250,10 +277,10 @@ def _ask_async_impl(
     """Shared body for ask_codex_async/ask_claude_async - only the adapter
     function and the mailbox sender identity differ between agents.
 
-    Does not block (validation is trivial, and submitting to the executor
-    returns immediately), so callers invoke this directly rather than through
-    _in_thread - routing a call this cheap through the worker-thread pool
-    would just add a wasted thread-pool round trip.
+    Briefly waits to see whether the dispatch fails immediately, so callers
+    MUST route this through _in_thread rather than calling it directly: the
+    wait would otherwise block the event loop for every other tool, including
+    pings.
     """
     known = adapters.known_agents()
     if adapters.base_agent(from_agent) not in known:
@@ -266,7 +293,7 @@ def _ask_async_impl(
     # is what let another session ack it out of sight.
     recipient = adapters.lane_for(from_agent)
 
-    def _run() -> None:
+    def _run() -> dict:
         # ask_fn (adapters.ask_claude/ask_codex) is designed to never raise -
         # every failure mode it recognizes already comes back as an
         # {"ok": False, "error"} dict. This is a backstop for whatever it
@@ -286,9 +313,58 @@ def _ask_async_impl(
             }
         if label is not None:
             result["label"] = label
-        mailbox.send(agent, recipient, json.dumps(result))
+        # The delivery itself was outside the backstop above, so a failure
+        # here - lock contention, a full disk, an unserializable result -
+        # discarded an expensive completed run inside an unobserved future,
+        # leaving the caller polling an inbox that would never fill. Retry
+        # with a minimal payload, which fails only if the mailbox is
+        # unreachable entirely; then at least the traceback reaches a log.
+        try:
+            mailbox.send(agent, recipient, json.dumps(result))
+        except Exception:  # noqa: BLE001 - delivery is the last thing owed
+            traceback.print_exc()
+            try:
+                mailbox.send(
+                    agent,
+                    recipient,
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": f"{agent} result could not be delivered",
+                            "label": label,
+                        }
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - mailbox itself is unreachable
+                traceback.print_exc()
+        return result
 
-    _async_executor.submit(_run)
+    future = _async_executor.submit(_run)
+
+    # Wait briefly to see whether this dies on arrival. The receipt used to be
+    # returned the instant the task was QUEUED, so a call that failed in under
+    # a second - a rejected model, a bad workdir - still reported
+    # {"ok": true, "dispatched": true}. Two separate sessions read that as
+    # proof work was running and waited on results that never existed; one
+    # dispatched five agents and believed all five were in flight. A receipt
+    # that cannot distinguish "started" from "already failed" is a write-only
+    # signal, so spend a moment to make it mean something.
+    try:
+        early = future.result(timeout=_ASYNC_EARLY_FAILURE_S)
+    except FuturesTimeout:
+        early = None  # still running - genuinely dispatched, report it as such
+
+    if early is not None and not early.get("ok", False):
+        # Failed before we finished waiting. The mailbox copy is still written
+        # (above), so the record survives; this just refuses to call it a
+        # successful dispatch.
+        return {
+            "ok": False,
+            "dispatched": False,
+            "error": early.get("error", f"{agent} dispatch failed immediately"),
+            "label": label,
+            "lane": recipient,
+        }
     return {"ok": True, "dispatched": True, "label": label, "lane": recipient}
 
 
@@ -312,7 +388,8 @@ async def ask_codex_async(
     dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
     persisted, so a hardline-mcp restart before completion loses the task.
     """
-    return _ask_async_impl(
+    return await _in_thread(
+        _ask_async_impl,
         "codex",
         adapters.ask_codex,
         prompt,
@@ -355,6 +432,13 @@ async def ask_claude(
     without overage. Optioned calls return actual-model, usage, rate-limit,
     auth-verification, and safeguard fallback metadata in addition to
     ``ok``/``reply``.
+
+    DAMAGED OUTPUT: if any output line could not be parsed, the result comes
+    back ``ok: false`` with ``malformed_lines`` and the recovered text under
+    ``partial_reply`` instead of ``reply`` — content preserved but NOT
+    certified, because a skipped line may have been a later answer or the
+    terminal event, making the survivor stale. Do not discard a
+    ``partial_reply`` on ``ok: false`` alone; read it and judge it.
     """
     return await _in_thread(
         adapters.ask_claude,
@@ -387,7 +471,8 @@ async def ask_claude_async(
     dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
     persisted, so a hardline-mcp restart before completion loses the task.
     """
-    return _ask_async_impl(
+    return await _in_thread(
+        _ask_async_impl,
         "claude",
         adapters.ask_claude,
         prompt,
