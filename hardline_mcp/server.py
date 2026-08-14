@@ -594,8 +594,11 @@ async def list_jobs(
     replies would be the same context flood this package spent a release
     bounding everywhere else. Use ``job_result(job_id)`` for one in full.
     """
-    rows = await _in_thread(
-        jobs.listing,
+    # One sweep for the page AND the summary. Two calls meant two liveness
+    # sweeps per request, and each dead row a sweep finds commits its own
+    # transaction - real write contention with ~26 servers on one store.
+    rows, summary = await _in_thread(
+        jobs.listing_with_counts,
         state=state,
         agent=agent,
         requester=requester,
@@ -617,11 +620,7 @@ async def list_jobs(
                 "full_via": f"job_result(job_id={row['job_id']!r})",
             }
         )
-    return {
-        "jobs": rows,
-        "count": len(rows),
-        "counts_by_state": await _in_thread(jobs.counts),
-    }
+    return {"jobs": rows, "count": len(rows), "counts_by_state": summary}
 
 
 @mcp.tool()

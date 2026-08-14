@@ -25,6 +25,17 @@ def _clock(start):
     return now_fn
 
 
+def _run_to_completion(db, job_id, result):
+    """Claim the job, then finish it — the real lifecycle.
+
+    finish() is a compare-and-swap from `running`, so calling it on a queued
+    job is an invalid transition and now correctly does nothing. Several tests
+    used to skip the claim and silently relied on a blind write.
+    """
+    assert jobs.mark_running(job_id, db_path=db) is True
+    jobs.finish(job_id, result=result, db_path=db)
+
+
 def _create(db, **kw):
     return jobs.create(
         agent=kw.get("agent", "codex"),
@@ -137,7 +148,7 @@ def test_pid_alive_agrees_with_reality(tmp_path):
 def test_finished_jobs_are_never_reclassified_as_lost(tmp_path):
     db = tmp_path / "mb.db"
     job_id = _create(db)
-    jobs.finish(job_id, result={"ok": True, "reply": "r"}, db_path=db)
+    _run_to_completion(db, job_id, {"ok": True, "reply": "r"})
     with mailbox._connect(db) as conn:
         conn.execute(
             "UPDATE jobs SET owner_pid = ? WHERE job_id = ?", (0x7FFFFFFE, job_id)
@@ -252,17 +263,58 @@ def test_a_real_result_supersedes_a_heuristic_lost(tmp_path):
     db = tmp_path / "mb.db"
     job_id = _create(db)
     jobs.mark_running(job_id, db_path=db)
+    # Misclassified while THIS process is still alive and finishing - owner_pid
+    # stays ours, which is what makes the correction legitimate.
     with mailbox._connect(db) as conn:
-        conn.execute(
-            "UPDATE jobs SET state = ?, owner_pid = ? WHERE job_id = ?",
-            (jobs.LOST, 0x7FFFFFFE, job_id),
-        )
+        conn.execute("UPDATE jobs SET state = ? WHERE job_id = ?", (jobs.LOST, job_id))
         conn.commit()
 
     jobs.finish(job_id, result={"ok": True, "reply": "it existed after all"}, db_path=db)
     job = jobs.get(job_id, db_path=db)
     assert job["state"] == jobs.COMPLETED
     assert job["result"]["reply"] == "it existed after all"
+
+
+def test_a_foreign_process_cannot_resurrect_a_genuinely_lost_job(tmp_path):
+    """Superseding `lost` is a self-correction, not a general resurrection.
+
+    A genuinely lost job's owner is dead and cannot call finish(); allowing
+    any caller to overwrite it would silently erase the provenance of a job
+    that really was abandoned.
+    """
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, db_path=db)
+    with mailbox._connect(db) as conn:
+        conn.execute(
+            "UPDATE jobs SET state = ?, owner_pid = ? WHERE job_id = ?",
+            (jobs.LOST, 0x7FFFFFFE, job_id),  # owned by a process that is not us
+        )
+        conn.commit()
+
+    jobs.finish(job_id, result={"ok": True, "reply": "not mine to write"}, db_path=db)
+    assert jobs.get(job_id, db_path=db)["state"] == jobs.LOST
+
+
+def test_finish_cannot_skip_the_claim(tmp_path):
+    """queued -> completed without ever claiming the job was permitted by the
+    old `state != cancelled` guard, so a caller that never ran anything could
+    write a result."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.finish(job_id, result={"ok": True, "reply": "never ran"}, db_path=db)
+    assert jobs.get(job_id, db_path=db)["state"] == jobs.QUEUED
+
+
+def test_finish_cannot_rewrite_a_terminal_result(tmp_path):
+    """completed -> failed and failed -> completed were both permitted."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    _run_to_completion(db, job_id, {"ok": True, "reply": "the real answer"})
+    jobs.finish(job_id, result={"ok": False, "error": "stale worker"}, db_path=db)
+    job = jobs.get(job_id, db_path=db)
+    assert job["state"] == jobs.COMPLETED
+    assert job["result"]["reply"] == "the real answer"
 
 
 def test_finish_clears_the_child_pid_so_it_cannot_be_killed_later(tmp_path):
@@ -302,6 +354,36 @@ def test_cancel_warns_when_the_child_survived_the_kill(tmp_path, monkeypatch):
     assert out["ok"] is True and out["child_killed"] is False
     assert "may still be running" in out["warning"]
     assert "31337" in out["warning"]
+
+
+def test_cancel_warns_when_it_killed_without_verifying_identity(tmp_path, monkeypatch):
+    """A kill with no identity check is the original unsafe behaviour, reached
+    exactly when the probe failed. Allowed, but never reported as if it were
+    a verified kill."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, child_pid=31337, db_path=db)  # no child_key
+    monkeypatch.setattr(
+        jobs, "kill_process_tree", lambda pid, expect_key=None: (True, None)
+    )
+
+    out = jobs.request_cancel(job_id, db_path=db)
+    assert out["identity_verified"] is False
+    assert "WITHOUT verifying" in out["warning"]
+
+
+def test_cancel_reports_a_verified_kill_without_a_warning(tmp_path, monkeypatch):
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, child_pid=31337, db_path=db)
+    jobs.set_child_pid(job_id, 31337, started_key="tok", db_path=db)
+    monkeypatch.setattr(
+        jobs, "kill_process_tree", lambda pid, expect_key=None: (True, None)
+    )
+
+    out = jobs.request_cancel(job_id, db_path=db)
+    assert out["identity_verified"] is True
+    assert "warning" not in out
 
 
 @pytest.mark.parametrize("reason", [jobs.ALREADY_GONE, jobs.IDENTITY_MISMATCH])
@@ -345,10 +427,38 @@ def test_listing_finds_an_orphan_even_when_filtering_on_lost(tmp_path):
     assert jobs.counts(db_path=db) == {jobs.LOST: 1}
 
 
+def test_sweep_reaches_the_oldest_orphans_first(tmp_path, monkeypatch):
+    """The sweep is bounded, so its ORDER decides who never gets looked at.
+
+    Newest-first meant that once the bound was full of newer active rows, an
+    older orphan could never be reached and would claim to be running forever
+    - starving exactly the rows most likely to have been abandoned. The bound
+    is patched small here because that is the only regime where the ordering
+    is observable at all.
+    """
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(jobs, "_SWEEP_LIMIT", 2)
+
+    old_orphan = _create(db)
+    jobs.mark_running(old_orphan, db_path=db)
+    with mailbox._connect(db) as conn:
+        conn.execute(
+            "UPDATE jobs SET owner_pid = ? WHERE job_id = ?", (0x7FFFFFFE, old_orphan)
+        )
+        conn.commit()
+
+    # Newer active jobs owned by THIS (live) process, enough to fill the bound.
+    for _ in range(3):
+        jobs.mark_running(_create(db), db_path=db)
+
+    found = jobs.listing(state=jobs.LOST, db_path=db)
+    assert [j["job_id"] for j in found] == [old_orphan]
+
+
 def test_cancel_refuses_a_job_that_already_finished(tmp_path):
     db = tmp_path / "mb.db"
     job_id = _create(db)
-    jobs.finish(job_id, result={"ok": True, "reply": "r"}, db_path=db)
+    _run_to_completion(db, job_id, {"ok": True, "reply": "r"})
     out = jobs.request_cancel(job_id, db_path=db)
     assert out["ok"] is False and "already" in out["error"]
 
@@ -386,7 +496,7 @@ def test_listing_filters_and_is_newest_first(tmp_path):
     only_codex = jobs.listing(agent="codex", db_path=db)
     assert {j["agent"] for j in only_codex} == {"codex"}
 
-    jobs.finish(made[0], result={"ok": True, "reply": "x"}, db_path=db)
+    _run_to_completion(db, made[0], {"ok": True, "reply": "x"})
     assert len(jobs.listing(state=jobs.COMPLETED, db_path=db)) == 1
     assert made[0] not in {j["job_id"] for j in jobs.listing(active_only=True, db_path=db)}
 
@@ -403,9 +513,68 @@ def test_listing_is_bounded_like_every_other_read(tmp_path):
 def test_counts_summarize_states(tmp_path):
     db = tmp_path / "mb.db"
     a, b = _create(db), _create(db)
-    jobs.finish(a, result={"ok": True, "reply": "x"}, db_path=db)
+    _run_to_completion(db, a, {"ok": True, "reply": "x"})
     assert jobs.counts(db_path=db) == {jobs.QUEUED: 1, jobs.COMPLETED: 1}
     assert b  # silence the unused warning; its queued row is the other count
+
+
+def test_a_jobs_table_without_child_key_is_migrated(tmp_path):
+    """The real migration case, which the legacy-store test does NOT cover:
+    that one has no jobs table at all, so _SCHEMA creates a fresh one already
+    containing child_key and _add_missing_columns never runs."""
+    import sqlite3
+
+    db = tmp_path / "old-jobs.db"
+    with sqlite3.connect(str(db)) as raw:
+        raw.execute(
+            "CREATE TABLE jobs (job_id TEXT PRIMARY KEY, agent TEXT NOT NULL,"
+            " requester TEXT NOT NULL, label TEXT, state TEXT NOT NULL,"
+            " request TEXT NOT NULL, result TEXT, error TEXT,"
+            " owner_pid INTEGER NOT NULL, child_pid INTEGER,"
+            " created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT)"
+        )
+        raw.execute(
+            "INSERT INTO jobs (job_id, agent, requester, state, request,"
+            " owner_pid, created_at) VALUES"
+            " ('job_old', 'codex', 'hermes', 'completed', '{}', 1, '2026-08-01')"
+        )
+        raw.commit()
+
+    # Writing child_key would fail outright without the ALTER.
+    job_id = _create(db)
+    jobs.mark_running(job_id, db_path=db)
+    assert jobs.set_child_pid(job_id, 4242, started_key="k", db_path=db) is True
+    assert jobs.get(job_id, db_path=db)["child_key"] == "k"
+    # The pre-existing row survives the migration.
+    assert jobs.get("job_old", db_path=db)["state"] == jobs.COMPLETED
+
+
+def test_migration_tolerates_a_concurrent_initializer(tmp_path, monkeypatch):
+    """Check-then-ALTER is a race with many processes on one store: both can
+    see the column missing, one adds it, the other gets "duplicate column".
+    That is the desired end state reached by someone else - and it is neither
+    "locked" nor "busy", so the retry loop would re-raise it."""
+    import sqlite3
+
+    db = tmp_path / "racy.db"
+    _create(db)  # establish the schema
+
+    class _ClaimsColumnIsMissing:
+        """sqlite3.Connection is immutable, so wrap rather than patch."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, *a, **kw):
+            if sql.startswith("PRAGMA table_info"):
+                # The pre-migration shape, which forces the ALTER to run
+                # against a table that ALREADY has the column - exactly what
+                # the losing process in the race sees.
+                return [(0, "job_id"), (1, "agent")]
+            return self._real.execute(sql, *a, **kw)
+
+    with sqlite3.connect(str(db)) as conn:
+        mailbox._add_missing_columns(_ClaimsColumnIsMissing(conn))  # must not raise
 
 
 def test_schema_version_is_recorded_in_the_store(tmp_path):

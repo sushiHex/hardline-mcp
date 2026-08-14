@@ -286,10 +286,25 @@ def _run_cmd(
         return {"ok": False, "error": f"spawn failed: {e}"}
 
     if on_spawn is not None:
+        # A False return means the caller could not claim this child - it was
+        # cancelled in the window between Popen creating the process and the
+        # pid being recorded. Nobody else can kill it: the cancelling process
+        # never saw a pid, so it signalled nothing and reported "cancelled
+        # before start" while the work carried on. We are holding the handle,
+        # so we are the only one who can, and we do it here.
         try:
-            on_spawn(proc.pid)
+            claimed = on_spawn(proc.pid)
         except Exception:  # noqa: BLE001 - bookkeeping must not kill the run
-            pass
+            claimed = True
+        if claimed is False:
+            _kill_tree(proc)
+            _reap(proc)
+            return {
+                "ok": False,
+                "error": "cancelled before the child could be recorded",
+                "cancelled": True,
+                "elapsed_s": round(time.monotonic() - started, 1),
+            }
 
     try:
         stdout, stderr = proc.communicate(timeout=timeout_s)
@@ -370,8 +385,14 @@ def _run_cmd(
     }
 
 
-def _reap(proc: subprocess.Popen) -> None:
-    """Close the pipes and wait for the child. Best effort, never raises.
+def _reap(proc: subprocess.Popen) -> bool:
+    """Close the pipes and try to wait for the child. Never raises.
+
+    Returns whether the child was actually reaped. It is BOUNDED, not
+    guaranteed: if the kill silently failed or teardown outlives the wait,
+    this returns False and the caller is left with a process it can no longer
+    reach. Saying so is the point - claiming a guarantee it cannot keep is
+    how the leak would go unnoticed.
 
     Both halves matter: an unwaited child is a zombie holding a process slot,
     and unclosed pipes are two leaked descriptors per timeout in a long-lived
@@ -381,12 +402,16 @@ def _reap(proc: subprocess.Popen) -> None:
         try:
             if stream is not None:
                 stream.close()
-        except Exception:  # noqa: BLE001
+        except BaseException:  # noqa: BLE001 - see below
             pass
     try:
         proc.wait(timeout=10)
-    except Exception:  # noqa: BLE001 - already on the failure path
-        pass
+        return True
+    except BaseException:  # noqa: BLE001 - already on the failure path
+        # BaseException, not Exception: this runs while another exception is
+        # propagating, and a KeyboardInterrupt escaping here would REPLACE the
+        # original one the caller is trying to report.
+        return False
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -406,10 +431,10 @@ def _kill_tree(proc: subprocess.Popen) -> None:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 proc.kill()
-    except Exception:  # noqa: BLE001 - we are already on the failure path
+    except BaseException:  # noqa: BLE001 - must not replace a propagating exc
         try:
             proc.kill()
-        except Exception:  # noqa: BLE001
+        except BaseException:  # noqa: BLE001
             pass
 
 

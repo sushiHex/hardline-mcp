@@ -1038,6 +1038,64 @@ async def test_a_job_cancelled_before_start_never_spawns(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
+async def test_a_child_spawned_into_a_cancelled_job_is_killed_locally(
+    monkeypatch, tmp_path
+):
+    """The window between Popen creating the child and its pid being recorded.
+
+    A cancel landing there sees child_pid NULL, reports "cancelled before
+    start", and signals nothing - so nobody else can kill it. The spawning
+    process holds the handle and is the only one that can, which is why
+    on_spawn's return value has to be honoured.
+    """
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+
+    killed = []
+    monkeypatch.setattr(server.adapters, "_kill_tree", lambda proc: killed.append(proc))
+    monkeypatch.setattr(server.adapters, "_reap", lambda proc: True)
+
+    ran = []
+
+    class _FakeChild:
+        pid = 4242
+
+        def communicate(self, timeout=None):
+            # Recorded rather than raised: raising would land in the cleanup
+            # path, which ALSO kills the tree, so the assertion below would
+            # pass even when the failed claim was ignored.
+            ran.append(timeout)
+            return "", ""
+
+        returncode = 0
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(
+        server.adapters.subprocess, "Popen", lambda cmd, **kw: _FakeChild()
+    )
+    # Cancel between the claim and the pid being recorded.
+    real_set = server.jobs.set_child_pid
+    monkeypatch.setattr(
+        server.jobs,
+        "set_child_pid",
+        lambda job_id, pid, **kw: (
+            server.jobs.request_cancel(job_id, db_path=db),
+            real_set(job_id, pid, **kw),
+        )[1],
+    )
+
+    await server.ask_codex_async(prompt="expensive", from_agent="claude")
+    assert ran == [], "the cancelled job's child was allowed to run"
+    assert killed, "the spawning process did not kill the child it could not claim"
+
+
+@pytest.mark.anyio
 async def test_list_jobs_summarizes_a_huge_result_instead_of_inlining_it(
     monkeypatch, tmp_path
 ):
@@ -1048,6 +1106,7 @@ async def test_list_jobs_summarizes_a_huge_result_instead_of_inlining_it(
     job_id = server.jobs.create(
         agent="codex", requester="claude", label=None, request={}, db_path=db
     )
+    server.jobs.mark_running(job_id, db_path=db)  # finish() is a CAS from running
     server.jobs.finish(job_id, result={"ok": True, "reply": "q" * 50_000}, db_path=db)
 
     listed = await server.list_jobs()

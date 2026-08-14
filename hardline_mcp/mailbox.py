@@ -137,8 +137,19 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         if not present:  # table absent entirely; the schema above creates it
             continue
         for name, decl in columns.items():
-            if name not in present:
+            if name in present:
+                continue
+            try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError as exc:
+                # Check-then-ALTER is a race with ~26 processes initializing
+                # the same store: two can both see the column missing, one adds
+                # it, and the other gets "duplicate column name". That is the
+                # desired end state reached by someone else, not a failure -
+                # and it is neither "locked" nor "busy", so the retry loop
+                # above would re-raise it and break initialization outright.
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
 
 def _ensure_initialized(db_path: Path) -> None:

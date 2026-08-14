@@ -68,6 +68,48 @@ IDENTITY_MISMATCH = (
 _CHILD_ALREADY_DEAD = frozenset({ALREADY_GONE, IDENTITY_MISMATCH})
 
 
+_SYNCHRONIZE = 0x00100000
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_WAIT_TIMEOUT = 0x00000102
+_kernel32_cache: list = []
+
+
+def _kernel32():
+    """kernel32 with EXPLICIT argtypes/restype, or None off Windows.
+
+    Declaring the signatures is not tidiness. ctypes defaults a function's
+    result to C ``int``, so on 64-bit Windows the HANDLE from OpenProcess is
+    truncated: the handle is then invalid, every probe built on it fails, and
+    the failures are silent and wrong in the dangerous direction - a live
+    owner reads as dead, and process_key returns None, which downgrades
+    cancellation to killing a bare pid with no identity check at all.
+    """
+    if os.name != "nt":
+        return None
+    if _kernel32_cache:
+        return _kernel32_cache[0]
+    import ctypes
+    from ctypes import wintypes
+
+    k = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    k.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k.OpenProcess.restype = wintypes.HANDLE
+    k.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    k.WaitForSingleObject.restype = wintypes.DWORD
+    k.CloseHandle.argtypes = (wintypes.HANDLE,)
+    k.CloseHandle.restype = wintypes.BOOL
+    k.GetProcessTimes.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    )
+    k.GetProcessTimes.restype = wintypes.BOOL
+    _kernel32_cache.append(k)
+    return k
+
+
 def new_job_id() -> str:
     """Short, unambiguous, and not a sequence number.
 
@@ -97,19 +139,16 @@ def pid_alive(pid: Optional[int]) -> bool:
         # 259 is indistinguishable from a running one. Waiting with a zero
         # timeout has no such ambiguity: WAIT_TIMEOUT means still running,
         # WAIT_OBJECT_0 means the handle is signalled, i.e. exited.
-        import ctypes
-
-        SYNCHRONIZE = 0x00100000
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        WAIT_TIMEOUT = 0x00000102
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32 = _kernel32()
+        if kernel32 is None:
+            return False
         handle = kernel32.OpenProcess(
-            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid
         )
         if not handle:
             return False
         try:
-            return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+            return kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
         finally:
             kernel32.CloseHandle(handle)
     try:
@@ -159,11 +198,11 @@ def process_key(pid: int) -> Optional[str]:
             import ctypes
             from ctypes import wintypes
 
-            SYNCHRONIZE = 0x00100000
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            kernel32 = _kernel32()
+            if kernel32 is None:
+                return None
             handle = kernel32.OpenProcess(
-                SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+                _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid
             )
             if not handle:
                 return None
@@ -318,11 +357,18 @@ def finish(
     A cancelled job stays cancelled: the child was killed deliberately, so the
     non-zero exit that follows is the expected consequence, not a new failure.
 
-    A ``lost`` job, by contrast, IS superseded. ``lost`` is a heuristic
-    derived from "the owner's pid is not alive"; a real terminal result from
-    the owner itself is direct evidence and outranks it. Refusing to overwrite
-    it meant a misclassified job - a slow reap, a reused pid, a liveness probe
-    racing the finish - permanently discarded a result that genuinely existed.
+    This is a compare-and-swap, not a blind write. ``state != CANCELLED``
+    alone was far too wide: it also permitted completed -> failed, failed ->
+    completed, and even queued -> completed by a caller that never claimed the
+    job at all. A result may only be recorded from ``running`` (the normal
+    path) or from ``lost``, and only by the process that owns the row.
+
+    ``lost`` is superseded because it is a heuristic derived from "the owner's
+    pid is not alive", and a terminal result from that same owner is direct
+    evidence it was wrong - a slow reap or a probe racing the finish should
+    not permanently discard a result that genuinely existed. Restricting it to
+    the OWNING pid is what keeps that from becoming a general resurrection:
+    a genuinely lost job's owner is dead and cannot call this.
     """
     db_path = _resolve_db(db_path)
     ok = bool(result and result.get("ok"))
@@ -335,14 +381,16 @@ def finish(
                 # A finished child's pid must not stay on the row: it is the
                 # stale identity a later cancel could kill something else with.
                 " child_pid = NULL, child_key = NULL"
-                " WHERE job_id = ? AND state != ?",
+                " WHERE job_id = ? AND state IN (?, ?) AND owner_pid = ?",
                 (
                     state,
                     json.dumps(result, default=str) if result is not None else None,
                     error,
                     _iso(now_fn()),
                     job_id,
-                    CANCELLED,
+                    RUNNING,
+                    LOST,
+                    os.getpid(),
                 ),
             )
             # A cancelled job still records what the killed run produced.
@@ -428,8 +476,11 @@ def _sweep_lost(conn, now_fn: Callable[[], datetime]) -> None:
     turn a listing into an unbounded scan.
     """
     marks = ", ".join("?" for _ in ACTIVE_STATES)
+    # OLDEST first. Newest-first meant that once 500 newer active rows existed,
+    # an older orphan could never be reached and would claim to be running
+    # forever - starving exactly the rows most likely to be abandoned.
     rows = conn.execute(
-        f"SELECT * FROM jobs WHERE state IN ({marks}) ORDER BY rowid DESC LIMIT ?",
+        f"SELECT * FROM jobs WHERE state IN ({marks}) ORDER BY rowid ASC LIMIT ?",
         (*sorted(ACTIVE_STATES), _SWEEP_LIMIT),
     ).fetchall()
     for row in rows:
@@ -448,6 +499,30 @@ def listing(
 ) -> list[dict]:
     """Jobs newest-first. Bounded like every other read in this package."""
     db_path = _resolve_db(db_path)
+    with closing(_connect(db_path)) as conn:
+        _sweep_lost(conn, now_fn)
+        rows = _query(
+            conn,
+            state=state,
+            agent=agent,
+            requester=requester,
+            active_only=active_only,
+            limit=limit,
+        )
+        return [_row_to_dict(r) for r in rows]
+
+
+def _query(
+    conn,
+    *,
+    state: Optional[str],
+    agent: Optional[str],
+    requester: Optional[str],
+    active_only: bool,
+    limit: int,
+):
+    """The filtered SELECT, shared so listing and listing_with_counts cannot
+    drift apart. Assumes the caller has already swept."""
     try:
         limit = int(limit)
     except (TypeError, ValueError):
@@ -475,11 +550,7 @@ def listing(
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
     params.append(limit)
-
-    with closing(_connect(db_path)) as conn:
-        _sweep_lost(conn, now_fn)
-        rows = conn.execute(sql, tuple(params)).fetchall()
-        return [_row_to_dict(r) for r in rows]
+    return conn.execute(sql, tuple(params)).fetchall()
 
 
 def kill_process_tree(
@@ -586,7 +657,9 @@ def request_cancel(
             }
 
         killed, kill_error = (False, None)
+        identity_verified = None
         if job["child_pid"]:
+            identity_verified = job.get("child_key") is not None
             killed, kill_error = kill_process_tree(
                 job["child_pid"], expect_key=job.get("child_key")
             )
@@ -603,6 +676,18 @@ def request_cancel(
             else "job had not spawned a child yet; marked cancelled before start"
         ),
     }
+    out["identity_verified"] = identity_verified
+    if identity_verified is False and killed:
+        # A kill with no identity check is the original unsafe behaviour, and
+        # it is reached exactly when the probe FAILED - a transient /proc read
+        # error, a permissions problem, a race at spawn. Allowed, because
+        # refusing would mean cancel never works where creation time is
+        # unavailable, but never silently equivalent to a verified kill.
+        out["warning"] = (
+            f"killed pid {job['child_pid']} WITHOUT verifying process identity "
+            "(no token was recorded at spawn); if that pid had been reused, an "
+            "unrelated process tree was killed"
+        )
     if job["child_pid"] and not killed and kill_error not in _CHILD_ALREADY_DEAD:
         # The row says cancelled but a real process may still be running, and
         # reporting that identically to a clean cancel would be a quiet lie.
@@ -611,6 +696,41 @@ def request_cancel(
             f"({kill_error}); it may still be running as pid {job['child_pid']}"
         )
     return out
+
+
+def listing_with_counts(
+    *,
+    state: Optional[str] = None,
+    agent: Optional[str] = None,
+    requester: Optional[str] = None,
+    active_only: bool = False,
+    limit: int = DEFAULT_JOB_LIMIT,
+    db_path: Optional[Path] = None,
+    now_fn: Callable[[], datetime] = _default_now,
+) -> tuple[list[dict], dict]:
+    """One sweep, then both the page and the summary.
+
+    Calling ``listing()`` and ``counts()`` separately swept twice per request.
+    Each sweep is a liveness probe per active row, and every dead one it finds
+    commits its own transaction - so a single listing across ~26 concurrent
+    server processes could mean tens of thousands of OS probes and a burst of
+    serialized WAL writers contending with real mailbox reads.
+    """
+    db_path = _resolve_db(db_path)
+    with closing(_connect(db_path)) as conn:
+        _sweep_lost(conn, now_fn)
+        rows = _query(
+            conn,
+            state=state,
+            agent=agent,
+            requester=requester,
+            active_only=active_only,
+            limit=limit,
+        )
+        summary = conn.execute(
+            "SELECT state, COUNT(*) FROM jobs GROUP BY state"
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows], {r[0]: r[1] for r in summary}
 
 
 def counts(
