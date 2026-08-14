@@ -260,16 +260,24 @@ def inbox(
     sql += " ORDER BY id ASC LIMIT ?"
 
     with closing(_connect(db_path)) as conn:
-        # BEGIN IMMEDIATE, not `with conn:`. Python's legacy transaction mode
-        # opens a transaction only on DML, so a bare `with conn:` leaves the
-        # SELECT outside it entirely: two pollers both read the same ids, one
-        # UPDATE wins and the other matches zero rows - yet BOTH return the
-        # batch. Verified: that interleaving double-delivers. Reserving the
-        # writer up front makes read-then-consume a single atomic claim.
-        # (BEGIN DEFERRED is not enough under WAL - the upgrade can fail with
-        # SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot resolve.)
+        # BEGIN IMMEDIATE for a CONSUMING read only. Python's legacy
+        # transaction mode opens a transaction only on DML, so a bare
+        # `with conn:` leaves the SELECT outside it entirely: two pollers both
+        # read the same ids, one UPDATE wins and the other matches zero rows -
+        # yet BOTH return the batch. Verified: that interleaving
+        # double-delivers. Reserving the writer up front makes read-then-consume
+        # a single atomic claim. (BEGIN DEFERRED is not enough under WAL - the
+        # upgrade can fail with SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot
+        # resolve.)
+        #
+        # A non-consuming read must NOT take it. WAL exists so readers and
+        # writers coexist; reserving the single writer for a call that will
+        # never write serializes browsing, empty, and foreign-lane reads
+        # against every real writer, and sustained polling could starve them
+        # into SQLITE_BUSY once busy_timeout elapses.
         try:
-            conn.execute("BEGIN IMMEDIATE")
+            if consuming:
+                conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(sql, (*agents, limit)).fetchall()
             messages = [_row_to_dict(r) for r in rows]
 
@@ -287,25 +295,43 @@ def inbox(
                 if ackable:
                     stamp = _iso(now_fn())
                     id_marks = ", ".join("?" for _ in ackable)
-                    conn.execute(
+                    cur = conn.execute(
                         f"UPDATE messages SET acked_at = ? WHERE id IN ({id_marks})"
                         f" AND recipient IN ({placeholders}) AND acked_at IS NULL",
                         (stamp, *ackable, *agents),
                     )
                     # Reflect the commit in what we hand back; returning
                     # acked_at=None for a row this call just consumed is a
-                    # stale representation the caller may act on.
-                    consumed = set(ackable)
-                    for msg in messages:
-                        if msg["message_id"] in consumed:
-                            msg["acked_at"] = stamp
+                    # stale representation the caller may act on. Stamp only
+                    # if the UPDATE really matched every row we intended -
+                    # otherwise the stamp would be an assumption, not a fact.
+                    if cur.rowcount == len(ackable):
+                        consumed = set(ackable)
+                        for msg in messages:
+                            if msg["message_id"] in consumed:
+                                msg["acked_at"] = stamp
 
-            remaining = conn.execute(
+            # Count only what THIS caller could actually consume. Counting
+            # rows it can never ack (another session's lane) would leave
+            # ``remaining`` permanently positive, and the documented "poll
+            # while remaining" loop would never terminate - head-of-line
+            # blocking behind mail that is not yours to take.
+            remaining_sql = (
                 f"SELECT COUNT(*) FROM messages WHERE recipient IN ({placeholders})"
-                " AND acked_at IS NULL",
-                tuple(agents),
-            ).fetchone()[0]
-            conn.commit()
+                " AND acked_at IS NULL"
+            )
+            remaining_params: tuple = tuple(agents)
+            if lane_suffix:
+                remaining_sql += (
+                    " AND (instr(recipient, ':') = 0"
+                    " OR substr(recipient, instr(recipient, ':') + 1) = ?)"
+                )
+                remaining_params = remaining_params + (lane_suffix,)
+            else:
+                remaining_sql += " AND instr(recipient, ':') = 0"
+            remaining = conn.execute(remaining_sql, remaining_params).fetchone()[0]
+            if consuming:
+                conn.commit()
         except BaseException:
             conn.rollback()
             raise

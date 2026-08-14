@@ -204,6 +204,16 @@ async def inbox(
     instead of re-reading the same backlog. Poll again while ``remaining``
     is non-zero.
 
+    Two documented exceptions to "consumes what it returns":
+    ``auto_ack`` has NO effect when ``unread_only`` is false — browsing
+    re-serves acked rows, which cannot be consumed, so honouring it there
+    would re-pin the caller on the same page forever. And a message
+    qualified to another session's lane is shown but never consumed, the
+    same ownership rule ``ack`` enforces.
+
+    ``remaining`` counts only what THIS caller could consume, so reading a
+    lane you do not own reports zero rather than looping forever.
+
     Bodies over ``_MAX_BODY_CHARS`` are truncated with a marker — call
     ``peek(message_id)`` for one message in full.
 

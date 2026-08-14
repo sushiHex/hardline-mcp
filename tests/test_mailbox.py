@@ -1,5 +1,6 @@
 """Tests for hardline_mcp.mailbox — real temp-dir SQLite (concurrency is the point)."""
 
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -301,6 +302,52 @@ def test_history_limit_is_clamped_and_negative_is_not_unlimited(tmp_path):
     assert len(mailbox.history(limit="junk", db_path=db)) == mailbox.DEFAULT_HISTORY_LIMIT
 
 
+def test_remaining_excludes_mail_this_caller_cannot_consume(tmp_path):
+    """``remaining`` drives the documented "poll while non-zero" loop, so
+    counting rows this caller can never ack would never let it terminate -
+    head-of-line blocking behind another session's mail."""
+    db = tmp_path / "mb.db"
+    mailbox.send("codex", "claude:owner.aaaa1111", "theirs", db_path=db)
+
+    msgs, remaining = mailbox.inbox(
+        "claude:owner.aaaa1111", lane_suffix="intruder.bbbb2222", db_path=db
+    )
+    assert len(msgs) == 1  # visible, as history/visibility semantics allow
+    assert remaining == 0  # but not deliverable to me, so the loop ends
+
+    # The real owner still sees it as theirs to take.
+    _, owner_remaining = mailbox.inbox(
+        "claude:owner.aaaa1111",
+        lane_suffix="owner.aaaa1111",
+        auto_ack=False,
+        db_path=db,
+    )
+    assert owner_remaining == 1
+
+
+def test_non_consuming_reads_do_not_take_the_writer_lock(tmp_path):
+    """WAL exists so readers and writers coexist. Reserving the single writer
+    for a call that will never write serializes browsing and foreign-lane
+    reads against every real writer."""
+    db = tmp_path / "mb.db"
+    mailbox.send("codex", "hermes", "m", db_path=db)
+
+    import sqlite3
+
+    # Hold the writer lock, then prove a non-consuming read still completes.
+    blocker = sqlite3.connect(str(db), timeout=0.2, isolation_level=None)
+    blocker.execute("PRAGMA busy_timeout=200")
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        msgs, _ = mailbox.inbox("hermes", auto_ack=False, db_path=db)
+        assert len(msgs) == 1
+        browse, _ = mailbox.inbox("hermes", unread_only=False, db_path=db)
+        assert len(browse) == 1
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+
 def test_history_pages_backward_to_reach_a_consumed_message(tmp_path):
     """``inbox`` consumes what it returns, so history is the recovery route -
     but newest-first plus a cap left anything older than one page
@@ -361,48 +408,76 @@ def test_concurrent_pollers_never_receive_the_same_message(tmp_path):
 
     Python's legacy transaction mode opens a transaction only on DML, so the
     SELECT ran outside it: two pollers read the same ids, one UPDATE won and
-    the other matched zero rows, yet BOTH returned the batch. Hammer one db
-    from several threads and prove every message is delivered exactly once.
+    the other matched zero rows, yet BOTH returned the batch.
+
+    The interleaving is ORCHESTRATED, not raced. A barrier on loop entry
+    would only make overlap likely - on a slow or single-core runner each
+    thread can finish its whole select/update pair before the other starts,
+    and the broken implementation would pass. Here poller A is suspended in
+    the exact select-done/update-pending window and B is released into it, so
+    the defect is reproduced deterministically rather than probabilistically.
     """
     import threading
 
     db = tmp_path / "mb.db"
-    total = 240
-    for i in range(total):
+    for i in range(6):
         mailbox.send("codex", "hermes", f"m{i}", db_path=db)
 
-    seen: list[list[int]] = []
-    errors: list[Exception] = []
-    lock = threading.Lock()
-    n_threads = 8
-    barrier = threading.Barrier(n_threads)
+    real_connect = mailbox._connect
+    b_result: dict = {}
+    b_thread_holder: dict = {}
 
-    def poller() -> None:
-        got: list[int] = []
-        try:
-            barrier.wait()
-            while True:
-                msgs, remaining = mailbox.inbox("hermes", limit=7, db_path=db)
-                if not msgs:
-                    break
-                got.extend(m["message_id"] for m in msgs)
-                if remaining == 0:
-                    break
-        except Exception as e:  # noqa: BLE001 - surface any concurrency failure
-            errors.append(e)
-        with lock:
-            seen.append(got)
+    class _PauseBeforeUpdate:
+        """Proxy that releases the second poller just before A's UPDATE."""
 
-    threads = [threading.Thread(target=poller) for _ in range(n_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+        def __init__(self, real):
+            self._real = real
+            self._fired = False
 
-    assert errors == [], f"concurrent pollers raised: {errors}"
-    delivered = [mid for batch in seen for mid in batch]
-    assert len(delivered) == len(set(delivered)), "a message was delivered twice"
-    assert len(delivered) == total, "a message was never delivered"
+        def execute(self, sql, params=()):
+            if not self._fired and sql.lstrip().upper().startswith("UPDATE"):
+                self._fired = True
+
+                def run_b():
+                    b_result["msgs"] = mailbox.inbox("hermes", limit=3, db_path=db)[0]
+
+                t = threading.Thread(target=run_b)
+                t.start()
+                b_thread_holder["t"] = t
+                # Give B time to reach its own claim. Correct code makes it
+                # block on BEGIN IMMEDIATE; broken code lets it SELECT the
+                # very rows A is about to consume.
+                time.sleep(0.4)
+            return self._real.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    hooked = {"n": 0}
+
+    def connect_once(path):
+        conn = real_connect(path)
+        hooked["n"] += 1
+        return _PauseBeforeUpdate(conn) if hooked["n"] == 1 else conn
+
+    mailbox._connect = connect_once
+    try:
+        a_msgs, _ = mailbox.inbox("hermes", limit=3, db_path=db)
+    finally:
+        mailbox._connect = real_connect
+
+    t = b_thread_holder.get("t")
+    assert t is not None, "the pause hook never fired - test did not exercise the window"
+    t.join(timeout=30)
+    assert not t.is_alive(), "second poller deadlocked"
+
+    a_ids = {m["message_id"] for m in a_msgs}
+    b_ids = {m["message_id"] for m in b_result["msgs"]}
+    assert a_ids, "first poller got nothing"
+    assert b_ids, "second poller got nothing"
+    assert not (a_ids & b_ids), (
+        f"same message delivered to both pollers: {sorted(a_ids & b_ids)}"
+    )
 
 
 def test_concurrent_writers_do_not_lose_or_duplicate(tmp_path):
