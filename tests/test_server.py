@@ -1090,9 +1090,21 @@ async def test_a_child_spawned_into_a_cancelled_job_is_killed_locally(
         )[1],
     )
 
-    await server.ask_codex_async(prompt="expensive", from_agent="claude")
+    got = await server.ask_codex_async(prompt="expensive", from_agent="claude")
     assert ran == [], "the cancelled job's child was allowed to run"
     assert killed, "the spawning process did not kill the child it could not claim"
+
+    # The record must stay CANCELLED. The abort returns ok:false, and finish()
+    # would otherwise write `failed` over it - reporting a deliberate cancel as
+    # a failure, which is a different and misleading thing.
+    status = await server.job_status(job_id=got["job_id"])
+    assert status["job"]["state"] == server.jobs.CANCELLED
+    # ...and the requester is told, rather than left polling an inbox forever.
+    delivered = json.loads(
+        (await server.inbox(agent="claude"))["messages"][0]["body"]
+    )
+    assert delivered["ok"] is False
+    assert delivered["cancelled"] is True
 
 
 @pytest.mark.anyio

@@ -427,32 +427,53 @@ def test_listing_finds_an_orphan_even_when_filtering_on_lost(tmp_path):
     assert jobs.counts(db_path=db) == {jobs.LOST: 1}
 
 
-def test_sweep_reaches_the_oldest_orphans_first(tmp_path, monkeypatch):
-    """The sweep is bounded, so its ORDER decides who never gets looked at.
+def test_sweep_probes_once_per_owner_and_starves_nobody(tmp_path, monkeypatch):
+    """Liveness is a property of the OWNER, not of each row.
 
-    Newest-first meant that once the bound was full of newer active rows, an
-    older orphan could never be reached and would claim to be running forever
-    - starving exactly the rows most likely to have been abandoned. The bound
-    is patched small here because that is the only regime where the ordering
-    is observable at all.
+    Probing per row asked the OS the same question once per job, which forced
+    a bound on the scan - and any bound has an order, so whichever end it
+    favoured, rows at the other end could be starved indefinitely by enough
+    long-running jobs at the favoured end. Driving the sweep by distinct owner
+    removes both the amplification and the bound.
     """
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(jobs, "_SWEEP_LIMIT", 2)
+    dead_pid = 0x7FFFFFFE
 
-    old_orphan = _create(db)
-    jobs.mark_running(old_orphan, db_path=db)
+    orphans = []
+    for _ in range(40):
+        job_id = _create(db)
+        jobs.mark_running(job_id, db_path=db)
+        orphans.append(job_id)
     with mailbox._connect(db) as conn:
         conn.execute(
-            "UPDATE jobs SET owner_pid = ? WHERE job_id = ?", (0x7FFFFFFE, old_orphan)
+            "UPDATE jobs SET owner_pid = ? WHERE job_id IN ({})".format(
+                ",".join("?" for _ in orphans)
+            ),
+            (dead_pid, *orphans),
         )
         conn.commit()
 
-    # Newer active jobs owned by THIS (live) process, enough to fill the bound.
-    for _ in range(3):
-        jobs.mark_running(_create(db), db_path=db)
+    mine = [_create(db) for _ in range(5)]
+    for job_id in mine:
+        jobs.mark_running(job_id, db_path=db)
 
-    found = jobs.listing(state=jobs.LOST, db_path=db)
-    assert [j["job_id"] for j in found] == [old_orphan]
+    probed = []
+    real_alive = jobs.pid_alive
+    monkeypatch.setattr(
+        jobs, "pid_alive", lambda pid: (probed.append(pid), real_alive(pid))[1]
+    )
+
+    lost = jobs.listing(state=jobs.LOST, limit=200, db_path=db)
+    # Snapshot before any further call, since each listing sweeps again.
+    probed_by_one_listing = sorted(probed)
+
+    # Every orphan resolved, none starved by a scan bound.
+    assert {j["job_id"] for j in lost} == set(orphans)
+    # ...our own jobs untouched...
+    still_active = jobs.listing(active_only=True, limit=200, db_path=db)
+    assert {j["job_id"] for j in still_active} == set(mine)
+    # ...and 45 active rows cost two probes, one per distinct owner.
+    assert probed_by_one_listing == sorted({dead_pid, os.getpid()})
 
 
 def test_cancel_refuses_a_job_that_already_finished(tmp_path):

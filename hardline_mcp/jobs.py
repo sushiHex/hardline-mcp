@@ -423,7 +423,7 @@ def _resolve_lost(conn, row, now_fn: Callable[[], datetime]) -> dict:
             " WHERE job_id = ? AND state IN (?, ?)",
             (
                 LOST,
-                "owner process exited before recording a terminal state",
+                _OWNER_DIED,
                 _iso(now_fn()),
                 job["job_id"],
                 QUEUED,
@@ -441,7 +441,7 @@ def _resolve_lost(conn, row, now_fn: Callable[[], datetime]) -> dict:
         ).fetchone()
         return _row_to_dict(fresh) if fresh is not None else job
     job["state"] = LOST
-    job["error"] = "owner process exited before recording a terminal state"
+    job["error"] = _OWNER_DIED
     return job
 
 
@@ -459,11 +459,11 @@ def get(
         return _resolve_lost(conn, row, now_fn)
 
 
-_SWEEP_LIMIT = 500
+_OWNER_DIED = "owner process exited before recording a terminal state"
 
 
 def _sweep_lost(conn, now_fn: Callable[[], datetime]) -> None:
-    """Resolve every reachable active job before anyone FILTERS on state.
+    """Resolve orphaned jobs before anyone FILTERS on state.
 
     Lazy resolution on read is right for a single job, but it cannot be the
     only mechanism for a query: ``state='lost'`` is applied by SQL, so an
@@ -472,19 +472,37 @@ def _sweep_lost(conn, now_fn: Callable[[], datetime]) -> None:
     find the very jobs it exists to surface, and ``active_only`` returned rows
     that were about to be reclassified. Resolve first, then filter.
 
-    Bounded: active jobs are few by nature, and a runaway backlog must not
-    turn a listing into an unbounded scan.
+    Driven by distinct OWNERS, not by rows. Liveness is a property of the
+    owning process, so probing per row asked the OS the same question once per
+    job: with several hundred active rows across ~26 servers, a single listing
+    meant tens of thousands of identical probes and a separate committed
+    transaction per dead row. There are only ever a handful of distinct
+    owners, so this is a handful of probes and one UPDATE per dead one.
+
+    It also removes the need to bound the scan at all, and with it the
+    starvation that bound caused: any row cap has an order, and whichever end
+    it favours, the rows at the other end can be starved indefinitely by
+    enough long-running jobs at the favoured end.
     """
     marks = ", ".join("?" for _ in ACTIVE_STATES)
-    # OLDEST first. Newest-first meant that once 500 newer active rows existed,
-    # an older orphan could never be reached and would claim to be running
-    # forever - starving exactly the rows most likely to be abandoned.
-    rows = conn.execute(
-        f"SELECT * FROM jobs WHERE state IN ({marks}) ORDER BY rowid ASC LIMIT ?",
-        (*sorted(ACTIVE_STATES), _SWEEP_LIMIT),
-    ).fetchall()
-    for row in rows:
-        _resolve_lost(conn, row, now_fn)
+    active = tuple(sorted(ACTIVE_STATES))
+    owners = [
+        row[0]
+        for row in conn.execute(
+            f"SELECT DISTINCT owner_pid FROM jobs WHERE state IN ({marks})", active
+        ).fetchall()
+    ]
+    dead = [pid for pid in owners if not pid_alive(pid)]
+    if not dead:
+        return
+    with conn:
+        for pid in dead:
+            conn.execute(
+                f"UPDATE jobs SET state = ?, error = ?,"
+                f" finished_at = COALESCE(finished_at, ?)"
+                f" WHERE owner_pid = ? AND state IN ({marks})",
+                (LOST, _OWNER_DIED, _iso(now_fn()), pid, *active),
+            )
 
 
 def listing(
