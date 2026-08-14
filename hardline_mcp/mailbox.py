@@ -36,6 +36,11 @@ def _resolve_db(db_path: Optional[Path]) -> Path:
     return Path(env) if env else _DEFAULT_PATH
 
 
+# Bumped when a table is added or a column's meaning changes. Recorded in
+# `meta` so a running server can report what store it is talking to rather
+# than leaving "is this the new schema?" to be inferred from behaviour.
+SCHEMA_VERSION = 3
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +49,38 @@ CREATE TABLE IF NOT EXISTS messages (
     body       TEXT NOT NULL,
     created_at TEXT NOT NULL,
     acked_at   TEXT
-)
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- Async dispatch used to be fire-and-forget and process-local: a restart lost
+-- the task with no record it had ever existed, and a timeout produced a result
+-- with nothing in it. A job row is the durable identity that survives both.
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id       TEXT PRIMARY KEY,
+    agent        TEXT NOT NULL,
+    requester    TEXT NOT NULL,
+    label        TEXT,
+    state        TEXT NOT NULL,
+    request      TEXT NOT NULL,
+    result       TEXT,
+    error        TEXT,
+    owner_pid    INTEGER NOT NULL,
+    child_pid    INTEGER,
+    -- Process-identity token for child_pid (creation time). A pid alone is
+    -- not an identity: a finished child's pid can be reused, and cancelling
+    -- on a stale pid would kill an unrelated process.
+    child_key    TEXT,
+    created_at   TEXT NOT NULL,
+    started_at   TEXT,
+    finished_at  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs (state, created_at);
+CREATE INDEX IF NOT EXISTS jobs_requester_idx ON jobs (requester, created_at);
 """
 
 # One-time per-db init (schema + WAL) is guarded so it happens exactly once
@@ -83,6 +119,39 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+# Columns added to an EXISTING table after it first shipped. CREATE TABLE IF
+# NOT EXISTS cannot add them, so a store created by an earlier version keeps
+# the old shape and every write naming the new column fails.
+_ADDED_COLUMNS = {
+    "jobs": {"child_key": "TEXT"},
+}
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Bring an older table up to the current shape. Idempotent."""
+    for table, columns in _ADDED_COLUMNS.items():
+        try:
+            present = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.Error:
+            continue
+        if not present:  # table absent entirely; the schema above creates it
+            continue
+        for name, decl in columns.items():
+            if name in present:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError as exc:
+                # Check-then-ALTER is a race with ~26 processes initializing
+                # the same store: two can both see the column missing, one adds
+                # it, and the other gets "duplicate column name". That is the
+                # desired end state reached by someone else, not a failure -
+                # and it is neither "locked" nor "busy", so the retry loop
+                # above would re-raise it and break initialization outright.
+                if "duplicate column" not in str(exc).lower():
+                    raise
+
+
 def _ensure_initialized(db_path: Path) -> None:
     """Create the parent dir, enable WAL, and create the schema once per db
     file per process, retrying the cross-process race.
@@ -111,7 +180,21 @@ def _ensure_initialized(db_path: Path) -> None:
             try:
                 with closing(sqlite3.connect(str(db_path), timeout=10.0)) as conn:
                     conn.execute("PRAGMA journal_mode=WAL")
-                    conn.execute(_SCHEMA)
+                    # executescript, not execute: the schema is several
+                    # statements now. Every one is IF NOT EXISTS, so this stays
+                    # idempotent and an existing messages-only store gains the
+                    # new tables without a migration step.
+                    conn.executescript(_SCHEMA)
+                    _add_missing_columns(conn)
+                    # INSERT OR REPLACE rather than ON CONFLICT ... DO UPDATE:
+                    # upsert syntax needs SQLite 3.24+, and this is the one
+                    # statement that would make an otherwise-compatible store
+                    # fail to initialize at all.
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value)"
+                        " VALUES ('schema_version', ?)",
+                        (str(SCHEMA_VERSION),),
+                    )
                     conn.commit()
                 break
             except sqlite3.OperationalError as exc:
@@ -336,6 +419,46 @@ def inbox(
             conn.rollback()
             raise
         return messages, remaining
+
+
+def recipients(*, db_path: Optional[Path] = None) -> list[dict]:
+    """Every recipient name the mailbox has actually seen, with counts.
+
+    Exists because agent identity was undiscoverable: ``history`` filtered by
+    a name that carries no traffic returns an empty list, which is
+    indistinguishable from "no messages" - one agent searched its own display
+    name for a while before learning its mailbox identity was ``hermes``.
+    Reporting the names in use turns that guess into a lookup.
+    """
+    db_path = _resolve_db(db_path)
+    with closing(_connect(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT recipient, COUNT(*) AS total,"
+            " SUM(CASE WHEN acked_at IS NULL THEN 1 ELSE 0 END) AS unread,"
+            " MAX(created_at) AS newest"
+            " FROM messages GROUP BY recipient ORDER BY recipient"
+        ).fetchall()
+        return [
+            {
+                "recipient": r["recipient"],
+                "total": r["total"],
+                "unread": r["unread"] or 0,
+                "newest": r["newest"],
+            }
+            for r in rows
+        ]
+
+
+def senders(*, db_path: Optional[Path] = None) -> list[str]:
+    """Distinct sender names the mailbox has seen."""
+    db_path = _resolve_db(db_path)
+    with closing(_connect(db_path)) as conn:
+        return [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT sender FROM messages ORDER BY sender"
+            ).fetchall()
+        ]
 
 
 def peek(message_id: int, *, db_path: Optional[Path] = None) -> Optional[dict]:

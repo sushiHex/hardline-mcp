@@ -303,7 +303,9 @@ def test_async_executor_shutdown_is_registered_so_teardown_is_bounded():
 
 
 @pytest.mark.anyio
-async def test_all_ten_tools_registered():
+async def test_tool_roster_is_exactly_this():
+    # Named for the roster rather than a count: the count changed three times
+    # and the name went stale each time while still asserting the right thing.
     tools = await server.mcp.list_tools()
     names = {t.name for t in tools}
     assert names == {
@@ -312,6 +314,12 @@ async def test_all_ten_tools_registered():
         "peek",
         "ack",
         "history",
+        "list_agents",
+        "server_info",
+        "job_status",
+        "job_result",
+        "job_cancel",
+        "list_jobs",
         "ask_hermes",
         "ask_codex",
         "ask_codex_async",
@@ -504,6 +512,7 @@ def test_ask_codex_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
         label=None,
         model=None,
         effort="default",
+        mode="default",
         workdir=None,
         write=False,
     )
@@ -516,7 +525,14 @@ async def test_ask_codex_async_delivers_result_via_mailbox(monkeypatch, tmp_path
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
     def fake_ask_codex(
-        prompt, *, model=None, effort="default", workdir=None, write=False
+        prompt,
+        *,
+        model=None,
+        effort="default",
+        mode="default",
+        workdir=None,
+        write=False,
+        on_spawn=None,
     ):
         return {"ok": True, "reply": f"handled: {prompt}"}
 
@@ -525,18 +541,20 @@ async def test_ask_codex_async_delivers_result_via_mailbox(monkeypatch, tmp_path
     dispatched = await server.ask_codex_async(
         prompt="review the diff", from_agent="claude", label="task-1"
     )
-    assert dispatched == {
-        "ok": True,
-        "dispatched": True,
-        "label": "task-1",
-        "lane": "claude",
-    }
+    assert dispatched["ok"] is True and dispatched["dispatched"] is True
+    assert dispatched["label"] == "task-1" and dispatched["lane"] == "claude"
+    assert dispatched["job_id"].startswith("job_")
 
     inb = await server.inbox(agent="claude")
     assert inb["count"] == 1
     assert inb["messages"][0]["sender"] == "codex"
     body = json.loads(inb["messages"][0]["body"])
-    assert body == {"ok": True, "reply": "handled: review the diff", "label": "task-1"}
+    assert body["ok"] is True
+    assert body["reply"] == "handled: review the diff"
+    assert body["label"] == "task-1"
+    # The delivered message carries the same durable handle as the receipt,
+    # so a result read from the mailbox can still be traced to its job.
+    assert body["job_id"] == dispatched["job_id"]
 
 
 @pytest.mark.anyio
@@ -550,7 +568,14 @@ async def test_ask_codex_async_survives_adapter_exception(monkeypatch, tmp_path)
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
     def raising_ask_codex(
-        prompt, *, model=None, effort="default", workdir=None, write=False
+        prompt,
+        *,
+        model=None,
+        effort="default",
+        mode="default",
+        workdir=None,
+        write=False,
+        on_spawn=None,
     ):
         raise RuntimeError("unexpected adapter failure")
 
@@ -588,7 +613,9 @@ async def test_ask_codex_async_omits_label_when_not_supplied(monkeypatch, tmp_pa
     await server.ask_codex_async(prompt="go", from_agent="hermes")
 
     body = json.loads((await server.inbox(agent="hermes"))["messages"][0]["body"])
-    assert body == {"ok": True, "reply": "done"}  # no "label" key at all
+    assert "label" not in body  # omitted entirely, not set to None
+    assert body["ok"] is True and body["reply"] == "done"
+    assert body["job_id"].startswith("job_")  # durable handle always present
 
 
 def test_ask_claude_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
@@ -601,6 +628,7 @@ def test_ask_claude_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
         label=None,
         model=None,
         effort="default",
+        mode="default",
         workdir=None,
         write=False,
     )
@@ -613,7 +641,14 @@ async def test_ask_claude_async_delivers_result_via_mailbox(monkeypatch, tmp_pat
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
     def fake_ask_claude(
-        prompt, *, model=None, effort="default", workdir=None, write=False
+        prompt,
+        *,
+        model=None,
+        effort="default",
+        mode="default",
+        workdir=None,
+        write=False,
+        on_spawn=None,
     ):
         return {"ok": True, "reply": f"handled: {prompt}"}
 
@@ -622,22 +657,18 @@ async def test_ask_claude_async_delivers_result_via_mailbox(monkeypatch, tmp_pat
     dispatched = await server.ask_claude_async(
         prompt="refactor the retry loop", from_agent="codex", label="task-1"
     )
-    assert dispatched == {
-        "ok": True,
-        "dispatched": True,
-        "label": "task-1",
-        "lane": "codex",
-    }
+    assert dispatched["ok"] is True and dispatched["dispatched"] is True
+    assert dispatched["label"] == "task-1" and dispatched["lane"] == "codex"
+    assert dispatched["job_id"].startswith("job_")
 
     inb = await server.inbox(agent="codex")
     assert inb["count"] == 1
     assert inb["messages"][0]["sender"] == "claude"
     body = json.loads(inb["messages"][0]["body"])
-    assert body == {
-        "ok": True,
-        "reply": "handled: refactor the retry loop",
-        "label": "task-1",
-    }
+    assert body["ok"] is True
+    assert body["reply"] == "handled: refactor the retry loop"
+    assert body["label"] == "task-1"
+    assert body["job_id"] == dispatched["job_id"]
 
 
 @pytest.mark.anyio
@@ -651,7 +682,9 @@ async def test_ask_claude_async_omits_label_when_not_supplied(monkeypatch, tmp_p
     await server.ask_claude_async(prompt="go", from_agent="hermes")
 
     body = json.loads((await server.inbox(agent="hermes"))["messages"][0]["body"])
-    assert body == {"ok": True, "reply": "done"}  # no "label" key at all
+    assert "label" not in body  # omitted entirely, not set to None
+    assert body["ok"] is True and body["reply"] == "done"
+    assert body["job_id"].startswith("job_")  # durable handle always present
 
 
 @pytest.mark.anyio
@@ -716,6 +749,410 @@ async def test_peek_reports_a_missing_message(monkeypatch, tmp_path):
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
     got = await server.peek(message_id=999999)
     assert got["ok"] is False and "999999" in got["error"]
+
+
+@pytest.mark.anyio
+async def test_whole_inbox_response_is_bounded_not_just_each_body(monkeypatch, tmp_path):
+    """Per-body capping alone still let a full batch reach ~200KB, which the
+    host then truncated itself - so the response was cut anyway and the
+    `truncated` flag understated it."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    for i in range(25):
+        server.mailbox.send("codex", "hermes", f"{i}:" + "x" * 20_000, db_path=db)
+
+    got = await server.inbox(agent="hermes")
+    total = sum(len(m["body"]) for m in got["messages"])
+    assert got["count"] == 25  # a consuming read must return everything it took
+    # The real contract, with no fudge factor: the truncation note is budgeted
+    # for rather than added on top, so a default-sized batch fits the target.
+    # A 1.1x allowance here was hiding exactly that overshoot.
+    assert total <= server._MAX_RESPONSE_CHARS
+    assert got["truncated"] == 25
+
+
+@pytest.mark.anyio
+async def test_a_maximal_batch_stays_within_the_advertised_worst_case(
+    monkeypatch, tmp_path
+):
+    """A consuming read may not drop what it consumed, so at the per-body
+    floor a maximal batch necessarily exceeds the target budget. That ceiling
+    is real and advertised rather than hidden behind the target."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    for i in range(server.mailbox.MAX_INBOX_LIMIT):
+        server.mailbox.send("codex", "hermes", f"{i}:" + "z" * 5_000, db_path=db)
+
+    got = await server.inbox(agent="hermes", limit=server.mailbox.MAX_INBOX_LIMIT)
+    total = sum(len(m["body"]) for m in got["messages"])
+    worst_case = server.mailbox.MAX_INBOX_LIMIT * (
+        server._MIN_BODY_CHARS + server._NOTE_OVERHEAD
+    )
+    assert got["count"] == server.mailbox.MAX_INBOX_LIMIT
+    assert total <= worst_case
+    assert (await server.server_info())["limits"]["inbox_worst_case_chars"] == worst_case
+
+
+@pytest.mark.anyio
+async def test_consuming_read_returns_a_recovery_cursor(monkeypatch, tmp_path):
+    """The ack commits before the response can reach the caller, so the ids
+    of what was consumed are what make a lost response recoverable."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    ids = [
+        server.mailbox.send("codex", "hermes", f"m{i}", db_path=db)["message_id"]
+        for i in range(4)
+    ]
+
+    got = await server.inbox(agent="hermes", limit=3)
+    assert got["first_message_id"] == ids[0]
+    assert got["last_message_id"] == ids[2]
+    assert "history(" in got["recover_with"]
+
+    # The cursor really does re-fetch the consumed batch: history ignores acks.
+    back = await server.history(agent="hermes", before_id=got["last_message_id"] + 1)
+    assert [m["message_id"] for m in back["messages"]] == list(reversed(ids[:3]))
+
+
+@pytest.mark.anyio
+async def test_history_caps_the_whole_page_and_hands_back_a_cursor(monkeypatch, tmp_path):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    for i in range(60):
+        server.mailbox.send("codex", "hermes", f"{i}:" + "y" * 8_000, db_path=db)
+
+    page = await server.history(agent="hermes", limit=50)
+    total = sum(len(m["body"]) for m in page["messages"])
+    assert total <= server._MAX_RESPONSE_CHARS
+    assert page["dropped"] > 0          # the page really was shortened
+    assert page["has_more"] is True
+    assert page["next_before_id"] == page["messages"][-1]["message_id"]
+
+    # Paging with the returned cursor continues without overlap.
+    nxt = await server.history(
+        agent="hermes", limit=50, before_id=page["next_before_id"]
+    )
+    first_ids = {m["message_id"] for m in page["messages"]}
+    next_ids = {m["message_id"] for m in nxt["messages"]}
+    assert not (first_ids & next_ids)
+
+
+@pytest.mark.anyio
+async def test_history_explains_an_unknown_agent_instead_of_returning_silence(
+    monkeypatch, tmp_path
+):
+    """An empty page for a filtered query read as 'no messages' when it
+    actually meant 'wrong name' - an agent searched its display name for a
+    while before learning its mailbox identity was 'hermes'."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("claude", "hermes", "real traffic", db_path=db)
+
+    got = await server.history(agent="MrAnderson")
+    assert got["count"] == 0
+    assert "not a known agent" in got["hint"]
+    assert "list_agents" in got["hint"]
+
+    # A known agent with genuinely no traffic gets no misleading hint.
+    quiet = await server.history(agent="codex")
+    assert quiet["count"] == 0 and "hint" not in quiet
+
+
+@pytest.mark.anyio
+async def test_list_agents_reports_roster_observed_names_and_own_identity(
+    monkeypatch, tmp_path, in_session
+):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("claude", "hermes", "a", db_path=db)
+    server.mailbox.send("codex", f"claude:{in_session}", "b", db_path=db)
+
+    got = await server.list_agents()
+    assert set(got["agents"]) == set(server.adapters.known_agents())
+    observed = {r["recipient"] for r in got["observed_recipients"]}
+    assert observed == {"hermes", f"claude:{in_session}"}
+    assert got["you"]["lane_suffix"] == in_session
+    assert got["you"]["lane_for_claude"] == f"claude:{in_session}"
+    assert "codex" in got["observed_senders"]
+
+
+@pytest.mark.anyio
+async def test_server_info_reports_version_limits_and_timeouts(monkeypatch, tmp_path):
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    got = await server.server_info()
+    assert got["limits"]["inbox_default"] == server.mailbox.DEFAULT_INBOX_LIMIT
+    assert got["limits"]["max_response_chars"] == server._MAX_RESPONSE_CHARS
+    assert set(got["timeouts_s"]) == set(server.adapters.known_agents())
+    assert got["module_path"].endswith("mailbox.py")
+    assert isinstance(got["write_enabled"], bool)
+
+
+@pytest.mark.anyio
+async def test_dispatch_returns_a_durable_handle_and_records_the_job(
+    monkeypatch, tmp_path
+):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+
+    got = await server.ask_codex_async(
+        prompt="review", from_agent="claude", label="rev-1"
+    )
+    status = await server.job_status(job_id=got["job_id"])
+
+    assert status["ok"] is True
+    assert status["job"]["state"] == server.jobs.COMPLETED
+    assert status["job"]["label"] == "rev-1"
+    assert status["job"]["agent"] == "codex"
+    # The prompt itself is NOT stored - only its size. A job row is metadata,
+    # not a second copy of every prompt ever dispatched.
+    assert status["job"]["request"]["prompt_chars"] == len("review")
+    assert "prompt" not in status["job"]["request"]
+
+
+@pytest.mark.anyio
+async def test_job_result_survives_the_mailbox_being_consumed(monkeypatch, tmp_path):
+    """The durability claim: a result recorded against the job is retrievable
+    even after the delivered message has been consumed by a reading session."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters,
+        "ask_claude",
+        lambda prompt, **k: {"ok": True, "reply": "the review"},
+    )
+
+    got = await server.ask_claude_async(prompt="go", from_agent="hermes")
+    drained = await server.inbox(agent="hermes")  # consumes the delivery
+    assert drained["count"] == 1
+    assert (await server.inbox(agent="hermes"))["count"] == 0  # gone from inbox
+
+    result = await server.job_result(job_id=got["job_id"])
+    assert result["ok"] is True
+    assert result["state"] == server.jobs.COMPLETED
+    assert result["result"]["reply"] == "the review"
+
+
+@pytest.mark.anyio
+async def test_job_result_refuses_an_unfinished_job(monkeypatch, tmp_path):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    job_id = server.jobs.create(
+        agent="codex", requester="claude", label=None, request={}, db_path=db
+    )
+    out = await server.job_result(job_id=job_id)
+    assert out["ok"] is False and out["state"] == server.jobs.QUEUED
+
+
+@pytest.mark.anyio
+async def test_a_job_orphaned_by_a_restart_is_visible_as_lost(monkeypatch, tmp_path):
+    """What a restart used to do silently: the task vanished with no record.
+    Now the row survives and reports why it never finished."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    job_id = server.jobs.create(
+        agent="claude", requester="hermes", label="long-review", request={}, db_path=db
+    )
+    server.jobs.mark_running(job_id, child_pid=999999, db_path=db)
+    with server.mailbox._connect(db) as conn:  # simulate the owner dying
+        conn.execute(
+            "UPDATE jobs SET owner_pid = ? WHERE job_id = ?", (0x7FFFFFFE, job_id)
+        )
+        conn.commit()
+
+    status = await server.job_status(job_id=job_id)
+    assert status["job"]["state"] == server.jobs.LOST
+    listed = await server.list_jobs(state=server.jobs.LOST)
+    assert job_id in {j["job_id"] for j in listed["jobs"]}
+
+
+@pytest.mark.anyio
+async def test_job_status_and_result_report_an_unknown_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    assert (await server.job_status(job_id="job_nope"))["ok"] is False
+    assert (await server.job_result(job_id="job_nope"))["ok"] is False
+
+
+@pytest.mark.anyio
+async def test_list_jobs_summarizes_and_filters(monkeypatch, tmp_path):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "a"}
+    )
+    monkeypatch.setattr(
+        server.adapters,
+        "ask_claude",
+        lambda prompt, **k: {"ok": False, "error": "nope"},
+    )
+    await server.ask_codex_async(prompt="x", from_agent="claude")
+    await server.ask_claude_async(prompt="y", from_agent="claude")
+
+    everything = await server.list_jobs()
+    assert everything["count"] == 2
+    assert everything["counts_by_state"] == {
+        server.jobs.COMPLETED: 1,
+        server.jobs.FAILED: 1,
+    }
+    assert (await server.list_jobs(agent="codex"))["count"] == 1
+    assert (await server.list_jobs(active_only=True))["count"] == 0
+
+
+@pytest.mark.anyio
+async def test_a_job_cancelled_before_start_never_spawns(monkeypatch, tmp_path):
+    """End to end at the tool boundary: a cancel that lands before the worker
+    claims the job must stop the agent from being invoked at all."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+
+    spawned = []
+
+    def never_should_run(prompt, **k):
+        spawned.append(prompt)
+        return {"ok": True, "reply": "should not have happened"}
+
+    monkeypatch.setattr(server.adapters, "ask_codex", never_should_run)
+
+    # Cancel the job between creation and the worker claiming it, which is
+    # exactly the window the conditional claim exists to close.
+    real_create = server.jobs.create
+
+    def create_then_cancel(**kwargs):
+        job_id = real_create(**kwargs)
+        server.jobs.request_cancel(job_id, db_path=db)
+        return job_id
+
+    monkeypatch.setattr(server.jobs, "create", create_then_cancel)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+
+    got = await server.ask_codex_async(prompt="expensive", from_agent="claude")
+
+    assert spawned == [], "a cancelled job still invoked the agent"
+    status = await server.job_status(job_id=got["job_id"])
+    assert status["job"]["state"] == server.jobs.CANCELLED
+
+
+@pytest.mark.anyio
+async def test_a_child_spawned_into_a_cancelled_job_is_killed_locally(
+    monkeypatch, tmp_path
+):
+    """The window between Popen creating the child and its pid being recorded.
+
+    A cancel landing there sees child_pid NULL, reports "cancelled before
+    start", and signals nothing - so nobody else can kill it. The spawning
+    process holds the handle and is the only one that can, which is why
+    on_spawn's return value has to be honoured.
+    """
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+
+    killed = []
+    monkeypatch.setattr(server.adapters, "_kill_tree", lambda proc: killed.append(proc))
+    monkeypatch.setattr(server.adapters, "_reap", lambda proc: True)
+    monkeypatch.setattr(server.jobs, "process_key", lambda pid: "tok")
+
+    ran = []
+
+    class _FakeChild:
+        pid = 4242
+
+        def communicate(self, timeout=None):
+            # Recorded rather than raised: raising would land in the cleanup
+            # path, which ALSO kills the tree, so the assertion below would
+            # pass even when the failed claim was ignored.
+            ran.append(timeout)
+            return "", ""
+
+        returncode = 0
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(
+        server.adapters.subprocess, "Popen", lambda cmd, **kw: _FakeChild()
+    )
+    # Cancel between the claim and the pid being recorded.
+    real_set = server.jobs.set_child_pid
+    monkeypatch.setattr(
+        server.jobs,
+        "set_child_pid",
+        lambda job_id, pid, **kw: (
+            server.jobs.request_cancel(job_id, db_path=db),
+            real_set(job_id, pid, **kw),
+        )[1],
+    )
+
+    got = await server.ask_codex_async(prompt="expensive", from_agent="claude")
+    assert ran == [], "the cancelled job's child was allowed to run"
+    assert killed, "the spawning process did not kill the child it could not claim"
+
+    # The record must stay CANCELLED. The abort returns ok:false, and finish()
+    # would otherwise write `failed` over it - reporting a deliberate cancel as
+    # a failure, which is a different and misleading thing.
+    status = await server.job_status(job_id=got["job_id"])
+    assert status["job"]["state"] == server.jobs.CANCELLED
+    # ...and the requester is told, rather than left polling an inbox forever.
+    delivered = json.loads(
+        (await server.inbox(agent="claude"))["messages"][0]["body"]
+    )
+    assert delivered["ok"] is False
+    assert delivered["cancelled"] is True
+
+
+@pytest.mark.anyio
+async def test_list_jobs_summarizes_a_huge_result_instead_of_inlining_it(
+    monkeypatch, tmp_path
+):
+    """A listing that embedded 200 full agent replies would be the same
+    context flood this package spent a release bounding everywhere else."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    job_id = server.jobs.create(
+        agent="codex", requester="claude", label=None, request={}, db_path=db
+    )
+    server.jobs.mark_running(job_id, db_path=db)  # finish() is a CAS from running
+    server.jobs.finish(job_id, result={"ok": True, "reply": "q" * 50_000}, db_path=db)
+
+    listed = await server.list_jobs()
+    row = listed["jobs"][0]
+    assert row["result"]["truncated"] is True
+    assert row["result_chars"] > 50_000
+    assert f"job_result(job_id={job_id!r})" == row["result"]["full_via"]
+
+    # ...and the escape hatch still returns it whole.
+    full = await server.job_result(job_id=job_id)
+    assert len(full["result"]["reply"]) == 50_000
+
+
+@pytest.mark.anyio
+async def test_job_cancel_stops_a_running_job(monkeypatch, tmp_path):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    job_id = server.jobs.create(
+        agent="codex", requester="claude", label=None, request={}, db_path=db
+    )
+    server.jobs.mark_running(job_id, child_pid=31337, db_path=db)
+    killed = []
+    monkeypatch.setattr(
+        server.jobs,
+        "kill_process_tree",
+        lambda pid, expect_key=None: (killed.append(pid) or (True, None)),
+    )
+
+    out = await server.job_cancel(job_id=job_id)
+    assert out["ok"] is True and killed == [31337]
+    assert (await server.job_status(job_id=job_id))["job"]["state"] == (
+        server.jobs.CANCELLED
+    )
 
 
 @pytest.mark.anyio

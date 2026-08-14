@@ -21,16 +21,18 @@ from __future__ import annotations
 import atexit
 import functools
 import json
+import os
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from pathlib import Path
 from typing import Literal
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 
-from . import adapters, mailbox
+from . import adapters, jobs, mailbox
 
 mcp = FastMCP("hardline-mcp")
 
@@ -63,35 +65,99 @@ _ASYNC_EARLY_FAILURE_S = 2.0
 _MAX_BODY_CHARS = 4000
 _TRUNCATION_NOTE = "\n...[{n} characters truncated - call peek(message_id={mid}) for the full body]"
 
+# Ceiling on a WHOLE response, not just one body. Capping per-message was not
+# enough: a 50-row history page of 4000-char bodies is ~200KB, which the host
+# then truncated itself - so the response was cut anyway and the `truncated`
+# flag understated it. Bound the aggregate and the per-body cap becomes an
+# upper bound rather than the actual size.
+_MAX_RESPONSE_CHARS = 60_000
+# Never shrink a body below this; past a point an excerpt stops carrying any
+# signal and peek() is the honest answer instead.
+_MIN_BODY_CHARS = 400
+# Rough size of the appended truncation note. Budgeted for rather than added
+# on top, so an aggregate cap is not quietly exceeded by its own bookkeeping.
+_NOTE_OVERHEAD = 100
+# Per-row cap on a job result inside a LISTING. job_result() returns one whole.
+_JOB_RESULT_PREVIEW_CHARS = 600
+
 _async_executor = ThreadPoolExecutor(
     max_workers=_ASYNC_MAX_WORKERS, thread_name_prefix="hardline-async"
 )
 
 
-def _truncate_bodies(messages: list[dict]) -> tuple[list[dict], int]:
-    """Shorten oversized bodies for a batch read. Returns (messages, n_truncated).
+def _shorten(msg: dict, cap: int) -> dict:
+    """Return a copy of ``msg`` with its body capped at ``cap`` characters.
 
-    Copies each row it shortens rather than mutating in place - the caller's
-    dicts come straight from the db layer and nothing downstream should see a
-    body that silently lost content.
+    Copies rather than mutating in place - the caller's dicts come straight
+    from the db layer and nothing downstream should see a body that silently
+    lost content. The stored row is never touched.
     """
-    out: list[dict] = []
-    truncated = 0
-    for msg in messages:
-        body = msg.get("body") or ""
-        if len(body) <= _MAX_BODY_CHARS:
-            out.append(msg)
-            continue
-        dropped = len(body) - _MAX_BODY_CHARS
-        msg = dict(msg)
-        msg["body"] = body[:_MAX_BODY_CHARS] + _TRUNCATION_NOTE.format(
-            n=dropped, mid=msg.get("message_id")
-        )
-        msg["body_truncated"] = True
-        msg["body_length"] = len(body)
-        out.append(msg)
-        truncated += 1
-    return out, truncated
+    body = msg.get("body") or ""
+    if len(body) <= cap:
+        return msg
+    out = dict(msg)
+    out["body"] = body[:cap] + _TRUNCATION_NOTE.format(
+        n=len(body) - cap, mid=msg.get("message_id")
+    )
+    out["body_truncated"] = True
+    out["body_length"] = len(body)
+    return out
+
+
+def _fit_response(
+    messages: list[dict],
+    *,
+    budget: int = _MAX_RESPONSE_CHARS,
+    allow_drop: bool,
+) -> tuple[list[dict], int, int]:
+    """Fit a batch inside an aggregate character budget.
+
+    Returns ``(messages, truncated, dropped)``.
+
+    Two strategies, because the two callers have different obligations:
+
+    ``allow_drop=False`` (inbox) SHRINKS. A consuming read must hand back
+    every message it consumed - dropping one would lose it from the caller's
+    view while the mailbox considers it delivered - so the per-body cap is
+    lowered until the batch fits, floored at ``_MIN_BODY_CHARS``.
+
+    ``allow_drop=True`` (history) TRUNCATES THE PAGE. Nothing is consumed, so
+    the honest response is a shorter page plus a cursor to continue from.
+    """
+    if not messages:
+        return messages, 0, 0
+
+    cap = _MAX_BODY_CHARS
+    fitted = [_shorten(m, cap) for m in messages]
+    total = sum(len(m.get("body") or "") for m in fitted)
+
+    if total > budget and not allow_drop:
+        # Shrink every body to an equal share, floored so an excerpt still
+        # carries signal.
+        #
+        # The share must pay for the truncation NOTE too. It is appended after
+        # the cap, so budgeting on the cap alone overshoots by ~80 chars per
+        # message - small individually, and exactly the kind of drift that put
+        # the per-body cap over the host's limit in the first place.
+        share = budget // max(1, len(messages)) - _NOTE_OVERHEAD
+        cap = min(cap, max(_MIN_BODY_CHARS, share))
+        fitted = [_shorten(m, cap) for m in messages]
+
+    dropped = 0
+    if allow_drop:
+        kept: list[dict] = []
+        running = 0
+        for msg in fitted:
+            size = len(msg.get("body") or "")
+            if kept and running + size > budget:
+                break
+            kept.append(msg)
+            running += size
+        dropped = len(fitted) - len(kept)
+        fitted = kept
+
+    truncated = sum(1 for m in fitted if m.get("body_truncated"))
+    return fitted, truncated, dropped
 
 
 def _drain_async_executor_at_exit() -> None:
@@ -239,12 +305,120 @@ async def inbox(
         # cannot drain a lane this session does not own.
         lane_suffix=adapters.lane_suffix(),
     )
-    msgs, truncated = _truncate_bodies(msgs)
-    return {
+    msgs, truncated, _ = _fit_response(msgs, allow_drop=False)
+    response = {
         "messages": msgs,
         "count": len(msgs),
         "remaining": remaining,
         "truncated": truncated,
+    }
+    if msgs:
+        # Recovery cursor. A consuming read commits the ack before this
+        # response can reach the caller, so if the enclosing response is lost
+        # the batch is read but unseen. These ids make recovering it a
+        # mechanical call rather than a search:
+        #   history(agent=..., before_id=last_message_id + 1)
+        # re-fetches exactly this batch, because history ignores acked_at.
+        response["first_message_id"] = msgs[0]["message_id"]
+        response["last_message_id"] = msgs[-1]["message_id"]
+        response["recover_with"] = (
+            f"history(agent={agent!r}, before_id={msgs[-1]['message_id'] + 1})"
+        )
+    return response
+
+
+@mcp.tool()
+async def list_agents() -> dict:
+    """Who can be addressed, what names carry traffic, and who YOU are.
+
+    Agent identity was undiscoverable by inspection: ``history`` filtered by a
+    name that carries no traffic returns an empty list, which reads as "no
+    messages" rather than "wrong name" — one agent searched its own display
+    name before learning its mailbox identity was ``hermes``.
+
+    ``agents`` is the dispatchable roster. ``observed`` is every recipient the
+    mailbox has actually seen, including lane-qualified forms, with unread
+    counts. ``you`` is this process's own identity, which is the answer to
+    "what do I pass as from_agent".
+    """
+    observed = await _in_thread(mailbox.recipients)
+    seen_senders = await _in_thread(mailbox.senders)
+    suffix = adapters.lane_suffix()
+    return {
+        "agents": list(adapters.known_agents()),
+        "you": {
+            "lane_suffix": suffix or None,
+            "lane_for_claude": adapters.lane_for("claude"),
+            "note": (
+                "Pass a bare roster name as from_agent; results are delivered "
+                "to your lane automatically."
+            ),
+        },
+        "observed_recipients": observed,
+        "observed_senders": seen_senders,
+        "recipient_syntax": (
+            "'<agent>' addresses everyone with that name; '<agent>:<lane>' "
+            "addresses one session. inbox('<agent>') reads the bare name AND "
+            "your own lane. Only the lane's owner may consume a "
+            "lane-qualified message."
+        ),
+    }
+
+
+@mcp.tool()
+async def server_info() -> dict:
+    """Version, limits, and timeout budgets of THIS running hardline-mcp.
+
+    Deployment here is an editable install, so a process runs whatever the
+    working tree said when it spawned — "is the fix live?" has repeatedly been
+    answered by counting processes and diffing tool rosters. Reporting the
+    version and the effective limits makes that one call.
+    """
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        pkg_version = _pkg_version("hardline-mcp")
+    except Exception:  # noqa: BLE001 - version is diagnostic, never fatal
+        pkg_version = "unknown"
+
+    timeouts: dict[str, object] = {}
+    for agent in adapters.known_agents():
+        try:
+            timeouts[agent] = adapters._timeout_for(agent)
+        except ValueError as exc:  # a bad HARDLINE_*_TIMEOUT_S env value
+            timeouts[agent] = f"invalid: {exc}"
+
+    write_ok, write_err = adapters._write_enabled()
+    return {
+        "version": pkg_version,
+        "schema_version": mailbox.SCHEMA_VERSION,
+        "module_path": str(Path(mailbox.__file__).resolve()),
+        "db_path": str(mailbox._resolve_db(None)),
+        "pid": os.getpid(),
+        "jobs": await _in_thread(jobs.counts),
+        "limits": {
+            "inbox_default": mailbox.DEFAULT_INBOX_LIMIT,
+            "inbox_max": mailbox.MAX_INBOX_LIMIT,
+            "history_default": mailbox.DEFAULT_HISTORY_LIMIT,
+            "history_max": mailbox.MAX_HISTORY_LIMIT,
+            "max_body_chars": _MAX_BODY_CHARS,
+            "min_body_chars": _MIN_BODY_CHARS,
+            "max_response_chars": _MAX_RESPONSE_CHARS,
+            # The honest ceiling, not the target. A consuming read may not
+            # drop a message it has consumed, so at the per-body floor a
+            # maximal batch necessarily exceeds the target - reporting only
+            # the target would advertise a bound the code can exceed.
+            "inbox_worst_case_chars": mailbox.MAX_INBOX_LIMIT
+            * (_MIN_BODY_CHARS + _NOTE_OVERHEAD),
+            "budget_note": (
+                "Budgets bound message BODIES. Envelope keys, timestamps and "
+                "JSON escaping are extra."
+            ),
+        },
+        "timeouts_s": timeouts,
+        "async_max_workers": _ASYNC_MAX_WORKERS,
+        "write_enabled": write_ok,
+        "write_note": write_err,
     }
 
 
@@ -298,18 +472,155 @@ async def history(
     ``peek(message_id)`` for one body in full.
 
     ``before_id`` pages backward: pass the lowest ``message_id`` you have seen
-    to get the page before it. Since ``inbox`` consumes what it returns, this
-    is the route to a result whose response was lost — and without paging,
-    anything older than one capped page was unreachable.
+    to get the page before it — or just use the returned ``next_before_id``.
+    Since ``inbox`` consumes what it returns, this is the route to a result
+    whose response was lost, and without paging anything older than one capped
+    page was unreachable.
 
-    Returns ``{"messages", "count", "truncated"}``.
+    The WHOLE response is capped, not only each body: a full page of
+    4000-char bodies is ~200KB, which the host truncated itself, so the
+    response was cut anyway and ``truncated`` understated it. When the cap
+    bites, the page is shortened and ``next_before_id`` continues from there.
+
+    Returns ``{"messages", "count", "truncated", "dropped", "next_before_id",
+    "has_more"}``.
     """
     msgs = await _in_thread(mailbox.history, limit, agent, before_id=before_id)
-    msgs, truncated = _truncate_bodies(msgs)
-    return {"messages": msgs, "count": len(msgs), "truncated": truncated}
+    full_page = len(msgs)
+    msgs, truncated, dropped = _fit_response(msgs, allow_drop=True)
+    response = {
+        "messages": msgs,
+        "count": len(msgs),
+        "truncated": truncated,
+        "dropped": dropped,
+    }
+    if msgs:
+        # Always present, not only when capped, so paging is one uniform loop
+        # rather than a special case the caller has to detect.
+        response["next_before_id"] = msgs[-1]["message_id"]
+    # More to fetch if the aggregate cap bit, or the page came back full.
+    response["has_more"] = bool(dropped) or full_page >= max(1, min(limit, mailbox.MAX_HISTORY_LIMIT))
+    if not msgs and agent is not None:
+        # An empty page for a filtered query is ambiguous: no traffic, or the
+        # wrong name? That ambiguity cost real time — an agent filtered on its
+        # display name, got nothing, and had no way to tell the name was wrong.
+        # Only answer when the name genuinely carries no traffic.
+        known = set(adapters.known_agents())
+        if adapters.base_agent(agent) not in known:
+            response["hint"] = (
+                f"{agent!r} is not a known agent and has no messages; "
+                f"addressable agents are {sorted(known)}. "
+                "Call list_agents() for the names actually in use."
+            )
+    return response
 
 
 # ── live query tools ─────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def job_status(job_id: str) -> dict:
+    """State and timings of one async dispatch, without consuming anything.
+
+    The lifecycle answer the mailbox could not give: polling an inbox tells
+    you a result has not arrived, never whether the work is still running,
+    already finished, or died with its owner.
+
+    ``state`` is one of queued / running / completed / failed / cancelled /
+    lost. ``lost`` is resolved here rather than written by the process that
+    died — it means the owner exited without recording a terminal state.
+    """
+    job = await _in_thread(jobs.get, job_id)
+    if job is None:
+        return {"ok": False, "error": f"no job {job_id!r}"}
+    return {"ok": True, "job": job}
+
+
+@mcp.tool()
+async def job_result(job_id: str) -> dict:
+    """The terminal result of a finished job, in full and never truncated.
+
+    Survives the mailbox entirely: even if the delivered message was consumed
+    by another read, lost with an interrupted response, or never sent because
+    delivery itself failed, the result is recorded against the job before
+    delivery is attempted.
+    """
+    job = await _in_thread(jobs.get, job_id)
+    if job is None:
+        return {"ok": False, "error": f"no job {job_id!r}"}
+    if job["state"] not in jobs.TERMINAL_STATES:
+        return {
+            "ok": False,
+            "error": f"job is {job['state']}, not finished",
+            "state": job["state"],
+        }
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "state": job["state"],
+        "result": job.get("result"),
+        "error": job.get("error"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+    }
+
+
+@mcp.tool()
+async def job_cancel(job_id: str) -> dict:
+    """Stop a running dispatch and mark it cancelled.
+
+    Works across processes: cancellation goes through the child's recorded
+    pid, not an in-process handle, so a session can stop a job another session
+    started. The whole child tree is killed — ``claude``/``codex`` are
+    launchers, so killing only the recorded pid leaves the real worker running
+    invisibly.
+    """
+    return await _in_thread(jobs.request_cancel, job_id)
+
+
+@mcp.tool()
+async def list_jobs(
+    state: str | None = None,
+    agent: str | None = None,
+    requester: str | None = None,
+    active_only: bool = False,
+    limit: int = jobs.DEFAULT_JOB_LIMIT,
+) -> dict:
+    """Recent jobs, newest first, with a state-count summary.
+
+    ``active_only`` narrows to queued/running — the "what is still in flight?"
+    question. Bounded like every other read here: results are summarised
+    rather than inlined, because a listing that embedded 200 full agent
+    replies would be the same context flood this package spent a release
+    bounding everywhere else. Use ``job_result(job_id)`` for one in full.
+    """
+    # One sweep for the page AND the summary. Two calls meant two liveness
+    # sweeps per request, and each dead row a sweep finds commits its own
+    # transaction - real write contention with ~26 servers on one store.
+    rows, summary = await _in_thread(
+        jobs.listing_with_counts,
+        state=state,
+        agent=agent,
+        requester=requester,
+        active_only=active_only,
+        limit=limit,
+    )
+    for row in rows:
+        result = row.get("result")
+        if result is None:
+            continue
+        encoded = json.dumps(result, default=str)
+        row["result_chars"] = len(encoded)
+        row["result"] = (
+            result
+            if len(encoded) <= _JOB_RESULT_PREVIEW_CHARS
+            else {
+                "preview": encoded[:_JOB_RESULT_PREVIEW_CHARS],
+                "truncated": True,
+                "full_via": f"job_result(job_id={row['job_id']!r})",
+            }
+        )
+    return {"jobs": rows, "count": len(rows), "counts_by_state": summary}
 
 
 @mcp.tool()
@@ -380,6 +691,7 @@ def _ask_async_impl(
     label: str | None,
     model: str | None,
     effort: str,
+    mode: str,
     workdir: str | None,
     write: bool,
 ) -> dict:
@@ -402,6 +714,23 @@ def _ask_async_impl(
     # is what let another session ack it out of sight.
     recipient = adapters.lane_for(from_agent)
 
+    # Durable identity BEFORE the work starts. Fire-and-forget meant a restart
+    # lost the task with no record it had existed, and the only lifecycle API
+    # was polling a mailbox that cannot answer "is it still running?".
+    job_id = jobs.create(
+        agent=agent,
+        requester=recipient,
+        label=label,
+        request={
+            "prompt_chars": len(prompt),
+            "model": model,
+            "effort": effort,
+            "mode": mode,
+            "workdir": workdir,
+            "write": write,
+        },
+    )
+
     def _run() -> dict:
         # ask_fn (adapters.ask_claude/ask_codex) is designed to never raise -
         # every failure mode it recognizes already comes back as an
@@ -410,9 +739,37 @@ def _ask_async_impl(
         # kill this pool thread silently, mailbox.send would never run, and
         # a caller polling inbox(from_agent) would wait forever with no
         # error ever surfacing anywhere.
+        if not jobs.mark_running(job_id):
+            # The queued -> running claim failed, which means a cancel landed
+            # first. Spawning anyway would run the whole expensive call while
+            # the row said cancelled - the one outcome a cancel must prevent.
+            cancelled = {
+                "ok": False,
+                "error": "job was cancelled before it started",
+                "job_id": job_id,
+                "cancelled_before_start": True,
+            }
+            if label is not None:
+                cancelled["label"] = label
+            try:
+                mailbox.send(agent, recipient, json.dumps(cancelled))
+            except Exception:  # noqa: BLE001 - notification is best effort
+                traceback.print_exc()
+            return cancelled
         try:
             result = ask_fn(
-                prompt, model=model, effort=effort, workdir=workdir, write=write
+                prompt,
+                model=model,
+                effort=effort,
+                mode=mode,
+                workdir=workdir,
+                write=write,
+                # Recorded so a cancel issued from ANOTHER session can reach a
+                # run this process is blocked on - the dispatcher is often not
+                # the one watching it.
+                on_spawn=lambda pid: jobs.set_child_pid(
+                    job_id, pid, started_key=jobs.process_key(pid)
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - last-resort dispatch backstop
             result = {
@@ -422,6 +779,14 @@ def _ask_async_impl(
             }
         if label is not None:
             result["label"] = label
+        result["job_id"] = job_id
+        # Terminal state recorded before delivery: the mailbox send below can
+        # fail, and a job whose result exists only in a message that never
+        # arrived is the failure this table exists to prevent.
+        try:
+            jobs.finish(job_id, result=result)
+        except Exception:  # noqa: BLE001 - bookkeeping must not eat the result
+            traceback.print_exc()
         # The delivery itself was outside the backstop above, so a failure
         # here - lock contention, a full disk, an unserializable result -
         # discarded an expensive completed run inside an unobserved future,
@@ -471,10 +836,20 @@ def _ask_async_impl(
             "ok": False,
             "dispatched": False,
             "error": early.get("error", f"{agent} dispatch failed immediately"),
+            "job_id": job_id,
             "label": label,
             "lane": recipient,
         }
-    return {"ok": True, "dispatched": True, "label": label, "lane": recipient}
+    return {
+        "ok": True,
+        "dispatched": True,
+        # The durable handle. A label is a correlation aid the caller chooses
+        # and may reuse; this identifies the run even across a restart.
+        "job_id": job_id,
+        "label": label,
+        "lane": recipient,
+        "track_with": f"job_status(job_id={job_id!r})",
+    }
 
 
 @mcp.tool()
@@ -484,6 +859,7 @@ async def ask_codex_async(
     label: str | None = None,
     model: str | None = None,
     effort: CodexEffort = "default",
+    mode: CodexMode = "default",
     workdir: str | None = None,
     write: bool = False,
 ) -> dict:
@@ -496,6 +872,9 @@ async def ask_codex_async(
     supplied (use it to match results when firing several concurrent
     dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
     persisted, so a hardline-mcp restart before completion loses the task.
+
+    ``mode`` mirrors ``ask_codex`` — background review is exactly where
+    advisory isolation is wanted, and omitting it here was a parity gap.
     """
     return await _in_thread(
         _ask_async_impl,
@@ -506,6 +885,7 @@ async def ask_codex_async(
         label=label,
         model=model,
         effort=effort,
+        mode=mode,
         workdir=workdir,
         write=write,
     )
@@ -567,6 +947,7 @@ async def ask_claude_async(
     label: str | None = None,
     model: str | None = None,
     effort: ClaudeEffort = "default",
+    mode: ClaudeMode = "default",
     workdir: str | None = None,
     write: bool = False,
 ) -> dict:
@@ -579,6 +960,9 @@ async def ask_claude_async(
     supplied (use it to match results when firing several concurrent
     dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
     persisted, so a hardline-mcp restart before completion loses the task.
+
+    ``mode`` mirrors ``ask_claude`` — background review is exactly where
+    advisory isolation is wanted, and omitting it here was a parity gap.
     """
     return await _in_thread(
         _ask_async_impl,
@@ -589,6 +973,7 @@ async def ask_claude_async(
         label=label,
         model=model,
         effort=effort,
+        mode=mode,
         workdir=workdir,
         write=write,
     )

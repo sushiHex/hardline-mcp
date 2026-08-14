@@ -24,17 +24,78 @@ class _FakeCompleted:
         self.returncode = returncode
 
 
+class _FakePopen:
+    """Stands in for the real child process.
+
+    ``_run_cmd`` moved from ``subprocess.run`` to ``Popen`` so a job can record
+    the child's pid and a cancel from another process can reach it. This fake
+    has to follow, and it must be complete: while it was still patching
+    ``run``, every one of these tests spawned a REAL ``claude``/``codex`` and
+    the suite hung on a 900-second timeout.
+    """
+
+    FAKE_PID = 424242
+
+    def __init__(self, cmd, kwargs, result, exc, calls):
+        self.pid = self.FAKE_PID
+        self.returncode = None
+        self._result = result
+        self._exc = exc
+        self._calls = calls
+        self._drain = None
+        self.killed = False
+        # The real Popen exposes these as pipes; nothing under test reads
+        # them after communicate(), and that is deliberately what the code
+        # must NOT do (they are closed objects, not the captured text).
+        self.stdout = None
+        self.stderr = None
+
+    def communicate(self, timeout=None):
+        # The timeout moved from run(timeout=) to communicate(timeout=), so
+        # record it where the assertions already look for it.
+        if self._calls:
+            self._calls[-1]["kwargs"]["timeout"] = timeout
+        if self._exc is not None:
+            exc, self._exc = self._exc, None  # raise once; the drain must not
+            # With Popen, a TimeoutExpired from communicate() does NOT carry
+            # the partial output — the caller kills the child and drains. Model
+            # that: this second call is the drain, and it yields exactly what
+            # the child had buffered.
+            self._drain = (getattr(exc, "stdout", None), getattr(exc, "stderr", None))
+            raise exc
+        if self._drain is not None:
+            return self._drain
+        result = self._result if self._result is not None else _FakeCompleted(stdout="ok")
+        self.returncode = result.returncode
+        return result.stdout, result.stderr
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 def _capture_run(monkeypatch, result=None, exc=None):
-    """Patch adapters._run_cmd's subprocess.run; record the argv it was given."""
+    """Patch adapters._run_cmd's subprocess.Popen; record the argv it was given.
+
+    A spawn-time failure (FileNotFoundError/OSError) is raised from the
+    constructor and a TimeoutExpired from communicate(), matching where the
+    real subprocess raises each.
+    """
     calls = []
 
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         calls.append({"cmd": cmd, "kwargs": kwargs})
-        if exc is not None:
+        if exc is not None and isinstance(exc, OSError):
             raise exc
-        return result if result is not None else _FakeCompleted(stdout="ok")
+        return _FakePopen(cmd, kwargs, result, exc, calls)
 
-    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+    monkeypatch.setattr(adapters.subprocess, "Popen", fake_popen)
+    # taskkill on the timeout path must never reach a real process either.
+    monkeypatch.setattr(
+        adapters, "_kill_tree", lambda proc: setattr(proc, "killed", True)
+    )
     return calls
 
 
@@ -1073,6 +1134,125 @@ def test_ask_timeout_is_handled(monkeypatch):
     out = adapters.ask("hermes", "x")
     assert out["ok"] is False
     assert "timeout" in out["error"].lower()
+
+
+def test_timeout_preserves_the_partial_output_it_used_to_discard(monkeypatch):
+    """A bare "timeout after 900s" threw away work that had really been done.
+
+    TimeoutExpired carries whatever the child had already written; discarding
+    it destroyed a partially complete answer and left no way to tell a
+    healthy-but-slow agent from one wedged since the first second.
+    """
+    _capture_run(
+        monkeypatch,
+        exc=subprocess.TimeoutExpired(
+            cmd="claude",
+            timeout=900,
+            output="the first half of a real answer",
+            stderr="a warning",
+        ),
+    )
+    out = adapters.ask("hermes", "x")
+
+    assert out["ok"] is False
+    assert out["timed_out"] is True
+    assert out["timeout_s"] == adapters._TIMEOUT_S
+    assert out["timeout_layer"] == "subprocess"
+    assert out["produced_output"] is True
+    assert out["stdout_chars"] == len("the first half of a real answer")
+    assert "the first half of a real answer" in out["partial_stdout"]["raw_excerpt"]
+    assert "a warning" in out["partial_stderr"]["raw_excerpt"]
+    assert isinstance(out["elapsed_s"], float)
+
+
+class _Reapable:
+    """Minimal stand-in with real pipe objects, so _reap's two jobs — closing
+    the pipes and waiting — are both observable."""
+
+    def __init__(self, wait_raises=False):
+        self.pid = 4242
+        self._wait_raises = wait_raises
+
+        class _Pipe:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        self.stdout, self.stderr, self.stdin = _Pipe(), _Pipe(), _Pipe()
+
+    def wait(self, timeout=None):
+        if self._wait_raises:
+            raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+        return 0
+
+
+def test_reap_reports_failure_rather_than_claiming_a_guarantee():
+    """_reap is BOUNDED, not guaranteed: if the kill silently failed or
+    teardown outlives the wait, the child is abandoned. Saying so is the
+    point - a claimed guarantee is how the leak would go unnoticed."""
+    stuck = _Reapable(wait_raises=True)
+    assert adapters._reap(stuck) is False
+    # Pipes are still closed even when the wait gives up - two leaked
+    # descriptors per occurrence in a long-lived server otherwise.
+    assert stuck.stdout.closed and stuck.stderr.closed and stuck.stdin.closed
+
+    clean = _Reapable()
+    assert adapters._reap(clean) is True
+    assert clean.stdout.closed
+
+
+def test_abort_warns_when_the_child_was_not_confirmed_dead(monkeypatch):
+    """_kill_tree suppresses every failure and _reap is bounded, so "we tried"
+    is not "it stopped". Reporting cancelled regardless would tell the
+    requester the work was stopped while it kept running with no pid recorded
+    anywhere - nothing could then find it to try again."""
+    _capture_run(monkeypatch)
+    monkeypatch.setattr(adapters, "_reap", lambda proc: False)
+
+    out = adapters._run_cmd(["x"], on_spawn=lambda pid: False)
+    assert out["cancelled"] is True
+    assert out["child_reaped"] is False
+    assert "may still be running" in out["warning"]
+
+
+def test_abort_is_clean_when_the_child_was_reaped(monkeypatch):
+    _capture_run(monkeypatch)
+    monkeypatch.setattr(adapters, "_reap", lambda proc: True)
+
+    out = adapters._run_cmd(["x"], on_spawn=lambda pid: False)
+    assert out["cancelled"] is True
+    assert out["child_reaped"] is True
+    assert "warning" not in out
+
+
+def test_timeout_with_no_output_is_distinguishable_from_a_slow_one(monkeypatch):
+    """The slow-vs-wedged signal: a child that emitted nothing in the whole
+    budget is a different failure from one cut off mid-answer."""
+    _capture_run(
+        monkeypatch, exc=subprocess.TimeoutExpired(cmd="claude", timeout=900)
+    )
+    out = adapters.ask("hermes", "x")
+    assert out["timed_out"] is True
+    assert out["produced_output"] is False
+    assert out["stdout_chars"] == 0
+    assert "partial_stdout" not in out
+
+
+def test_timeout_decodes_bytes_payloads(monkeypatch):
+    """TimeoutExpired's payload comes from a partially drained pipe and is
+    bytes on some paths even under text=True - reporting a timeout must not
+    itself crash."""
+    _capture_run(
+        monkeypatch,
+        exc=subprocess.TimeoutExpired(
+            cmd="claude", timeout=900, output=b"partial \xe2\x9c\x94 bytes"
+        ),
+    )
+    out = adapters.ask("hermes", "x")
+    assert out["produced_output"] is True
+    assert "partial" in out["partial_stdout"]["raw_excerpt"]
 
 
 def test_ask_missing_binary_is_handled(monkeypatch):

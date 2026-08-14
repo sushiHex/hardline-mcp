@@ -43,8 +43,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 def _codex_bin_root() -> Path:
@@ -244,10 +245,15 @@ def _run_cmd(
     cwd: str | None = None,
     timeout_s: int = _TIMEOUT_S,
     capture_failed_output: bool = False,
+    on_spawn: "Callable[[int], None] | None" = None,
 ) -> dict:
     """Run argv, capturing text output. Never raises — every failure mode is
     mapped to ``{"ok": False, "error": ...}`` so one dead target can't crash
     the MCP tool call.
+
+    ``on_spawn`` receives the child's pid as soon as it exists, so a durable
+    job can record it and a cancel from another process can reach a run this
+    one is blocked on.
 
     ``stdin=DEVNULL``: hardline-mcp is itself a stdio MCP server, so its stdin
     is the JSON-RPC pipe to the host agent. A spawned child must not inherit
@@ -255,31 +261,207 @@ def _run_cmd(
     ``errors``: agent output is often non-ASCII (emoji, box-drawing); decode
     as UTF-8 and replace undecodable bytes rather than crash on the platform
     default codec (cp1252 on Windows)."""
+    started = time.monotonic()
     try:
-        proc = subprocess.run(
+        # Popen rather than run(): the caller needs the child's pid to record
+        # it against a durable job, so a cancel issued from another process
+        # can reach a run this one is blocked on. start_new_session puts the
+        # child in its own process group on POSIX so the whole tree is
+        # signalable (no-op on Windows, where taskkill /T does the same job).
+        proc = subprocess.Popen(
             argv,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=timeout_s,
             env=env,
             cwd=cwd,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"timeout after {timeout_s}s"}
     except FileNotFoundError:
         return {"ok": False, "error": f"command not found / not installed: {argv[0]!r}"}
     except OSError as e:
         return {"ok": False, "error": f"spawn failed: {e}"}
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
-        response = {"ok": False, "error": f"exit {proc.returncode}: {detail}"}
-        if capture_failed_output and proc.stdout:
-            response["_stdout"] = proc.stdout.strip()
+
+    if on_spawn is not None:
+        # A False return means the caller could not claim this child - it was
+        # cancelled in the window between Popen creating the process and the
+        # pid being recorded. Nobody else can kill it: the cancelling process
+        # never saw a pid, so it signalled nothing and reported "cancelled
+        # before start" while the work carried on. We are holding the handle,
+        # so we are the only one who can, and we do it here.
+        try:
+            claimed = on_spawn(proc.pid)
+        except Exception:  # noqa: BLE001 - bookkeeping must not kill the run
+            claimed = True
+        if claimed is False:
+            _kill_tree(proc)
+            reaped = _reap(proc)
+            response = {
+                "ok": False,
+                "error": "cancelled before the child could be recorded",
+                "cancelled": True,
+                "child_reaped": reaped,
+                "elapsed_s": round(time.monotonic() - started, 1),
+            }
+            if not reaped:
+                # _kill_tree suppresses every failure and _reap is bounded, so
+                # "we tried" is not "it stopped". Reporting cancelled here
+                # regardless would tell the requester the work was stopped
+                # while it kept running with no pid recorded anywhere - the
+                # worst of both, since nothing can find it to try again.
+                response["warning"] = (
+                    f"child pid {proc.pid} was not confirmed dead; it may still "
+                    "be running and no pid was recorded for it"
+                )
+            return response
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        # Kill the TREE, not just the child. `claude`/`codex` are launchers
+        # that spawn the real worker, so killing the recorded pid alone left
+        # the work running invisibly after we had already given up on it.
+        #
+        # Everything after the kill is best effort, but the child must still
+        # be reaped and the pipes closed: subprocess.run() guarantees that in
+        # its own except/finally, and this conversion has to match it or a
+        # timeout leaks a zombie and two file descriptors every time.
+        _kill_tree(proc)
+        try:
+            exc.stdout, exc.stderr = proc.communicate(timeout=10)
+        except Exception:  # noqa: BLE001 - drain is best effort
+            _reap(proc)
+        # TimeoutExpired carries whatever the child had already written, and
+        # discarding it made every timeout indistinguishable: a bare
+        # "timeout after 900s" cannot tell a caller whether the agent was
+        # healthy-but-slow or wedged from the first second, and it threw away
+        # a partially complete answer that had really been produced.
+        elapsed = time.monotonic() - started
+        partial_out = _as_text(exc.stdout)
+        partial_err = _as_text(exc.stderr)
+        response = {
+            "ok": False,
+            "error": f"timeout after {timeout_s}s",
+            "timed_out": True,
+            "timeout_s": timeout_s,
+            "elapsed_s": round(elapsed, 1),
+            "timeout_layer": "subprocess",
+            "stdout_chars": len(partial_out),
+            "stderr_chars": len(partial_err),
+            # The cheap slow-vs-wedged signal available without streaming:
+            # a child that emitted nothing at all in the whole budget looks
+            # very different from one cut off mid-answer.
+            "produced_output": bool(partial_out or partial_err),
+        }
+        if partial_out:
+            response["partial_stdout"] = _raw_evidence(partial_out)
+        if partial_err:
+            response["partial_stderr"] = _raw_evidence(partial_err)
         return response
-    return {"ok": True, "reply": (proc.stdout or "").strip()}
+    except BaseException as e:  # noqa: BLE001 - see below; re-raised if unexpected
+        # An exception out of communicate() (OSError, or a KeyboardInterrupt
+        # landing mid-read) previously returned with the child still running
+        # and its pipes open. subprocess.run() kills and waits on this path;
+        # anything less leaks a process we can no longer reach.
+        _kill_tree(proc)
+        _reap(proc)
+        if isinstance(e, OSError):
+            return {"ok": False, "error": f"communication failed: {e}"}
+        raise
+    # NOTE: read the captured TEXT, not proc.stdout/proc.stderr - after
+    # communicate() those attributes are the closed pipe objects, and a
+    # truthiness test on them silently reports the wrong thing.
+    elapsed = round(time.monotonic() - started, 1)
+    stdout = stdout or ""
+    stderr = stderr or ""
+    if proc.returncode != 0:
+        detail = (stderr or stdout).strip()
+        response = {
+            "ok": False,
+            "error": f"exit {proc.returncode}: {detail}",
+            "exit_code": proc.returncode,
+            "elapsed_s": elapsed,
+            "timeout_s": timeout_s,
+        }
+        if capture_failed_output and stdout:
+            response["_stdout"] = stdout.strip()
+        return response
+    return {
+        "ok": True,
+        "reply": stdout.strip(),
+        "elapsed_s": elapsed,
+        "timeout_s": timeout_s,
+    }
+
+
+def _reap(proc: subprocess.Popen) -> bool:
+    """Close the pipes and try to wait for the child. Never raises.
+
+    Returns whether the child was actually reaped. It is BOUNDED, not
+    guaranteed: if the kill silently failed or teardown outlives the wait,
+    this returns False and the caller is left with a process it can no longer
+    reach. Saying so is the point - claiming a guarantee it cannot keep is
+    how the leak would go unnoticed.
+
+    Both halves matter: an unwaited child is a zombie holding a process slot,
+    and unclosed pipes are two leaked descriptors per timeout in a long-lived
+    server process.
+    """
+    for stream in (proc.stdout, proc.stderr, proc.stdin):
+        try:
+            if stream is not None:
+                stream.close()
+        except BaseException:  # noqa: BLE001 - see below
+            pass
+    try:
+        proc.wait(timeout=10)
+        return True
+    except BaseException:  # noqa: BLE001 - already on the failure path
+        # BaseException, not Exception: this runs while another exception is
+        # propagating, and a KeyboardInterrupt escaping here would REPLACE the
+        # original one the caller is trying to report.
+        return False
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Terminate a child and everything it spawned. Best effort, never raises."""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=30,
+            )
+        else:
+            import signal
+
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+    except BaseException:  # noqa: BLE001 - must not replace a propagating exc
+        try:
+            proc.kill()
+        except BaseException:  # noqa: BLE001
+            pass
+
+
+def _as_text(stream: object) -> str:
+    """Normalize a TimeoutExpired stream to str.
+
+    ``text=True`` normally yields str, but TimeoutExpired's payload comes
+    from a partially drained pipe and is bytes on some paths/platforms, so
+    decode defensively rather than crash while reporting a timeout.
+    """
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return str(stream)
 
 
 def _run_agent_cmd(agent: str, argv: list[str], **kwargs) -> dict:
@@ -663,6 +845,7 @@ def ask_codex(
     mode: str = "default",
     workdir: str | None = None,
     write: bool = False,
+    on_spawn: "Callable[[int], None] | None" = None,
 ) -> dict:
     """Query Codex with explicit routing and optional structured telemetry.
 
@@ -703,7 +886,7 @@ def ask_codex(
         return error
     argv = _prefix_for("codex") + ["--ephemeral"]
     if _is_plain_call(model, effort, mode, workdir, write):
-        return _run_agent_cmd("codex", argv + ["--", prompt])
+        return _run_agent_cmd("codex", argv + ["--", prompt], on_spawn=on_spawn)
     if model is not None:
         argv += ["--model", model]
     argv.append("--json")
@@ -774,6 +957,7 @@ def ask_codex(
             env=child_env,
             cwd=run_cwd,
             capture_failed_output=True,
+            on_spawn=on_spawn,
         )
     finally:
         if neutral_root:
@@ -895,6 +1079,7 @@ def ask_claude(
     mode: str = "default",
     workdir: str | None = None,
     write: bool = False,
+    on_spawn: "Callable[[int], None] | None" = None,
 ) -> dict:
     """Query Claude Code with optional model/effort selection and telemetry.
 
@@ -957,6 +1142,7 @@ def ask_claude(
                 "--",
                 prompt,
             ],
+            on_spawn=on_spawn,
         )
 
     argv = _prefix_for("claude")
@@ -1009,6 +1195,7 @@ def ask_claude(
             env=child_env,
             cwd=run_cwd,
             capture_failed_output=True,
+            on_spawn=on_spawn,
         )
     finally:
         if neutral_cwd:
