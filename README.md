@@ -39,7 +39,8 @@ splits the problem:
 | Tool | Behavior |
 | --- | --- |
 | `send(from_agent, to_agent, message, deliver=false)` | Persist; if `deliver`, also push to the recipient's native CLI. |
-| `inbox(agent, unread_only=true)` | Messages addressed to `agent`, oldest first. |
+| `inbox(agent, unread_only=true, limit=25, auto_ack=true)` | One bounded batch addressed to `agent`, oldest first. Consumes what it returns so each poll advances; returns `remaining` — poll again while it's non-zero. Oversized bodies are truncated. |
+| `peek(message_id)` | One message with its body in full, never truncated and never acked. |
 | `ack(message_id)` | Mark read (idempotent). |
 | `history(limit=50, agent=None)` | Recent messages newest-first; `agent` matches sender or recipient. |
 | `ask_hermes(prompt)` | Live query → `hermes chat -Q -q`. |
@@ -395,9 +396,12 @@ args = []
 send(from_agent="claude", to_agent="hermes",
      message="deploy finished, logs at /tmp/deploy.log", deliver=true)
 
-# hermes, whenever it runs, reads and acks:
-inbox(agent="hermes")           -> [{message_id: 7, sender: "claude", ...}]
-ack(message_id=7)
+# hermes, whenever it runs, drains a bounded batch (the read acks it):
+inbox(agent="hermes")   -> {messages: [{message_id: 7, sender: "claude", ...}],
+                            count: 1, remaining: 0, truncated: 0}
+
+# A long body arrives shortened; fetch that one in full on demand:
+peek(message_id=7)
 
 # Or ask hermes something and block for the answer:
 ask_hermes(prompt="what's the current gateway status?")

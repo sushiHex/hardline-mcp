@@ -107,8 +107,15 @@ async def test_headless_cross_instance_round_trip(tmp_path):
         async with stdio_client(params) as (rb, wb):
             async with ClientSession(rb, wb) as b:
                 await b.initialize()
-                inbox = _tool_dict(await b.call_tool("inbox", {"agent": "hermes"}))
+                # auto_ack=False so the EXPLICIT ack below still proves
+                # something; a consuming read would make it a no-op.
+                inbox = _tool_dict(
+                    await b.call_tool(
+                        "inbox", {"agent": "hermes", "auto_ack": False}
+                    )
+                )
                 assert inbox["count"] == 1
+                assert inbox["remaining"] == 1  # read, not consumed
                 assert inbox["messages"][0]["body"] == "headless hi"
                 assert inbox["messages"][0]["sender"] == "claude"
 
@@ -117,6 +124,7 @@ async def test_headless_cross_instance_round_trip(tmp_path):
 
                 after = _tool_dict(await b.call_tool("inbox", {"agent": "hermes"}))
                 assert after["count"] == 0  # acked -> no longer unread
+                assert after["remaining"] == 0
 
 
 @pytest.mark.anyio

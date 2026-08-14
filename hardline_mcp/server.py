@@ -54,9 +54,44 @@ _ASYNC_MAX_WORKERS = adapters.positive_int_env("HARDLINE_ASYNC_MAX_WORKERS", 4)
 # second), short enough that a real dispatch still returns promptly. Runs off
 # the event loop via _in_thread, so it delays only its own caller.
 _ASYNC_EARLY_FAILURE_S = 2.0
+
+# Per-message body cap for a batched inbox read. Bounding the message COUNT is
+# not enough on its own: a single async result here has reached 35k characters,
+# so a small batch of them still lands tens of thousands of tokens in the
+# caller's context. Truncation is display-only - the row is untouched and
+# peek(message_id) returns the body whole.
+_MAX_BODY_CHARS = 4000
+_TRUNCATION_NOTE = "\n...[{n} characters truncated - call peek(message_id={mid}) for the full body]"
+
 _async_executor = ThreadPoolExecutor(
     max_workers=_ASYNC_MAX_WORKERS, thread_name_prefix="hardline-async"
 )
+
+
+def _truncate_bodies(messages: list[dict]) -> tuple[list[dict], int]:
+    """Shorten oversized bodies for a batch read. Returns (messages, n_truncated).
+
+    Copies each row it shortens rather than mutating in place - the caller's
+    dicts come straight from the db layer and nothing downstream should see a
+    body that silently lost content.
+    """
+    out: list[dict] = []
+    truncated = 0
+    for msg in messages:
+        body = msg.get("body") or ""
+        if len(body) <= _MAX_BODY_CHARS:
+            out.append(msg)
+            continue
+        dropped = len(body) - _MAX_BODY_CHARS
+        msg = dict(msg)
+        msg["body"] = body[:_MAX_BODY_CHARS] + _TRUNCATION_NOTE.format(
+            n=dropped, mid=msg.get("message_id")
+        )
+        msg["body_truncated"] = True
+        msg["body_length"] = len(body)
+        out.append(msg)
+        truncated += 1
+    return out, truncated
 
 
 def _drain_async_executor_at_exit() -> None:
@@ -148,8 +183,13 @@ async def send(
 
 
 @mcp.tool()
-async def inbox(agent: str, unread_only: bool = True) -> dict:
-    """Read messages addressed to ``agent``, oldest first.
+async def inbox(
+    agent: str,
+    unread_only: bool = True,
+    limit: int = mailbox.DEFAULT_INBOX_LIMIT,
+    auto_ack: bool = True,
+) -> dict:
+    """Read messages addressed to ``agent``, oldest first — one bounded batch.
 
     Reads this session's own lane AND the shared unqualified name, so
     ``inbox(agent="claude")`` returns results dispatched by THIS session plus
@@ -157,8 +197,17 @@ async def inbox(agent: str, unread_only: bool = True) -> dict:
     results. Nothing to opt into: the lane comes from the session that spawned
     this server. An already lane-qualified ``agent`` reads ONLY that lane.
 
-    ``unread_only`` (default true) hides messages already ack'd. Returns
-    ``{"messages": [...], "count": N}``.
+    ``unread_only`` (default true) hides messages already ack'd.
+
+    ``limit`` caps the batch (ceiling ``MAX_INBOX_LIMIT``) and ``auto_ack``
+    (default true) consumes exactly what it returns, so each poll advances
+    instead of re-reading the same backlog. Poll again while ``remaining``
+    is non-zero.
+
+    Bodies over ``_MAX_BODY_CHARS`` are truncated with a marker — call
+    ``peek(message_id)`` for one message in full.
+
+    Returns ``{"messages", "count", "remaining", "truncated"}``.
     """
     # An explicit lane means exactly that lane. Previously this still unioned
     # in the caller's OWN lane (lane_for strips the qualifier and re-adds this
@@ -170,8 +219,37 @@ async def inbox(agent: str, unread_only: bool = True) -> dict:
     else:
         lane = adapters.lane_for(agent)
         agents = [agent] if lane == agent else [agent, lane]
-    msgs = await _in_thread(mailbox.inbox, agents, unread_only=unread_only)
-    return {"messages": msgs, "count": len(msgs)}
+    msgs, remaining = await _in_thread(
+        mailbox.inbox,
+        agents,
+        unread_only=unread_only,
+        limit=limit,
+        auto_ack=auto_ack,
+    )
+    msgs, truncated = _truncate_bodies(msgs)
+    return {
+        "messages": msgs,
+        "count": len(msgs),
+        "remaining": remaining,
+        "truncated": truncated,
+    }
+
+
+@mcp.tool()
+async def peek(message_id: int) -> dict:
+    """Return ONE message by id, body in full and never truncated.
+
+    The escape hatch for a message ``inbox`` shortened. Read-only: unlike
+    ``inbox`` this never acks, and it is deliberately not lane-scoped for the
+    same reason ``history`` is not — recovering a payload another session
+    already consumed is exactly what it is for.
+
+    Returns ``{"ok": true, "message": {...}}`` or ``{"ok": false, "error"}``.
+    """
+    msg = await _in_thread(mailbox.peek, message_id)
+    if msg is None:
+        return {"ok": False, "error": f"no message with id {message_id}"}
+    return {"ok": True, "message": msg}
 
 
 @mcp.tool()

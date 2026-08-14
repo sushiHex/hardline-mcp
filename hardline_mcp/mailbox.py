@@ -63,6 +63,12 @@ _initialized_paths: set[str] = set()
 _INIT_ATTEMPTS = 5
 _INIT_BACKOFF_S = 0.05
 
+# Batch size for one inbox poll, and the ceiling a caller cannot exceed.
+# The ceiling matters more than the default: the bound exists to keep a
+# backlog out of the caller's context, so it must not be opt-out-able.
+DEFAULT_INBOX_LIMIT = 25
+MAX_INBOX_LIMIT = 200
+
 
 def _default_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -170,26 +176,77 @@ def inbox(
     agent,
     *,
     unread_only: bool = True,
+    limit: int = DEFAULT_INBOX_LIMIT,
+    auto_ack: bool = True,
     db_path: Optional[Path] = None,
-) -> list[dict]:
+    now_fn: Callable[[], datetime] = _default_now,
+) -> tuple[list[dict], int]:
     """Messages addressed TO ``agent``, oldest first (read in arrival order).
+
+    Returns ``(messages, remaining)`` where ``remaining`` counts the messages
+    still unacked for these recipients AFTER this call - a caller polls again
+    while it is non-zero.
 
     ``agent`` may be one name or several. Several is how a session reads its
     own lane AND the shared unqualified one in a single ordered pass, rather
     than merging two queries at the call site.
 
     ``unread_only`` (default) hides already-acked messages.
+
+    ``limit`` bounds the batch, clamped to ``MAX_INBOX_LIMIT``. The clamp is
+    the actual invariant: an unbounded read let an un-drained backlog grow
+    into the caller's context until it overflowed (153 stale async results,
+    ~168k tokens, on a single poll), so a caller must not be able to opt back
+    out of the bound by passing a huge limit.
+
+    ``auto_ack`` (default) marks exactly the returned ids read, in the SAME
+    transaction as the read. This is what makes ``limit`` safe rather than
+    harmful: oldest-first + a limit + nothing acking pins the caller to the
+    same oldest batch forever and it never sees a new message again. Acking
+    server-side advances the cursor per poll, so the backlog drains.
+
+    Acking only ids this call returned is inherently lane-correct - the
+    SELECT already restricts to ``agents``, and the UPDATE re-asserts that
+    recipient scope so no id can ack outside the requested recipients. Nothing
+    is destroyed: ``history`` ignores ``acked_at`` and remains the recovery
+    path for anything acked.
     """
     db_path = _resolve_db(db_path)
     agents = [agent] if isinstance(agent, str) else list(agent)
+    if not agents:
+        return [], 0
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_INBOX_LIMIT
+    limit = max(1, min(limit, MAX_INBOX_LIMIT))
+
     placeholders = ", ".join("?" for _ in agents)
     sql = f"SELECT * FROM messages WHERE recipient IN ({placeholders})"
     if unread_only:
         sql += " AND acked_at IS NULL"
-    sql += " ORDER BY id ASC"
+    sql += " ORDER BY id ASC LIMIT ?"
+
     with closing(_connect(db_path)) as conn:
-        rows = conn.execute(sql, tuple(agents)).fetchall()
-        return [_row_to_dict(r) for r in rows]
+        # One transaction: read, consume, then count what is left. A concurrent
+        # poller on the shared db therefore cannot be handed the same batch.
+        with conn:
+            rows = conn.execute(sql, (*agents, limit)).fetchall()
+            messages = [_row_to_dict(r) for r in rows]
+            if auto_ack and messages:
+                ids = [m["message_id"] for m in messages]
+                id_marks = ", ".join("?" for _ in ids)
+                conn.execute(
+                    f"UPDATE messages SET acked_at = ? WHERE id IN ({id_marks})"
+                    f" AND recipient IN ({placeholders}) AND acked_at IS NULL",
+                    (_iso(now_fn()), *ids, *agents),
+                )
+            remaining = conn.execute(
+                f"SELECT COUNT(*) FROM messages WHERE recipient IN ({placeholders})"
+                " AND acked_at IS NULL",
+                tuple(agents),
+            ).fetchone()[0]
+        return messages, remaining
 
 
 def peek(message_id: int, *, db_path: Optional[Path] = None) -> Optional[dict]:
