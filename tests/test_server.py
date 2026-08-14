@@ -764,8 +764,33 @@ async def test_whole_inbox_response_is_bounded_not_just_each_body(monkeypatch, t
     got = await server.inbox(agent="hermes")
     total = sum(len(m["body"]) for m in got["messages"])
     assert got["count"] == 25  # a consuming read must return everything it took
-    assert total <= server._MAX_RESPONSE_CHARS * 1.1  # allow truncation notes
+    # The real contract, with no fudge factor: the truncation note is budgeted
+    # for rather than added on top, so a default-sized batch fits the target.
+    # A 1.1x allowance here was hiding exactly that overshoot.
+    assert total <= server._MAX_RESPONSE_CHARS
     assert got["truncated"] == 25
+
+
+@pytest.mark.anyio
+async def test_a_maximal_batch_stays_within_the_advertised_worst_case(
+    monkeypatch, tmp_path
+):
+    """A consuming read may not drop what it consumed, so at the per-body
+    floor a maximal batch necessarily exceeds the target budget. That ceiling
+    is real and advertised rather than hidden behind the target."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    for i in range(server.mailbox.MAX_INBOX_LIMIT):
+        server.mailbox.send("codex", "hermes", f"{i}:" + "z" * 5_000, db_path=db)
+
+    got = await server.inbox(agent="hermes", limit=server.mailbox.MAX_INBOX_LIMIT)
+    total = sum(len(m["body"]) for m in got["messages"])
+    worst_case = server.mailbox.MAX_INBOX_LIMIT * (
+        server._MIN_BODY_CHARS + server._NOTE_OVERHEAD
+    )
+    assert got["count"] == server.mailbox.MAX_INBOX_LIMIT
+    assert total <= worst_case
+    assert (await server.server_info())["limits"]["inbox_worst_case_chars"] == worst_case
 
 
 @pytest.mark.anyio
@@ -798,7 +823,7 @@ async def test_history_caps_the_whole_page_and_hands_back_a_cursor(monkeypatch, 
 
     page = await server.history(agent="hermes", limit=50)
     total = sum(len(m["body"]) for m in page["messages"])
-    assert total <= server._MAX_RESPONSE_CHARS * 1.1
+    assert total <= server._MAX_RESPONSE_CHARS
     assert page["dropped"] > 0          # the page really was shortened
     assert page["has_more"] is True
     assert page["next_before_id"] == page["messages"][-1]["message_id"]
@@ -979,6 +1004,64 @@ async def test_list_jobs_summarizes_and_filters(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
+async def test_a_job_cancelled_before_start_never_spawns(monkeypatch, tmp_path):
+    """End to end at the tool boundary: a cancel that lands before the worker
+    claims the job must stop the agent from being invoked at all."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+
+    spawned = []
+
+    def never_should_run(prompt, **k):
+        spawned.append(prompt)
+        return {"ok": True, "reply": "should not have happened"}
+
+    monkeypatch.setattr(server.adapters, "ask_codex", never_should_run)
+
+    # Cancel the job between creation and the worker claiming it, which is
+    # exactly the window the conditional claim exists to close.
+    real_create = server.jobs.create
+
+    def create_then_cancel(**kwargs):
+        job_id = real_create(**kwargs)
+        server.jobs.request_cancel(job_id, db_path=db)
+        return job_id
+
+    monkeypatch.setattr(server.jobs, "create", create_then_cancel)
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+
+    got = await server.ask_codex_async(prompt="expensive", from_agent="claude")
+
+    assert spawned == [], "a cancelled job still invoked the agent"
+    status = await server.job_status(job_id=got["job_id"])
+    assert status["job"]["state"] == server.jobs.CANCELLED
+
+
+@pytest.mark.anyio
+async def test_list_jobs_summarizes_a_huge_result_instead_of_inlining_it(
+    monkeypatch, tmp_path
+):
+    """A listing that embedded 200 full agent replies would be the same
+    context flood this package spent a release bounding everywhere else."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    job_id = server.jobs.create(
+        agent="codex", requester="claude", label=None, request={}, db_path=db
+    )
+    server.jobs.finish(job_id, result={"ok": True, "reply": "q" * 50_000}, db_path=db)
+
+    listed = await server.list_jobs()
+    row = listed["jobs"][0]
+    assert row["result"]["truncated"] is True
+    assert row["result_chars"] > 50_000
+    assert f"job_result(job_id={job_id!r})" == row["result"]["full_via"]
+
+    # ...and the escape hatch still returns it whole.
+    full = await server.job_result(job_id=job_id)
+    assert len(full["result"]["reply"]) == 50_000
+
+
+@pytest.mark.anyio
 async def test_job_cancel_stops_a_running_job(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
@@ -990,7 +1073,7 @@ async def test_job_cancel_stops_a_running_job(monkeypatch, tmp_path):
     monkeypatch.setattr(
         server.jobs,
         "kill_process_tree",
-        lambda pid: (killed.append(pid) or (True, None)),
+        lambda pid, expect_key=None: (killed.append(pid) or (True, None)),
     )
 
     out = await server.job_cancel(job_id=job_id)

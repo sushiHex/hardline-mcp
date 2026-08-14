@@ -39,7 +39,7 @@ def _resolve_db(db_path: Optional[Path]) -> Path:
 # Bumped when a table is added or a column's meaning changes. Recorded in
 # `meta` so a running server can report what store it is talking to rather
 # than leaving "is this the new schema?" to be inferred from behaviour.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     error        TEXT,
     owner_pid    INTEGER NOT NULL,
     child_pid    INTEGER,
+    -- Process-identity token for child_pid (creation time). A pid alone is
+    -- not an identity: a finished child's pid can be reused, and cancelling
+    -- on a stale pid would kill an unrelated process.
+    child_key    TEXT,
     created_at   TEXT NOT NULL,
     started_at   TEXT,
     finished_at  TEXT
@@ -115,6 +119,28 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+# Columns added to an EXISTING table after it first shipped. CREATE TABLE IF
+# NOT EXISTS cannot add them, so a store created by an earlier version keeps
+# the old shape and every write naming the new column fails.
+_ADDED_COLUMNS = {
+    "jobs": {"child_key": "TEXT"},
+}
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Bring an older table up to the current shape. Idempotent."""
+    for table, columns in _ADDED_COLUMNS.items():
+        try:
+            present = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.Error:
+            continue
+        if not present:  # table absent entirely; the schema above creates it
+            continue
+        for name, decl in columns.items():
+            if name not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def _ensure_initialized(db_path: Path) -> None:
     """Create the parent dir, enable WAL, and create the schema once per db
     file per process, retrying the cross-process race.
@@ -148,9 +174,14 @@ def _ensure_initialized(db_path: Path) -> None:
                     # idempotent and an existing messages-only store gains the
                     # new tables without a migration step.
                     conn.executescript(_SCHEMA)
+                    _add_missing_columns(conn)
+                    # INSERT OR REPLACE rather than ON CONFLICT ... DO UPDATE:
+                    # upsert syntax needs SQLite 3.24+, and this is the one
+                    # statement that would make an otherwise-compatible store
+                    # fail to initialize at all.
                     conn.execute(
-                        "INSERT INTO meta (key, value) VALUES ('schema_version', ?)"
-                        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        "INSERT OR REPLACE INTO meta (key, value)"
+                        " VALUES ('schema_version', ?)",
                         (str(SCHEMA_VERSION),),
                     )
                     conn.commit()

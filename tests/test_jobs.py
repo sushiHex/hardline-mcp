@@ -166,13 +166,152 @@ def test_cancel_kills_the_recorded_child_tree(tmp_path, monkeypatch):
 
     killed = []
     monkeypatch.setattr(
-        jobs, "kill_process_tree", lambda pid: (killed.append(pid) or (True, None))
+        jobs,
+        "kill_process_tree",
+        lambda pid, expect_key=None: (killed.append((pid, expect_key)) or (True, None)),
     )
     out = jobs.request_cancel(job_id, db_path=db)
 
-    assert killed == [31337]
+    assert killed == [(31337, None)]
     assert out["child_killed"] is True
     assert jobs.get(job_id, db_path=db)["state"] == jobs.CANCELLED
+
+
+def test_claiming_a_cancelled_job_fails_so_it_never_starts(tmp_path):
+    """The race that made cancel meaningless: mark_running is conditional on
+    the job still being queued, and ignoring its result let a cancelled job
+    spawn its subprocess anyway - the row said cancelled while the expensive
+    work carried on."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.request_cancel(job_id, db_path=db)
+
+    assert jobs.mark_running(job_id, db_path=db) is False
+    assert jobs.get(job_id, db_path=db)["state"] == jobs.CANCELLED
+
+
+def test_claiming_a_queued_job_succeeds_exactly_once(tmp_path):
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    assert jobs.mark_running(job_id, db_path=db) is True
+    assert jobs.mark_running(job_id, db_path=db) is False  # already claimed
+
+
+def test_a_pid_cannot_be_recorded_onto_a_cancelled_job(tmp_path):
+    """Writing a child pid onto a row that has since been cancelled would
+    hand a later killer the identity of a process it may not signal."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.request_cancel(job_id, db_path=db)
+    assert jobs.set_child_pid(job_id, 31337, db_path=db) is False
+    assert jobs.get(job_id, db_path=db)["child_pid"] is None
+
+
+def test_cancel_loses_cleanly_when_the_job_finishes_mid_cancel(tmp_path, monkeypatch):
+    """The race the claim-first ordering exists for.
+
+    Cancel used to read the state, kill, and only then write. A job that
+    completed IN THAT WINDOW got a process killed for nothing while the
+    caller was still told it had been cancelled. Note the interleaving is
+    injected rather than hoped for: finishing the job before calling cancel
+    would be caught by the up-front terminal check and would never exercise
+    the conditional claim at all - which is exactly how an earlier version of
+    this test passed against the unfixed code.
+    """
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, child_pid=31337, db_path=db)
+
+    killed = []
+    monkeypatch.setattr(
+        jobs,
+        "kill_process_tree",
+        lambda pid, expect_key=None: (killed.append(pid) or (True, None)),
+    )
+
+    real_resolve = jobs._resolve_lost
+
+    def resolve_then_let_the_owner_win(conn, row, now_fn):
+        job = real_resolve(conn, row, now_fn)
+        jobs.finish(job_id, result={"ok": True, "reply": "beat you"}, db_path=db)
+        return job
+
+    monkeypatch.setattr(jobs, "_resolve_lost", resolve_then_let_the_owner_win)
+
+    out = jobs.request_cancel(job_id, db_path=db)
+    assert out["ok"] is False
+    assert out["state"] == jobs.COMPLETED
+    assert killed == []  # nothing signalled on a job we did not win
+    assert jobs.get(job_id, db_path=db)["state"] == jobs.COMPLETED
+
+
+def test_a_real_result_supersedes_a_heuristic_lost(tmp_path):
+    """``lost`` is inferred from "the owner's pid is not alive"; a terminal
+    result from the owner itself is direct evidence and outranks it. Refusing
+    to overwrite meant a misclassified job discarded a real result."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, db_path=db)
+    with mailbox._connect(db) as conn:
+        conn.execute(
+            "UPDATE jobs SET state = ?, owner_pid = ? WHERE job_id = ?",
+            (jobs.LOST, 0x7FFFFFFE, job_id),
+        )
+        conn.commit()
+
+    jobs.finish(job_id, result={"ok": True, "reply": "it existed after all"}, db_path=db)
+    job = jobs.get(job_id, db_path=db)
+    assert job["state"] == jobs.COMPLETED
+    assert job["result"]["reply"] == "it existed after all"
+
+
+def test_finish_clears_the_child_pid_so_it_cannot_be_killed_later(tmp_path):
+    """A finished child's pid is a stale identity; leaving it on the row is
+    what a later cancel would aim at."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, child_pid=31337, db_path=db)
+    jobs.finish(job_id, result={"ok": True, "reply": "done"}, db_path=db)
+    assert jobs.get(job_id, db_path=db)["child_pid"] is None
+
+
+def test_kill_refuses_a_pid_whose_identity_no_longer_matches(tmp_path):
+    """A pid is not an identity. If the child exited and its pid was reused,
+    taskkill /T would destroy an unrelated process tree."""
+    ok, err = jobs.kill_process_tree(os.getpid(), expect_key="definitely-not-mine")
+    assert ok is False
+    assert "reused" in err
+
+    # A pid that no longer exists is refused too, rather than signalled blind.
+    ok, err = jobs.kill_process_tree(0x7FFFFFFE, expect_key="anything")
+    assert ok is False
+    assert "gone" in err
+
+
+def test_process_key_identifies_an_instance_not_a_slot(tmp_path):
+    mine = jobs.process_key(os.getpid())
+    assert mine and jobs.process_key(os.getpid()) == mine  # stable
+    assert jobs.process_key(0x7FFFFFFE) is None  # no such process
+    assert jobs.process_key(0) is None
+
+
+def test_listing_finds_an_orphan_even_when_filtering_on_lost(tmp_path):
+    """SQL applies `state='lost'` BEFORE lazy resolution could reclassify the
+    row, so the query could not find the very jobs it exists to surface."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, db_path=db)
+    with mailbox._connect(db) as conn:
+        conn.execute(
+            "UPDATE jobs SET owner_pid = ? WHERE job_id = ?", (0x7FFFFFFE, job_id)
+        )
+        conn.commit()
+
+    # No job_status() call first - the filter itself must resolve it.
+    found = jobs.listing(state=jobs.LOST, db_path=db)
+    assert [j["job_id"] for j in found] == [job_id]
+    assert jobs.listing(active_only=True, db_path=db) == []
+    assert jobs.counts(db_path=db) == {jobs.LOST: 1}
 
 
 def test_cancel_refuses_a_job_that_already_finished(tmp_path):

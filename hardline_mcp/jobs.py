@@ -80,20 +80,24 @@ def pid_alive(pid: Optional[int]) -> bool:
     if not pid or pid <= 0:
         return False
     if os.name == "nt":
-        # os.kill(pid, 0) is not a liveness probe on Windows, so ask the API.
+        # WaitForSingleObject, NOT GetExitCodeProcess. 259 is STILL_ACTIVE, but
+        # it is also a perfectly legal exit code, so a process that exited with
+        # 259 is indistinguishable from a running one. Waiting with a zero
+        # timeout has no such ambiguity: WAIT_TIMEOUT means still running,
+        # WAIT_OBJECT_0 means the handle is signalled, i.e. exited.
         import ctypes
 
+        SYNCHRONIZE = 0x00100000
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
+        WAIT_TIMEOUT = 0x00000102
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        handle = kernel32.OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+        )
         if not handle:
             return False
         try:
-            code = ctypes.c_ulong()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return False
-            return code.value == STILL_ACTIVE
+            return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
         finally:
             kernel32.CloseHandle(handle)
     try:
@@ -105,7 +109,80 @@ def pid_alive(pid: Optional[int]) -> bool:
         return True
     except OSError:
         return False
-    return True
+    # kill(pid, 0) succeeds for a ZOMBIE, which is dead but unreaped. Treating
+    # one as alive would keep every job it owns pinned as active indefinitely.
+    state = _proc_state_linux(pid)
+    return state != "Z"
+
+
+def _proc_state_linux(pid: int) -> Optional[str]:
+    """Process state letter from /proc, or None where /proc is unavailable."""
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace") as fh:
+            data = fh.read()
+    except (OSError, ValueError):
+        return None
+    # comm can contain spaces and parentheses; state is the field after the
+    # LAST ')', so split there rather than on the first space.
+    tail = data.rpartition(")")[2].split()
+    return tail[0] if tail else None
+
+
+def process_key(pid: int) -> Optional[str]:
+    """A token identifying a process INSTANCE, not just its slot.
+
+    Returns the process creation time. A pid is reused after the process
+    exits, so a recorded pid alone can name something else entirely by the
+    time a cancel arrives — and killing on a stale pid means killing an
+    innocent process tree. Pairing the pid with its start time makes that
+    detectable.
+
+    ``None`` where the platform will not say; callers must decide what to do
+    with an unverifiable identity rather than assume it matches.
+    """
+    if not pid or pid <= 0:
+        return None
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            SYNCHRONIZE = 0x00100000
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(
+                SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if not handle:
+                return None
+            try:
+                creation = wintypes.FILETIME()
+                exit_t = wintypes.FILETIME()
+                kernel_t = wintypes.FILETIME()
+                user_t = wintypes.FILETIME()
+                ok = kernel32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(creation),
+                    ctypes.byref(exit_t),
+                    ctypes.byref(kernel_t),
+                    ctypes.byref(user_t),
+                )
+                if not ok:
+                    return None
+                return f"{creation.dwHighDateTime}:{creation.dwLowDateTime}"
+            finally:
+                kernel32.CloseHandle(handle)
+        # Linux: field 22 of /proc/<pid>/stat is starttime in clock ticks.
+        try:
+            with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace") as fh:
+                data = fh.read()
+        except (OSError, ValueError):
+            return None
+        fields = data.rpartition(")")[2].split()
+        # fields[0] is state, so starttime (field 22 overall) is index 19 here.
+        return fields[19] if len(fields) > 19 else None
+    except Exception:  # noqa: BLE001 - identity is best effort, never fatal
+        return None
 
 
 def _row_to_dict(row) -> dict:
@@ -117,6 +194,7 @@ def _row_to_dict(row) -> dict:
         "state": row["state"],
         "owner_pid": row["owner_pid"],
         "child_pid": row["child_pid"],
+        "child_key": row["child_key"] if "child_key" in row.keys() else None,
         "created_at": row["created_at"],
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
@@ -171,28 +249,49 @@ def mark_running(
     child_pid: Optional[int] = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
-) -> None:
+) -> bool:
+    """Claim a queued job. Returns False if it was NOT claimable.
+
+    The return value is the point. This is the queued -> running transition,
+    and it is conditional on the job still being queued: if a cancel landed
+    first the UPDATE matches nothing. Ignoring that let a cancelled job spawn
+    its subprocess anyway - the row said cancelled while the expensive work
+    carried on, which is worse than not supporting cancel at all.
+    """
     db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
         with conn:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE jobs SET state = ?, started_at = COALESCE(started_at, ?),"
                 " child_pid = COALESCE(?, child_pid), owner_pid = ?"
                 " WHERE job_id = ? AND state = ?",
                 (RUNNING, _iso(now_fn()), child_pid, os.getpid(), job_id, QUEUED),
             )
+        return cur.rowcount > 0
 
 
 def set_child_pid(
-    job_id: str, child_pid: int, *, db_path: Optional[Path] = None
-) -> None:
-    """Record the spawned child so a cancel from ANOTHER process can reach it."""
+    job_id: str,
+    child_pid: int,
+    *,
+    started_key: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Record the spawned child so a cancel from ANOTHER process can reach it.
+
+    Restricted to a job that is still ``running``: writing a pid onto a row
+    that has since been cancelled would hand a killer the identity of a
+    process it was never entitled to signal.
+    """
     db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
         with conn:
-            conn.execute(
-                "UPDATE jobs SET child_pid = ? WHERE job_id = ?", (child_pid, job_id)
+            cur = conn.execute(
+                "UPDATE jobs SET child_pid = ?, child_key = ?"
+                " WHERE job_id = ? AND state = ?",
+                (child_pid, started_key, job_id, RUNNING),
             )
+        return cur.rowcount > 0
 
 
 def finish(
@@ -206,6 +305,12 @@ def finish(
 
     A cancelled job stays cancelled: the child was killed deliberately, so the
     non-zero exit that follows is the expected consequence, not a new failure.
+
+    A ``lost`` job, by contrast, IS superseded. ``lost`` is a heuristic
+    derived from "the owner's pid is not alive"; a real terminal result from
+    the owner itself is direct evidence and outranks it. Refusing to overwrite
+    it meant a misclassified job - a slow reap, a reused pid, a liveness probe
+    racing the finish - permanently discarded a result that genuinely existed.
     """
     db_path = _resolve_db(db_path)
     ok = bool(result and result.get("ok"))
@@ -214,8 +319,11 @@ def finish(
     with closing(_connect(db_path)) as conn:
         with conn:
             conn.execute(
-                "UPDATE jobs SET state = ?, result = ?, error = ?, finished_at = ?"
-                " WHERE job_id = ? AND state NOT IN (?, ?)",
+                "UPDATE jobs SET state = ?, result = ?, error = ?, finished_at = ?,"
+                # A finished child's pid must not stay on the row: it is the
+                # stale identity a later cancel could kill something else with.
+                " child_pid = NULL, child_key = NULL"
+                " WHERE job_id = ? AND state != ?",
                 (
                     state,
                     json.dumps(result, default=str) if result is not None else None,
@@ -223,7 +331,6 @@ def finish(
                     _iso(now_fn()),
                     job_id,
                     CANCELLED,
-                    LOST,
                 ),
             )
             # A cancelled job still records what the killed run produced.
@@ -251,7 +358,7 @@ def _resolve_lost(conn, row, now_fn: Callable[[], datetime]) -> dict:
     if pid_alive(job["owner_pid"]):
         return job
     with conn:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE jobs SET state = ?, error = ?, finished_at = COALESCE(finished_at, ?)"
             " WHERE job_id = ? AND state IN (?, ?)",
             (
@@ -263,6 +370,16 @@ def _resolve_lost(conn, row, now_fn: Callable[[], datetime]) -> dict:
                 RUNNING,
             ),
         )
+    if cur.rowcount == 0:
+        # We lost the race: the owner committed a real terminal state between
+        # our liveness check and this write. Returning our in-memory verdict
+        # anyway would report `lost` for a job the store records as completed
+        # - the caller and the database disagreeing about the same job. Re-read
+        # and believe the row.
+        fresh = conn.execute(
+            "SELECT * FROM jobs WHERE job_id = ?", (job["job_id"],)
+        ).fetchone()
+        return _row_to_dict(fresh) if fresh is not None else job
     job["state"] = LOST
     job["error"] = "owner process exited before recording a terminal state"
     return job
@@ -280,6 +397,31 @@ def get(
         if row is None:
             return None
         return _resolve_lost(conn, row, now_fn)
+
+
+_SWEEP_LIMIT = 500
+
+
+def _sweep_lost(conn, now_fn: Callable[[], datetime]) -> None:
+    """Resolve every reachable active job before anyone FILTERS on state.
+
+    Lazy resolution on read is right for a single job, but it cannot be the
+    only mechanism for a query: ``state='lost'`` is applied by SQL, so an
+    orphaned row still recorded as ``running`` was excluded before the
+    liveness check could reclassify it — ``list_jobs(state="lost")`` could not
+    find the very jobs it exists to surface, and ``active_only`` returned rows
+    that were about to be reclassified. Resolve first, then filter.
+
+    Bounded: active jobs are few by nature, and a runaway backlog must not
+    turn a listing into an unbounded scan.
+    """
+    marks = ", ".join("?" for _ in ACTIVE_STATES)
+    rows = conn.execute(
+        f"SELECT * FROM jobs WHERE state IN ({marks}) ORDER BY rowid DESC LIMIT ?",
+        (*sorted(ACTIVE_STATES), _SWEEP_LIMIT),
+    ).fetchall()
+    for row in rows:
+        _resolve_lost(conn, row, now_fn)
 
 
 def listing(
@@ -323,18 +465,38 @@ def listing(
     params.append(limit)
 
     with closing(_connect(db_path)) as conn:
+        _sweep_lost(conn, now_fn)
         rows = conn.execute(sql, tuple(params)).fetchall()
-        return [_resolve_lost(conn, r, now_fn) for r in rows]
+        return [_row_to_dict(r) for r in rows]
 
 
-def kill_process_tree(pid: int) -> tuple[bool, Optional[str]]:
+def kill_process_tree(
+    pid: int, *, expect_key: Optional[str] = None
+) -> tuple[bool, Optional[str]]:
     """Kill a child and everything it spawned.
 
     Killing only the recorded pid is not enough: ``claude``/``codex`` are
     launchers that spawn the real worker, so the parent dies and the work
     carries on invisibly. Windows needs taskkill /T for the tree; POSIX gets
     the process group when one exists, falling back to the pid.
+
+    ``expect_key`` is the process-identity token recorded at spawn. It is
+    checked immediately before signalling, because a pid is not an identity:
+    the child may have exited long ago and its pid been reused, and taskkill
+    /T on a reused pid would destroy an unrelated process tree. A mismatch is
+    refused rather than risked; an unverifiable identity (no key recorded, or
+    a platform that will not say) is allowed through, since refusing there
+    would mean cancel never works at all.
     """
+    if expect_key is not None:
+        actual = process_key(pid)
+        if actual is None:
+            return False, "process is gone; nothing to kill"
+        if actual != expect_key:
+            return False, (
+                "refusing to kill: pid was reused by a different process "
+                "(identity token does not match the one recorded at spawn)"
+            )
     try:
         if os.name == "nt":
             proc = subprocess.run(
@@ -384,12 +546,14 @@ def request_cancel(
                 "state": job["state"],
             }
 
-        killed, kill_error = (False, None)
-        if job["child_pid"]:
-            killed, kill_error = kill_process_tree(job["child_pid"])
-
+        # CLAIM FIRST, then kill. Reading the state, killing, and only then
+        # writing left a window where the job completed normally in between:
+        # the kill hit a process that was already finishing, the conditional
+        # UPDATE matched nothing, and the caller was still told the job had
+        # been cancelled. Winning the transition is what earns the right to
+        # signal, so exactly one caller can do both.
         with conn:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE jobs SET state = ?, error = ?, finished_at = ?"
                 " WHERE job_id = ? AND state IN (?, ?)",
                 (
@@ -401,6 +565,23 @@ def request_cancel(
                     RUNNING,
                 ),
             )
+        if cur.rowcount == 0:
+            current = conn.execute(
+                "SELECT state FROM jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            reached = current[0] if current else "unknown"
+            return {
+                "ok": False,
+                "error": f"job reached {reached} before the cancel was applied",
+                "state": reached,
+            }
+
+        killed, kill_error = (False, None)
+        if job["child_pid"]:
+            killed, kill_error = kill_process_tree(
+                job["child_pid"], expect_key=job.get("child_key")
+            )
+
     return {
         "ok": True,
         "job_id": job_id,
@@ -415,10 +596,20 @@ def request_cancel(
     }
 
 
-def counts(*, db_path: Optional[Path] = None) -> dict:
-    """How many jobs in each state — a one-call health read."""
+def counts(
+    *,
+    db_path: Optional[Path] = None,
+    now_fn: Callable[[], datetime] = _default_now,
+) -> dict:
+    """How many jobs in each state — a one-call health read.
+
+    Sweeps first for the same reason ``listing`` does: a summary that counts
+    an orphaned job as ``running`` forever, while the listing beside it shows
+    the same job as ``lost``, is worse than no summary.
+    """
     db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
+        _sweep_lost(conn, now_fn)
         rows = conn.execute("SELECT state, COUNT(*) FROM jobs GROUP BY state").fetchall()
     return {r[0]: r[1] for r in rows}
 

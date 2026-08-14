@@ -297,11 +297,16 @@ def _run_cmd(
         # Kill the TREE, not just the child. `claude`/`codex` are launchers
         # that spawn the real worker, so killing the recorded pid alone left
         # the work running invisibly after we had already given up on it.
+        #
+        # Everything after the kill is best effort, but the child must still
+        # be reaped and the pipes closed: subprocess.run() guarantees that in
+        # its own except/finally, and this conversion has to match it or a
+        # timeout leaks a zombie and two file descriptors every time.
         _kill_tree(proc)
         try:
             exc.stdout, exc.stderr = proc.communicate(timeout=10)
         except Exception:  # noqa: BLE001 - drain is best effort
-            pass
+            _reap(proc)
         # TimeoutExpired carries whatever the child had already written, and
         # discarding it made every timeout indistinguishable: a bare
         # "timeout after 900s" cannot tell a caller whether the agent was
@@ -329,8 +334,16 @@ def _run_cmd(
         if partial_err:
             response["partial_stderr"] = _raw_evidence(partial_err)
         return response
-    except OSError as e:
-        return {"ok": False, "error": f"communication failed: {e}"}
+    except BaseException as e:  # noqa: BLE001 - see below; re-raised if unexpected
+        # An exception out of communicate() (OSError, or a KeyboardInterrupt
+        # landing mid-read) previously returned with the child still running
+        # and its pipes open. subprocess.run() kills and waits on this path;
+        # anything less leaks a process we can no longer reach.
+        _kill_tree(proc)
+        _reap(proc)
+        if isinstance(e, OSError):
+            return {"ok": False, "error": f"communication failed: {e}"}
+        raise
     # NOTE: read the captured TEXT, not proc.stdout/proc.stderr - after
     # communicate() those attributes are the closed pipe objects, and a
     # truthiness test on them silently reports the wrong thing.
@@ -355,6 +368,25 @@ def _run_cmd(
         "elapsed_s": elapsed,
         "timeout_s": timeout_s,
     }
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    """Close the pipes and wait for the child. Best effort, never raises.
+
+    Both halves matter: an unwaited child is a zombie holding a process slot,
+    and unclosed pipes are two leaked descriptors per timeout in a long-lived
+    server process.
+    """
+    for stream in (proc.stdout, proc.stderr, proc.stdin):
+        try:
+            if stream is not None:
+                stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:  # noqa: BLE001 - already on the failure path
+        pass
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:

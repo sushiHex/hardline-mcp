@@ -74,6 +74,11 @@ _MAX_RESPONSE_CHARS = 60_000
 # Never shrink a body below this; past a point an excerpt stops carrying any
 # signal and peek() is the honest answer instead.
 _MIN_BODY_CHARS = 400
+# Rough size of the appended truncation note. Budgeted for rather than added
+# on top, so an aggregate cap is not quietly exceeded by its own bookkeeping.
+_NOTE_OVERHEAD = 100
+# Per-row cap on a job result inside a LISTING. job_result() returns one whole.
+_JOB_RESULT_PREVIEW_CHARS = 600
 
 _async_executor = ThreadPoolExecutor(
     max_workers=_ASYNC_MAX_WORKERS, thread_name_prefix="hardline-async"
@@ -128,11 +133,14 @@ def _fit_response(
 
     if total > budget and not allow_drop:
         # Shrink every body to an equal share, floored so an excerpt still
-        # carries signal. A batch of many large bodies can still exceed the
-        # budget at the floor; that is bounded and preferred to losing a
-        # message the mailbox has already marked delivered.
-        share = max(_MIN_BODY_CHARS, budget // max(1, len(messages)))
-        cap = min(cap, share)
+        # carries signal.
+        #
+        # The share must pay for the truncation NOTE too. It is appended after
+        # the cap, so budgeting on the cap alone overshoots by ~80 chars per
+        # message - small individually, and exactly the kind of drift that put
+        # the per-body cap over the host's limit in the first place.
+        share = budget // max(1, len(messages)) - _NOTE_OVERHEAD
+        cap = min(cap, max(_MIN_BODY_CHARS, share))
         fitted = [_shorten(m, cap) for m in messages]
 
     dropped = 0
@@ -396,6 +404,16 @@ async def server_info() -> dict:
             "max_body_chars": _MAX_BODY_CHARS,
             "min_body_chars": _MIN_BODY_CHARS,
             "max_response_chars": _MAX_RESPONSE_CHARS,
+            # The honest ceiling, not the target. A consuming read may not
+            # drop a message it has consumed, so at the per-body floor a
+            # maximal batch necessarily exceeds the target - reporting only
+            # the target would advertise a bound the code can exceed.
+            "inbox_worst_case_chars": mailbox.MAX_INBOX_LIMIT
+            * (_MIN_BODY_CHARS + _NOTE_OVERHEAD),
+            "budget_note": (
+                "Budgets bound message BODIES. Envelope keys, timestamps and "
+                "JSON escaping are extra."
+            ),
         },
         "timeouts_s": timeouts,
         "async_max_workers": _ASYNC_MAX_WORKERS,
@@ -571,7 +589,10 @@ async def list_jobs(
     """Recent jobs, newest first, with a state-count summary.
 
     ``active_only`` narrows to queued/running — the "what is still in flight?"
-    question. Bounded like every other read here.
+    question. Bounded like every other read here: results are summarised
+    rather than inlined, because a listing that embedded 200 full agent
+    replies would be the same context flood this package spent a release
+    bounding everywhere else. Use ``job_result(job_id)`` for one in full.
     """
     rows = await _in_thread(
         jobs.listing,
@@ -581,6 +602,21 @@ async def list_jobs(
         active_only=active_only,
         limit=limit,
     )
+    for row in rows:
+        result = row.get("result")
+        if result is None:
+            continue
+        encoded = json.dumps(result, default=str)
+        row["result_chars"] = len(encoded)
+        row["result"] = (
+            result
+            if len(encoded) <= _JOB_RESULT_PREVIEW_CHARS
+            else {
+                "preview": encoded[:_JOB_RESULT_PREVIEW_CHARS],
+                "truncated": True,
+                "full_via": f"job_result(job_id={row['job_id']!r})",
+            }
+        )
     return {
         "jobs": rows,
         "count": len(rows),
@@ -704,7 +740,23 @@ def _ask_async_impl(
         # kill this pool thread silently, mailbox.send would never run, and
         # a caller polling inbox(from_agent) would wait forever with no
         # error ever surfacing anywhere.
-        jobs.mark_running(job_id)
+        if not jobs.mark_running(job_id):
+            # The queued -> running claim failed, which means a cancel landed
+            # first. Spawning anyway would run the whole expensive call while
+            # the row said cancelled - the one outcome a cancel must prevent.
+            cancelled = {
+                "ok": False,
+                "error": "job was cancelled before it started",
+                "job_id": job_id,
+                "cancelled_before_start": True,
+            }
+            if label is not None:
+                cancelled["label"] = label
+            try:
+                mailbox.send(agent, recipient, json.dumps(cancelled))
+            except Exception:  # noqa: BLE001 - notification is best effort
+                traceback.print_exc()
+            return cancelled
         try:
             result = ask_fn(
                 prompt,
@@ -716,7 +768,9 @@ def _ask_async_impl(
                 # Recorded so a cancel issued from ANOTHER session can reach a
                 # run this process is blocked on - the dispatcher is often not
                 # the one watching it.
-                on_spawn=lambda pid: jobs.set_child_pid(job_id, pid),
+                on_spawn=lambda pid: jobs.set_child_pid(
+                    job_id, pid, started_key=jobs.process_key(pid)
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - last-resort dispatch backstop
             result = {
