@@ -46,8 +46,13 @@ async def test_async_result_goes_to_this_sessions_lane(
     assert dispatched["lane"] == f"claude:{in_session}"
 
     # Addressed to the lane, not the shared name.
-    assert server.mailbox.inbox("claude", db_path=tmp_path / "mb.db") == []
-    lane_msgs = server.mailbox.inbox(f"claude:{in_session}", db_path=tmp_path / "mb.db")
+    shared_msgs, _ = server.mailbox.inbox(
+        "claude", auto_ack=False, db_path=tmp_path / "mb.db"
+    )
+    assert shared_msgs == []
+    lane_msgs, _ = server.mailbox.inbox(
+        f"claude:{in_session}", auto_ack=False, db_path=tmp_path / "mb.db"
+    )
     assert len(lane_msgs) == 1
 
     # ...but the owning session still finds it through the plain call it
@@ -83,7 +88,9 @@ async def test_ack_refuses_another_sessions_message(monkeypatch, tmp_path, in_se
     # Unqualified messages stay shared - cross-agent messaging is unaffected.
     assert (await server.ack(message_id=shared["message_id"]))["ok"] is True
 
-    still_unread = server.mailbox.inbox("claude:other.9999zzzz", db_path=db)
+    still_unread, _ = server.mailbox.inbox(
+        "claude:other.9999zzzz", auto_ack=False, db_path=db
+    )
     assert len(still_unread) == 1
 
 
@@ -215,7 +222,10 @@ def test_unlaned_process_cannot_ack_a_lane(monkeypatch, tmp_path):
     assert (
         server.mailbox.ack(bare["message_id"], lane_suffix="", db_path=db)["ok"] is True
     )
-    assert len(server.mailbox.inbox("claude:fonts.1a2b3c4d", db_path=db)) == 1
+    unacked, _ = server.mailbox.inbox(
+        "claude:fonts.1a2b3c4d", auto_ack=False, db_path=db
+    )
+    assert len(unacked) == 1
 
 
 @pytest.mark.anyio
@@ -299,6 +309,7 @@ async def test_all_ten_tools_registered():
     assert names == {
         "send",
         "inbox",
+        "peek",
         "ack",
         "history",
         "ask_hermes",
@@ -644,6 +655,96 @@ async def test_ask_claude_async_omits_label_when_not_supplied(monkeypatch, tmp_p
 
 
 @pytest.mark.anyio
+async def test_auto_ack_cannot_consume_another_sessions_lane(
+    monkeypatch, tmp_path, in_session
+):
+    """auto_ack must honour the SAME lane guard as the explicit ack tool.
+
+    ``ack`` passes this process's lane suffix and refuses a message qualified
+    to a different lane. A consuming read that skipped that guard would let
+    any process call inbox(agent="claude:other") and silently drain another
+    session's results - exactly the failure lanes were introduced to stop,
+    and reachable through the plain default now that reads consume.
+    """
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("codex", "claude:other.9999zzzz", "theirs", db_path=db)
+
+    got = await server.inbox(agent="claude:other.9999zzzz")
+    assert [m["body"] for m in got["messages"]] == ["theirs"]  # visible
+
+    # ...but NOT consumed: it is still unread for its real owner.
+    still_unread, _ = server.mailbox.inbox(
+        "claude:other.9999zzzz", auto_ack=False, db_path=db
+    )
+    assert len(still_unread) == 1
+    assert still_unread[0]["acked_at"] is None
+
+
+@pytest.mark.anyio
+async def test_inbox_truncates_oversized_bodies_and_peek_returns_them_whole(
+    monkeypatch, tmp_path
+):
+    """Bounding the message COUNT is not enough on its own: one async result
+    in the real mailbox reached 35k characters, so a small batch of them still
+    lands tens of thousands of tokens in the caller's context."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    big = "x" * (server._MAX_BODY_CHARS + 5000)
+    sent = server.mailbox.send("codex", "hermes", big, db_path=db)
+    server.mailbox.send("codex", "hermes", "small", db_path=db)
+
+    got = await server.inbox(agent="hermes")
+    assert got["truncated"] == 1
+    shortened = got["messages"][0]
+    assert len(shortened["body"]) < len(big)
+    assert shortened["body_truncated"] is True
+    assert shortened["body_length"] == len(big)
+    assert f"peek(message_id={sent['message_id']})" in shortened["body"]
+    assert got["messages"][1]["body"] == "small"  # untouched
+    assert "body_truncated" not in got["messages"][1]
+
+    # The escape hatch returns the row whole - and the stored body was never
+    # modified, only the batched view of it.
+    full = await server.peek(message_id=sent["message_id"])
+    assert full["ok"] is True
+    assert full["message"]["body"] == big
+
+
+@pytest.mark.anyio
+async def test_peek_reports_a_missing_message(monkeypatch, tmp_path):
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    got = await server.peek(message_id=999999)
+    assert got["ok"] is False and "999999" in got["error"]
+
+
+@pytest.mark.anyio
+async def test_inbox_drains_a_backlog_across_polls(monkeypatch, tmp_path):
+    """End-to-end at the tool boundary: the backlog that overflowed a real
+    agent's context must drain in bounded batches rather than arrive at once."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    for i in range(30):
+        server.mailbox.send("codex", "hermes", f"m{i}", db_path=db)
+
+    first = await server.inbox(agent="hermes", limit=10)
+    assert first["count"] == 10 and first["remaining"] == 20
+    assert [m["body"] for m in first["messages"]] == [f"m{i}" for i in range(10)]
+
+    second = await server.inbox(agent="hermes", limit=10)
+    assert [m["body"] for m in second["messages"]] == [f"m{i}" for i in range(10, 20)]
+    assert second["remaining"] == 10
+
+    third = await server.inbox(agent="hermes", limit=10)
+    assert third["remaining"] == 0
+    assert (await server.inbox(agent="hermes"))["count"] == 0
+
+    # Nothing was destroyed - history ignores acked_at and stays the recovery path.
+    hist = await server.history(agent="hermes", limit=100)
+    assert hist["count"] == 30
+
+
+@pytest.mark.anyio
 async def test_async_tools_round_trip(monkeypatch, tmp_path):
     # Exercise the actual async MCP tool wrappers (through _in_thread), not just
     # the sync _send_impl: send -> inbox -> ack -> inbox -> history end to end.
@@ -652,8 +753,12 @@ async def test_async_tools_round_trip(monkeypatch, tmp_path):
     sent = await server.send(from_agent="claude", to_agent="hermes", message="hi there")
     assert sent["ok"] is True and isinstance(sent["message_id"], int)
 
-    inb = await server.inbox(agent="hermes")
+    # auto_ack=False keeps the EXPLICIT ack below meaningful - a consuming
+    # read would ack the message first and turn `acked["ok"] is True` into a
+    # false assertion about a step that no longer does anything.
+    inb = await server.inbox(agent="hermes", auto_ack=False)
     assert inb["count"] == 1 and inb["messages"][0]["body"] == "hi there"
+    assert inb["remaining"] == 1  # nothing consumed
 
     acked = await server.ack(message_id=sent["message_id"])
     assert acked["ok"] is True
