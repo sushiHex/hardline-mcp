@@ -45,7 +45,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 def _codex_bin_root() -> Path:
@@ -245,10 +245,15 @@ def _run_cmd(
     cwd: str | None = None,
     timeout_s: int = _TIMEOUT_S,
     capture_failed_output: bool = False,
+    on_spawn: "Callable[[int], None] | None" = None,
 ) -> dict:
     """Run argv, capturing text output. Never raises — every failure mode is
     mapped to ``{"ok": False, "error": ...}`` so one dead target can't crash
     the MCP tool call.
+
+    ``on_spawn`` receives the child's pid as soon as it exists, so a durable
+    job can record it and a cancel from another process can reach a run this
+    one is blocked on.
 
     ``stdin=DEVNULL``: hardline-mcp is itself a stdio MCP server, so its stdin
     is the JSON-RPC pipe to the host agent. A spawned child must not inherit
@@ -258,18 +263,45 @@ def _run_cmd(
     default codec (cp1252 on Windows)."""
     started = time.monotonic()
     try:
-        proc = subprocess.run(
+        # Popen rather than run(): the caller needs the child's pid to record
+        # it against a durable job, so a cancel issued from another process
+        # can reach a run this one is blocked on. start_new_session puts the
+        # child in its own process group on POSIX so the whole tree is
+        # signalable (no-op on Windows, where taskkill /T does the same job).
+        proc = subprocess.Popen(
             argv,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=timeout_s,
             env=env,
             cwd=cwd,
+            start_new_session=True,
         )
+    except FileNotFoundError:
+        return {"ok": False, "error": f"command not found / not installed: {argv[0]!r}"}
+    except OSError as e:
+        return {"ok": False, "error": f"spawn failed: {e}"}
+
+    if on_spawn is not None:
+        try:
+            on_spawn(proc.pid)
+        except Exception:  # noqa: BLE001 - bookkeeping must not kill the run
+            pass
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
+        # Kill the TREE, not just the child. `claude`/`codex` are launchers
+        # that spawn the real worker, so killing the recorded pid alone left
+        # the work running invisibly after we had already given up on it.
+        _kill_tree(proc)
+        try:
+            exc.stdout, exc.stderr = proc.communicate(timeout=10)
+        except Exception:  # noqa: BLE001 - drain is best effort
+            pass
         # TimeoutExpired carries whatever the child had already written, and
         # discarding it made every timeout indistinguishable: a bare
         # "timeout after 900s" cannot tell a caller whether the agent was
@@ -297,13 +329,16 @@ def _run_cmd(
         if partial_err:
             response["partial_stderr"] = _raw_evidence(partial_err)
         return response
-    except FileNotFoundError:
-        return {"ok": False, "error": f"command not found / not installed: {argv[0]!r}"}
     except OSError as e:
-        return {"ok": False, "error": f"spawn failed: {e}"}
+        return {"ok": False, "error": f"communication failed: {e}"}
+    # NOTE: read the captured TEXT, not proc.stdout/proc.stderr - after
+    # communicate() those attributes are the closed pipe objects, and a
+    # truthiness test on them silently reports the wrong thing.
     elapsed = round(time.monotonic() - started, 1)
+    stdout = stdout or ""
+    stderr = stderr or ""
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
+        detail = (stderr or stdout).strip()
         response = {
             "ok": False,
             "error": f"exit {proc.returncode}: {detail}",
@@ -311,15 +346,39 @@ def _run_cmd(
             "elapsed_s": elapsed,
             "timeout_s": timeout_s,
         }
-        if capture_failed_output and proc.stdout:
-            response["_stdout"] = proc.stdout.strip()
+        if capture_failed_output and stdout:
+            response["_stdout"] = stdout.strip()
         return response
     return {
         "ok": True,
-        "reply": (proc.stdout or "").strip(),
+        "reply": stdout.strip(),
         "elapsed_s": elapsed,
         "timeout_s": timeout_s,
     }
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Terminate a child and everything it spawned. Best effort, never raises."""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=30,
+            )
+        else:
+            import signal
+
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+    except Exception:  # noqa: BLE001 - we are already on the failure path
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _as_text(stream: object) -> str:
@@ -717,6 +776,7 @@ def ask_codex(
     mode: str = "default",
     workdir: str | None = None,
     write: bool = False,
+    on_spawn: "Callable[[int], None] | None" = None,
 ) -> dict:
     """Query Codex with explicit routing and optional structured telemetry.
 
@@ -757,7 +817,7 @@ def ask_codex(
         return error
     argv = _prefix_for("codex") + ["--ephemeral"]
     if _is_plain_call(model, effort, mode, workdir, write):
-        return _run_agent_cmd("codex", argv + ["--", prompt])
+        return _run_agent_cmd("codex", argv + ["--", prompt], on_spawn=on_spawn)
     if model is not None:
         argv += ["--model", model]
     argv.append("--json")
@@ -828,6 +888,7 @@ def ask_codex(
             env=child_env,
             cwd=run_cwd,
             capture_failed_output=True,
+            on_spawn=on_spawn,
         )
     finally:
         if neutral_root:
@@ -949,6 +1010,7 @@ def ask_claude(
     mode: str = "default",
     workdir: str | None = None,
     write: bool = False,
+    on_spawn: "Callable[[int], None] | None" = None,
 ) -> dict:
     """Query Claude Code with optional model/effort selection and telemetry.
 
@@ -1011,6 +1073,7 @@ def ask_claude(
                 "--",
                 prompt,
             ],
+            on_spawn=on_spawn,
         )
 
     argv = _prefix_for("claude")
@@ -1063,6 +1126,7 @@ def ask_claude(
             env=child_env,
             cwd=run_cwd,
             capture_failed_output=True,
+            on_spawn=on_spawn,
         )
     finally:
         if neutral_cwd:

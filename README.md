@@ -44,12 +44,25 @@ splits the problem:
 | `ack(message_id)` | Mark read (idempotent). |
 | `history(limit=50, agent=None, before_id=None)` | Recent messages newest-first; `agent` matches sender or recipient. Never acks and never hides acked messages, so it is the recovery path for anything `inbox` consumed. Row count, each body, and the aggregate response are all capped; page with the returned `next_before_id` while `has_more`. |
 | `list_agents()` | The addressable roster, every recipient/sender name the mailbox has actually seen (including lanes, with unread counts), and **your own identity** — the answer to "what do I pass as `from_agent`". |
-| `server_info()` | Version, module path, db path, effective limits, per-agent timeout budgets, and whether write is enabled — for answering "is the fix live?" in one call. |
+| `server_info()` | Version, schema version, module path, db path, pid, effective limits, per-agent timeout budgets, job counts, and whether write is enabled — for answering "is the fix live?" in one call. |
+| `job_status(job_id)` | State and timings of one dispatch: `queued` / `running` / `completed` / `failed` / `cancelled` / `lost`. Answers "is it still running?", which polling an inbox cannot. |
+| `job_result(job_id)` | The terminal result in full. Recorded against the job *before* delivery is attempted, so it survives the message being consumed, lost, or never sent. |
+| `job_cancel(job_id)` | Stop a running dispatch and kill its whole child tree. Works across processes — one session can cancel a job another started. |
+| `list_jobs(state=None, agent=None, requester=None, active_only=false, limit=25)` | Recent jobs newest-first, with a state-count summary. `active_only` answers "what is still in flight?". |
 | `ask_hermes(prompt)` | Live query → `hermes chat -Q -q`. |
 | `ask_codex(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Ephemeral live query → `codex exec` (omitted `model` defers to Codex's own configured default); optional routing, isolation, telemetry, and opt-in write access. |
 | `ask_codex_async(prompt, from_agent, label=None, model=None, effort="default", mode="default", workdir=None, write=False)` | Fire-and-forget `ask_codex` dispatched on a bounded background thread pool; result is delivered through the mailbox (`sender="codex"`, `recipient=from_agent`) — poll it with `inbox`. |
 | `ask_claude(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Live query → `claude -p` (omitted `model` defers to Claude Code's own configured default); optional routing, isolation, telemetry, and opt-in write access (parity with `ask_codex`). |
 | `ask_claude_async(prompt, from_agent, label=None, model=None, effort="default", mode="default", workdir=None, write=False)` | Fire-and-forget `ask_claude` dispatched on a bounded background thread pool; result is delivered through the mailbox (`sender="claude"`, `recipient=from_agent`) — poll it with `inbox`. |
+
+Async dispatch is backed by a durable job. `ask_*_async` returns a `job_id`
+that identifies the run across a hardline-mcp restart — a label is a
+correlation aid the caller picks and may reuse, a job id is an identity. The
+row records what was asked, who asked, which process owns it, every state
+transition, and the terminal result. A job whose owning process exits without
+finishing is reported `lost` rather than vanishing; that state is resolved on
+read, because the process that would have written it is precisely the one that
+died.
 
 A timeout no longer reports only `timeout after Ns`. It returns `timed_out`,
 `timeout_s`, `elapsed_s`, `timeout_layer`, `stdout_chars`/`stderr_chars`,

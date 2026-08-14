@@ -24,17 +24,78 @@ class _FakeCompleted:
         self.returncode = returncode
 
 
+class _FakePopen:
+    """Stands in for the real child process.
+
+    ``_run_cmd`` moved from ``subprocess.run`` to ``Popen`` so a job can record
+    the child's pid and a cancel from another process can reach it. This fake
+    has to follow, and it must be complete: while it was still patching
+    ``run``, every one of these tests spawned a REAL ``claude``/``codex`` and
+    the suite hung on a 900-second timeout.
+    """
+
+    FAKE_PID = 424242
+
+    def __init__(self, cmd, kwargs, result, exc, calls):
+        self.pid = self.FAKE_PID
+        self.returncode = None
+        self._result = result
+        self._exc = exc
+        self._calls = calls
+        self._drain = None
+        self.killed = False
+        # The real Popen exposes these as pipes; nothing under test reads
+        # them after communicate(), and that is deliberately what the code
+        # must NOT do (they are closed objects, not the captured text).
+        self.stdout = None
+        self.stderr = None
+
+    def communicate(self, timeout=None):
+        # The timeout moved from run(timeout=) to communicate(timeout=), so
+        # record it where the assertions already look for it.
+        if self._calls:
+            self._calls[-1]["kwargs"]["timeout"] = timeout
+        if self._exc is not None:
+            exc, self._exc = self._exc, None  # raise once; the drain must not
+            # With Popen, a TimeoutExpired from communicate() does NOT carry
+            # the partial output — the caller kills the child and drains. Model
+            # that: this second call is the drain, and it yields exactly what
+            # the child had buffered.
+            self._drain = (getattr(exc, "stdout", None), getattr(exc, "stderr", None))
+            raise exc
+        if self._drain is not None:
+            return self._drain
+        result = self._result if self._result is not None else _FakeCompleted(stdout="ok")
+        self.returncode = result.returncode
+        return result.stdout, result.stderr
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 def _capture_run(monkeypatch, result=None, exc=None):
-    """Patch adapters._run_cmd's subprocess.run; record the argv it was given."""
+    """Patch adapters._run_cmd's subprocess.Popen; record the argv it was given.
+
+    A spawn-time failure (FileNotFoundError/OSError) is raised from the
+    constructor and a TimeoutExpired from communicate(), matching where the
+    real subprocess raises each.
+    """
     calls = []
 
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         calls.append({"cmd": cmd, "kwargs": kwargs})
-        if exc is not None:
+        if exc is not None and isinstance(exc, OSError):
             raise exc
-        return result if result is not None else _FakeCompleted(stdout="ok")
+        return _FakePopen(cmd, kwargs, result, exc, calls)
 
-    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+    monkeypatch.setattr(adapters.subprocess, "Popen", fake_popen)
+    # taskkill on the timeout path must never reach a real process either.
+    monkeypatch.setattr(
+        adapters, "_kill_tree", lambda proc: setattr(proc, "killed", True)
+    )
     return calls
 
 

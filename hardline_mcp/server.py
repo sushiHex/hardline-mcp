@@ -21,6 +21,7 @@ from __future__ import annotations
 import atexit
 import functools
 import json
+import os
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -31,7 +32,7 @@ from typing import Literal
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 
-from . import adapters, mailbox
+from . import adapters, jobs, mailbox
 
 mcp = FastMCP("hardline-mcp")
 
@@ -382,8 +383,11 @@ async def server_info() -> dict:
     write_ok, write_err = adapters._write_enabled()
     return {
         "version": pkg_version,
+        "schema_version": mailbox.SCHEMA_VERSION,
         "module_path": str(Path(mailbox.__file__).resolve()),
         "db_path": str(mailbox._resolve_db(None)),
+        "pid": os.getpid(),
+        "jobs": await _in_thread(jobs.counts),
         "limits": {
             "inbox_default": mailbox.DEFAULT_INBOX_LIMIT,
             "inbox_max": mailbox.MAX_INBOX_LIMIT,
@@ -497,6 +501,94 @@ async def history(
 
 
 @mcp.tool()
+async def job_status(job_id: str) -> dict:
+    """State and timings of one async dispatch, without consuming anything.
+
+    The lifecycle answer the mailbox could not give: polling an inbox tells
+    you a result has not arrived, never whether the work is still running,
+    already finished, or died with its owner.
+
+    ``state`` is one of queued / running / completed / failed / cancelled /
+    lost. ``lost`` is resolved here rather than written by the process that
+    died — it means the owner exited without recording a terminal state.
+    """
+    job = await _in_thread(jobs.get, job_id)
+    if job is None:
+        return {"ok": False, "error": f"no job {job_id!r}"}
+    return {"ok": True, "job": job}
+
+
+@mcp.tool()
+async def job_result(job_id: str) -> dict:
+    """The terminal result of a finished job, in full and never truncated.
+
+    Survives the mailbox entirely: even if the delivered message was consumed
+    by another read, lost with an interrupted response, or never sent because
+    delivery itself failed, the result is recorded against the job before
+    delivery is attempted.
+    """
+    job = await _in_thread(jobs.get, job_id)
+    if job is None:
+        return {"ok": False, "error": f"no job {job_id!r}"}
+    if job["state"] not in jobs.TERMINAL_STATES:
+        return {
+            "ok": False,
+            "error": f"job is {job['state']}, not finished",
+            "state": job["state"],
+        }
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "state": job["state"],
+        "result": job.get("result"),
+        "error": job.get("error"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+    }
+
+
+@mcp.tool()
+async def job_cancel(job_id: str) -> dict:
+    """Stop a running dispatch and mark it cancelled.
+
+    Works across processes: cancellation goes through the child's recorded
+    pid, not an in-process handle, so a session can stop a job another session
+    started. The whole child tree is killed — ``claude``/``codex`` are
+    launchers, so killing only the recorded pid leaves the real worker running
+    invisibly.
+    """
+    return await _in_thread(jobs.request_cancel, job_id)
+
+
+@mcp.tool()
+async def list_jobs(
+    state: str | None = None,
+    agent: str | None = None,
+    requester: str | None = None,
+    active_only: bool = False,
+    limit: int = jobs.DEFAULT_JOB_LIMIT,
+) -> dict:
+    """Recent jobs, newest first, with a state-count summary.
+
+    ``active_only`` narrows to queued/running — the "what is still in flight?"
+    question. Bounded like every other read here.
+    """
+    rows = await _in_thread(
+        jobs.listing,
+        state=state,
+        agent=agent,
+        requester=requester,
+        active_only=active_only,
+        limit=limit,
+    )
+    return {
+        "jobs": rows,
+        "count": len(rows),
+        "counts_by_state": await _in_thread(jobs.counts),
+    }
+
+
+@mcp.tool()
 async def ask_hermes(prompt: str) -> dict:
     """Ask the Hermes agent (MrAnderson) a question and wait for its reply.
 
@@ -587,6 +679,23 @@ def _ask_async_impl(
     # is what let another session ack it out of sight.
     recipient = adapters.lane_for(from_agent)
 
+    # Durable identity BEFORE the work starts. Fire-and-forget meant a restart
+    # lost the task with no record it had existed, and the only lifecycle API
+    # was polling a mailbox that cannot answer "is it still running?".
+    job_id = jobs.create(
+        agent=agent,
+        requester=recipient,
+        label=label,
+        request={
+            "prompt_chars": len(prompt),
+            "model": model,
+            "effort": effort,
+            "mode": mode,
+            "workdir": workdir,
+            "write": write,
+        },
+    )
+
     def _run() -> dict:
         # ask_fn (adapters.ask_claude/ask_codex) is designed to never raise -
         # every failure mode it recognizes already comes back as an
@@ -595,6 +704,7 @@ def _ask_async_impl(
         # kill this pool thread silently, mailbox.send would never run, and
         # a caller polling inbox(from_agent) would wait forever with no
         # error ever surfacing anywhere.
+        jobs.mark_running(job_id)
         try:
             result = ask_fn(
                 prompt,
@@ -603,6 +713,10 @@ def _ask_async_impl(
                 mode=mode,
                 workdir=workdir,
                 write=write,
+                # Recorded so a cancel issued from ANOTHER session can reach a
+                # run this process is blocked on - the dispatcher is often not
+                # the one watching it.
+                on_spawn=lambda pid: jobs.set_child_pid(job_id, pid),
             )
         except Exception as exc:  # noqa: BLE001 - last-resort dispatch backstop
             result = {
@@ -612,6 +726,14 @@ def _ask_async_impl(
             }
         if label is not None:
             result["label"] = label
+        result["job_id"] = job_id
+        # Terminal state recorded before delivery: the mailbox send below can
+        # fail, and a job whose result exists only in a message that never
+        # arrived is the failure this table exists to prevent.
+        try:
+            jobs.finish(job_id, result=result)
+        except Exception:  # noqa: BLE001 - bookkeeping must not eat the result
+            traceback.print_exc()
         # The delivery itself was outside the backstop above, so a failure
         # here - lock contention, a full disk, an unserializable result -
         # discarded an expensive completed run inside an unobserved future,
@@ -661,10 +783,20 @@ def _ask_async_impl(
             "ok": False,
             "dispatched": False,
             "error": early.get("error", f"{agent} dispatch failed immediately"),
+            "job_id": job_id,
             "label": label,
             "lane": recipient,
         }
-    return {"ok": True, "dispatched": True, "label": label, "lane": recipient}
+    return {
+        "ok": True,
+        "dispatched": True,
+        # The durable handle. A label is a correlation aid the caller chooses
+        # and may reuse; this identifies the run even across a restart.
+        "job_id": job_id,
+        "label": label,
+        "lane": recipient,
+        "track_with": f"job_status(job_id={job_id!r})",
+    }
 
 
 @mcp.tool()

@@ -36,6 +36,11 @@ def _resolve_db(db_path: Optional[Path]) -> Path:
     return Path(env) if env else _DEFAULT_PATH
 
 
+# Bumped when a table is added or a column's meaning changes. Recorded in
+# `meta` so a running server can report what store it is talking to rather
+# than leaving "is this the new schema?" to be inferred from behaviour.
+SCHEMA_VERSION = 2
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +49,34 @@ CREATE TABLE IF NOT EXISTS messages (
     body       TEXT NOT NULL,
     created_at TEXT NOT NULL,
     acked_at   TEXT
-)
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- Async dispatch used to be fire-and-forget and process-local: a restart lost
+-- the task with no record it had ever existed, and a timeout produced a result
+-- with nothing in it. A job row is the durable identity that survives both.
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id       TEXT PRIMARY KEY,
+    agent        TEXT NOT NULL,
+    requester    TEXT NOT NULL,
+    label        TEXT,
+    state        TEXT NOT NULL,
+    request      TEXT NOT NULL,
+    result       TEXT,
+    error        TEXT,
+    owner_pid    INTEGER NOT NULL,
+    child_pid    INTEGER,
+    created_at   TEXT NOT NULL,
+    started_at   TEXT,
+    finished_at  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs (state, created_at);
+CREATE INDEX IF NOT EXISTS jobs_requester_idx ON jobs (requester, created_at);
 """
 
 # One-time per-db init (schema + WAL) is guarded so it happens exactly once
@@ -111,7 +143,16 @@ def _ensure_initialized(db_path: Path) -> None:
             try:
                 with closing(sqlite3.connect(str(db_path), timeout=10.0)) as conn:
                     conn.execute("PRAGMA journal_mode=WAL")
-                    conn.execute(_SCHEMA)
+                    # executescript, not execute: the schema is several
+                    # statements now. Every one is IF NOT EXISTS, so this stays
+                    # idempotent and an existing messages-only store gains the
+                    # new tables without a migration step.
+                    conn.executescript(_SCHEMA)
+                    conn.execute(
+                        "INSERT INTO meta (key, value) VALUES ('schema_version', ?)"
+                        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (str(SCHEMA_VERSION),),
+                    )
                     conn.commit()
                 break
             except sqlite3.OperationalError as exc:
