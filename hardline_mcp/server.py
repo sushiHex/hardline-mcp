@@ -25,6 +25,7 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from pathlib import Path
 from typing import Literal
 
 import anyio.to_thread
@@ -63,35 +64,91 @@ _ASYNC_EARLY_FAILURE_S = 2.0
 _MAX_BODY_CHARS = 4000
 _TRUNCATION_NOTE = "\n...[{n} characters truncated - call peek(message_id={mid}) for the full body]"
 
+# Ceiling on a WHOLE response, not just one body. Capping per-message was not
+# enough: a 50-row history page of 4000-char bodies is ~200KB, which the host
+# then truncated itself - so the response was cut anyway and the `truncated`
+# flag understated it. Bound the aggregate and the per-body cap becomes an
+# upper bound rather than the actual size.
+_MAX_RESPONSE_CHARS = 60_000
+# Never shrink a body below this; past a point an excerpt stops carrying any
+# signal and peek() is the honest answer instead.
+_MIN_BODY_CHARS = 400
+
 _async_executor = ThreadPoolExecutor(
     max_workers=_ASYNC_MAX_WORKERS, thread_name_prefix="hardline-async"
 )
 
 
-def _truncate_bodies(messages: list[dict]) -> tuple[list[dict], int]:
-    """Shorten oversized bodies for a batch read. Returns (messages, n_truncated).
+def _shorten(msg: dict, cap: int) -> dict:
+    """Return a copy of ``msg`` with its body capped at ``cap`` characters.
 
-    Copies each row it shortens rather than mutating in place - the caller's
-    dicts come straight from the db layer and nothing downstream should see a
-    body that silently lost content.
+    Copies rather than mutating in place - the caller's dicts come straight
+    from the db layer and nothing downstream should see a body that silently
+    lost content. The stored row is never touched.
     """
-    out: list[dict] = []
-    truncated = 0
-    for msg in messages:
-        body = msg.get("body") or ""
-        if len(body) <= _MAX_BODY_CHARS:
-            out.append(msg)
-            continue
-        dropped = len(body) - _MAX_BODY_CHARS
-        msg = dict(msg)
-        msg["body"] = body[:_MAX_BODY_CHARS] + _TRUNCATION_NOTE.format(
-            n=dropped, mid=msg.get("message_id")
-        )
-        msg["body_truncated"] = True
-        msg["body_length"] = len(body)
-        out.append(msg)
-        truncated += 1
-    return out, truncated
+    body = msg.get("body") or ""
+    if len(body) <= cap:
+        return msg
+    out = dict(msg)
+    out["body"] = body[:cap] + _TRUNCATION_NOTE.format(
+        n=len(body) - cap, mid=msg.get("message_id")
+    )
+    out["body_truncated"] = True
+    out["body_length"] = len(body)
+    return out
+
+
+def _fit_response(
+    messages: list[dict],
+    *,
+    budget: int = _MAX_RESPONSE_CHARS,
+    allow_drop: bool,
+) -> tuple[list[dict], int, int]:
+    """Fit a batch inside an aggregate character budget.
+
+    Returns ``(messages, truncated, dropped)``.
+
+    Two strategies, because the two callers have different obligations:
+
+    ``allow_drop=False`` (inbox) SHRINKS. A consuming read must hand back
+    every message it consumed - dropping one would lose it from the caller's
+    view while the mailbox considers it delivered - so the per-body cap is
+    lowered until the batch fits, floored at ``_MIN_BODY_CHARS``.
+
+    ``allow_drop=True`` (history) TRUNCATES THE PAGE. Nothing is consumed, so
+    the honest response is a shorter page plus a cursor to continue from.
+    """
+    if not messages:
+        return messages, 0, 0
+
+    cap = _MAX_BODY_CHARS
+    fitted = [_shorten(m, cap) for m in messages]
+    total = sum(len(m.get("body") or "") for m in fitted)
+
+    if total > budget and not allow_drop:
+        # Shrink every body to an equal share, floored so an excerpt still
+        # carries signal. A batch of many large bodies can still exceed the
+        # budget at the floor; that is bounded and preferred to losing a
+        # message the mailbox has already marked delivered.
+        share = max(_MIN_BODY_CHARS, budget // max(1, len(messages)))
+        cap = min(cap, share)
+        fitted = [_shorten(m, cap) for m in messages]
+
+    dropped = 0
+    if allow_drop:
+        kept: list[dict] = []
+        running = 0
+        for msg in fitted:
+            size = len(msg.get("body") or "")
+            if kept and running + size > budget:
+                break
+            kept.append(msg)
+            running += size
+        dropped = len(fitted) - len(kept)
+        fitted = kept
+
+    truncated = sum(1 for m in fitted if m.get("body_truncated"))
+    return fitted, truncated, dropped
 
 
 def _drain_async_executor_at_exit() -> None:
@@ -239,12 +296,107 @@ async def inbox(
         # cannot drain a lane this session does not own.
         lane_suffix=adapters.lane_suffix(),
     )
-    msgs, truncated = _truncate_bodies(msgs)
-    return {
+    msgs, truncated, _ = _fit_response(msgs, allow_drop=False)
+    response = {
         "messages": msgs,
         "count": len(msgs),
         "remaining": remaining,
         "truncated": truncated,
+    }
+    if msgs:
+        # Recovery cursor. A consuming read commits the ack before this
+        # response can reach the caller, so if the enclosing response is lost
+        # the batch is read but unseen. These ids make recovering it a
+        # mechanical call rather than a search:
+        #   history(agent=..., before_id=last_message_id + 1)
+        # re-fetches exactly this batch, because history ignores acked_at.
+        response["first_message_id"] = msgs[0]["message_id"]
+        response["last_message_id"] = msgs[-1]["message_id"]
+        response["recover_with"] = (
+            f"history(agent={agent!r}, before_id={msgs[-1]['message_id'] + 1})"
+        )
+    return response
+
+
+@mcp.tool()
+async def list_agents() -> dict:
+    """Who can be addressed, what names carry traffic, and who YOU are.
+
+    Agent identity was undiscoverable by inspection: ``history`` filtered by a
+    name that carries no traffic returns an empty list, which reads as "no
+    messages" rather than "wrong name" — one agent searched its own display
+    name before learning its mailbox identity was ``hermes``.
+
+    ``agents`` is the dispatchable roster. ``observed`` is every recipient the
+    mailbox has actually seen, including lane-qualified forms, with unread
+    counts. ``you`` is this process's own identity, which is the answer to
+    "what do I pass as from_agent".
+    """
+    observed = await _in_thread(mailbox.recipients)
+    seen_senders = await _in_thread(mailbox.senders)
+    suffix = adapters.lane_suffix()
+    return {
+        "agents": list(adapters.known_agents()),
+        "you": {
+            "lane_suffix": suffix or None,
+            "lane_for_claude": adapters.lane_for("claude"),
+            "note": (
+                "Pass a bare roster name as from_agent; results are delivered "
+                "to your lane automatically."
+            ),
+        },
+        "observed_recipients": observed,
+        "observed_senders": seen_senders,
+        "recipient_syntax": (
+            "'<agent>' addresses everyone with that name; '<agent>:<lane>' "
+            "addresses one session. inbox('<agent>') reads the bare name AND "
+            "your own lane. Only the lane's owner may consume a "
+            "lane-qualified message."
+        ),
+    }
+
+
+@mcp.tool()
+async def server_info() -> dict:
+    """Version, limits, and timeout budgets of THIS running hardline-mcp.
+
+    Deployment here is an editable install, so a process runs whatever the
+    working tree said when it spawned — "is the fix live?" has repeatedly been
+    answered by counting processes and diffing tool rosters. Reporting the
+    version and the effective limits makes that one call.
+    """
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        pkg_version = _pkg_version("hardline-mcp")
+    except Exception:  # noqa: BLE001 - version is diagnostic, never fatal
+        pkg_version = "unknown"
+
+    timeouts: dict[str, object] = {}
+    for agent in adapters.known_agents():
+        try:
+            timeouts[agent] = adapters._timeout_for(agent)
+        except ValueError as exc:  # a bad HARDLINE_*_TIMEOUT_S env value
+            timeouts[agent] = f"invalid: {exc}"
+
+    write_ok, write_err = adapters._write_enabled()
+    return {
+        "version": pkg_version,
+        "module_path": str(Path(mailbox.__file__).resolve()),
+        "db_path": str(mailbox._resolve_db(None)),
+        "limits": {
+            "inbox_default": mailbox.DEFAULT_INBOX_LIMIT,
+            "inbox_max": mailbox.MAX_INBOX_LIMIT,
+            "history_default": mailbox.DEFAULT_HISTORY_LIMIT,
+            "history_max": mailbox.MAX_HISTORY_LIMIT,
+            "max_body_chars": _MAX_BODY_CHARS,
+            "min_body_chars": _MIN_BODY_CHARS,
+            "max_response_chars": _MAX_RESPONSE_CHARS,
+        },
+        "timeouts_s": timeouts,
+        "async_max_workers": _ASYNC_MAX_WORKERS,
+        "write_enabled": write_ok,
+        "write_note": write_err,
     }
 
 
@@ -298,15 +450,47 @@ async def history(
     ``peek(message_id)`` for one body in full.
 
     ``before_id`` pages backward: pass the lowest ``message_id`` you have seen
-    to get the page before it. Since ``inbox`` consumes what it returns, this
-    is the route to a result whose response was lost — and without paging,
-    anything older than one capped page was unreachable.
+    to get the page before it — or just use the returned ``next_before_id``.
+    Since ``inbox`` consumes what it returns, this is the route to a result
+    whose response was lost, and without paging anything older than one capped
+    page was unreachable.
 
-    Returns ``{"messages", "count", "truncated"}``.
+    The WHOLE response is capped, not only each body: a full page of
+    4000-char bodies is ~200KB, which the host truncated itself, so the
+    response was cut anyway and ``truncated`` understated it. When the cap
+    bites, the page is shortened and ``next_before_id`` continues from there.
+
+    Returns ``{"messages", "count", "truncated", "dropped", "next_before_id",
+    "has_more"}``.
     """
     msgs = await _in_thread(mailbox.history, limit, agent, before_id=before_id)
-    msgs, truncated = _truncate_bodies(msgs)
-    return {"messages": msgs, "count": len(msgs), "truncated": truncated}
+    full_page = len(msgs)
+    msgs, truncated, dropped = _fit_response(msgs, allow_drop=True)
+    response = {
+        "messages": msgs,
+        "count": len(msgs),
+        "truncated": truncated,
+        "dropped": dropped,
+    }
+    if msgs:
+        # Always present, not only when capped, so paging is one uniform loop
+        # rather than a special case the caller has to detect.
+        response["next_before_id"] = msgs[-1]["message_id"]
+    # More to fetch if the aggregate cap bit, or the page came back full.
+    response["has_more"] = bool(dropped) or full_page >= max(1, min(limit, mailbox.MAX_HISTORY_LIMIT))
+    if not msgs and agent is not None:
+        # An empty page for a filtered query is ambiguous: no traffic, or the
+        # wrong name? That ambiguity cost real time — an agent filtered on its
+        # display name, got nothing, and had no way to tell the name was wrong.
+        # Only answer when the name genuinely carries no traffic.
+        known = set(adapters.known_agents())
+        if adapters.base_agent(agent) not in known:
+            response["hint"] = (
+                f"{agent!r} is not a known agent and has no messages; "
+                f"addressable agents are {sorted(known)}. "
+                "Call list_agents() for the names actually in use."
+            )
+    return response
 
 
 # ── live query tools ─────────────────────────────────────────────────────────
@@ -380,6 +564,7 @@ def _ask_async_impl(
     label: str | None,
     model: str | None,
     effort: str,
+    mode: str,
     workdir: str | None,
     write: bool,
 ) -> dict:
@@ -412,7 +597,12 @@ def _ask_async_impl(
         # error ever surfacing anywhere.
         try:
             result = ask_fn(
-                prompt, model=model, effort=effort, workdir=workdir, write=write
+                prompt,
+                model=model,
+                effort=effort,
+                mode=mode,
+                workdir=workdir,
+                write=write,
             )
         except Exception as exc:  # noqa: BLE001 - last-resort dispatch backstop
             result = {
@@ -484,6 +674,7 @@ async def ask_codex_async(
     label: str | None = None,
     model: str | None = None,
     effort: CodexEffort = "default",
+    mode: CodexMode = "default",
     workdir: str | None = None,
     write: bool = False,
 ) -> dict:
@@ -496,6 +687,9 @@ async def ask_codex_async(
     supplied (use it to match results when firing several concurrent
     dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
     persisted, so a hardline-mcp restart before completion loses the task.
+
+    ``mode`` mirrors ``ask_codex`` — background review is exactly where
+    advisory isolation is wanted, and omitting it here was a parity gap.
     """
     return await _in_thread(
         _ask_async_impl,
@@ -506,6 +700,7 @@ async def ask_codex_async(
         label=label,
         model=model,
         effort=effort,
+        mode=mode,
         workdir=workdir,
         write=write,
     )
@@ -567,6 +762,7 @@ async def ask_claude_async(
     label: str | None = None,
     model: str | None = None,
     effort: ClaudeEffort = "default",
+    mode: ClaudeMode = "default",
     workdir: str | None = None,
     write: bool = False,
 ) -> dict:
@@ -579,6 +775,9 @@ async def ask_claude_async(
     supplied (use it to match results when firing several concurrent
     dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
     persisted, so a hardline-mcp restart before completion loses the task.
+
+    ``mode`` mirrors ``ask_claude`` — background review is exactly where
+    advisory isolation is wanted, and omitting it here was a parity gap.
     """
     return await _in_thread(
         _ask_async_impl,
@@ -589,6 +788,7 @@ async def ask_claude_async(
         label=label,
         model=model,
         effort=effort,
+        mode=mode,
         workdir=workdir,
         write=write,
     )

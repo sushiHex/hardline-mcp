@@ -39,15 +39,23 @@ splits the problem:
 | Tool | Behavior |
 | --- | --- |
 | `send(from_agent, to_agent, message, deliver=false)` | Persist; if `deliver`, also push to the recipient's native CLI. |
-| `inbox(agent, unread_only=true, limit=25, auto_ack=true)` | One bounded batch addressed to `agent`, oldest first. Consumes what it returns so each poll advances; returns `remaining` — poll again while it's non-zero. Oversized bodies are truncated. |
+| `inbox(agent, unread_only=true, limit=25, auto_ack=true)` | One bounded batch addressed to `agent`, oldest first. Consumes what it returns so each poll advances; returns `remaining` — poll again while it's non-zero. The whole response is capped, not just each body, and it returns `first_message_id` / `last_message_id` / `recover_with` so a lost response is recoverable. |
 | `peek(message_id)` | One message with its body in full, never truncated and never acked. |
 | `ack(message_id)` | Mark read (idempotent). |
-| `history(limit=50, agent=None, before_id=None)` | Recent messages newest-first; `agent` matches sender or recipient. Never acks and never hides acked messages, so it is the recovery path for anything `inbox` consumed. Capped at `MAX_HISTORY_LIMIT`; bodies truncated like `inbox`. `before_id` pages backward — pass the lowest `message_id` you have seen. |
+| `history(limit=50, agent=None, before_id=None)` | Recent messages newest-first; `agent` matches sender or recipient. Never acks and never hides acked messages, so it is the recovery path for anything `inbox` consumed. Row count, each body, and the aggregate response are all capped; page with the returned `next_before_id` while `has_more`. |
+| `list_agents()` | The addressable roster, every recipient/sender name the mailbox has actually seen (including lanes, with unread counts), and **your own identity** — the answer to "what do I pass as `from_agent`". |
+| `server_info()` | Version, module path, db path, effective limits, per-agent timeout budgets, and whether write is enabled — for answering "is the fix live?" in one call. |
 | `ask_hermes(prompt)` | Live query → `hermes chat -Q -q`. |
 | `ask_codex(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Ephemeral live query → `codex exec` (omitted `model` defers to Codex's own configured default); optional routing, isolation, telemetry, and opt-in write access. |
-| `ask_codex_async(prompt, from_agent, label=None, model=None, effort="default", workdir=None, write=False)` | Fire-and-forget `ask_codex` dispatched on a bounded background thread pool; result is delivered through the mailbox (`sender="codex"`, `recipient=from_agent`) — poll it with `inbox`. |
+| `ask_codex_async(prompt, from_agent, label=None, model=None, effort="default", mode="default", workdir=None, write=False)` | Fire-and-forget `ask_codex` dispatched on a bounded background thread pool; result is delivered through the mailbox (`sender="codex"`, `recipient=from_agent`) — poll it with `inbox`. |
 | `ask_claude(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Live query → `claude -p` (omitted `model` defers to Claude Code's own configured default); optional routing, isolation, telemetry, and opt-in write access (parity with `ask_codex`). |
-| `ask_claude_async(prompt, from_agent, label=None, model=None, effort="default", workdir=None, write=False)` | Fire-and-forget `ask_claude` dispatched on a bounded background thread pool; result is delivered through the mailbox (`sender="claude"`, `recipient=from_agent`) — poll it with `inbox`. |
+| `ask_claude_async(prompt, from_agent, label=None, model=None, effort="default", mode="default", workdir=None, write=False)` | Fire-and-forget `ask_claude` dispatched on a bounded background thread pool; result is delivered through the mailbox (`sender="claude"`, `recipient=from_agent`) — poll it with `inbox`. |
+
+A timeout no longer reports only `timeout after Ns`. It returns `timed_out`,
+`timeout_s`, `elapsed_s`, `timeout_layer`, `stdout_chars`/`stderr_chars`,
+`produced_output`, and the `partial_stdout`/`partial_stderr` the child had
+already written — so a healthy-but-slow agent is distinguishable from a wedged
+one, and a partially complete answer is not thrown away.
 
 Agents are the fixed set `claude`, `hermes`, `codex`. Identity is self-declared
 (`from_agent`) — convention, not enforced auth; every process runs as the same

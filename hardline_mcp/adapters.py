@@ -43,6 +43,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -255,6 +256,7 @@ def _run_cmd(
     ``errors``: agent output is often non-ASCII (emoji, box-drawing); decode
     as UTF-8 and replace undecodable bytes rather than crash on the platform
     default codec (cp1252 on Windows)."""
+    started = time.monotonic()
     try:
         proc = subprocess.run(
             argv,
@@ -267,19 +269,71 @@ def _run_cmd(
             env=env,
             cwd=cwd,
         )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"timeout after {timeout_s}s"}
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired carries whatever the child had already written, and
+        # discarding it made every timeout indistinguishable: a bare
+        # "timeout after 900s" cannot tell a caller whether the agent was
+        # healthy-but-slow or wedged from the first second, and it threw away
+        # a partially complete answer that had really been produced.
+        elapsed = time.monotonic() - started
+        partial_out = _as_text(exc.stdout)
+        partial_err = _as_text(exc.stderr)
+        response = {
+            "ok": False,
+            "error": f"timeout after {timeout_s}s",
+            "timed_out": True,
+            "timeout_s": timeout_s,
+            "elapsed_s": round(elapsed, 1),
+            "timeout_layer": "subprocess",
+            "stdout_chars": len(partial_out),
+            "stderr_chars": len(partial_err),
+            # The cheap slow-vs-wedged signal available without streaming:
+            # a child that emitted nothing at all in the whole budget looks
+            # very different from one cut off mid-answer.
+            "produced_output": bool(partial_out or partial_err),
+        }
+        if partial_out:
+            response["partial_stdout"] = _raw_evidence(partial_out)
+        if partial_err:
+            response["partial_stderr"] = _raw_evidence(partial_err)
+        return response
     except FileNotFoundError:
         return {"ok": False, "error": f"command not found / not installed: {argv[0]!r}"}
     except OSError as e:
         return {"ok": False, "error": f"spawn failed: {e}"}
+    elapsed = round(time.monotonic() - started, 1)
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
-        response = {"ok": False, "error": f"exit {proc.returncode}: {detail}"}
+        response = {
+            "ok": False,
+            "error": f"exit {proc.returncode}: {detail}",
+            "exit_code": proc.returncode,
+            "elapsed_s": elapsed,
+            "timeout_s": timeout_s,
+        }
         if capture_failed_output and proc.stdout:
             response["_stdout"] = proc.stdout.strip()
         return response
-    return {"ok": True, "reply": (proc.stdout or "").strip()}
+    return {
+        "ok": True,
+        "reply": (proc.stdout or "").strip(),
+        "elapsed_s": elapsed,
+        "timeout_s": timeout_s,
+    }
+
+
+def _as_text(stream: object) -> str:
+    """Normalize a TimeoutExpired stream to str.
+
+    ``text=True`` normally yields str, but TimeoutExpired's payload comes
+    from a partially drained pipe and is bytes on some paths/platforms, so
+    decode defensively rather than crash while reporting a timeout.
+    """
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return str(stream)
 
 
 def _run_agent_cmd(agent: str, argv: list[str], **kwargs) -> dict:

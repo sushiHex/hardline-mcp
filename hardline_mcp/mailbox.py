@@ -338,6 +338,46 @@ def inbox(
         return messages, remaining
 
 
+def recipients(*, db_path: Optional[Path] = None) -> list[dict]:
+    """Every recipient name the mailbox has actually seen, with counts.
+
+    Exists because agent identity was undiscoverable: ``history`` filtered by
+    a name that carries no traffic returns an empty list, which is
+    indistinguishable from "no messages" - one agent searched its own display
+    name for a while before learning its mailbox identity was ``hermes``.
+    Reporting the names in use turns that guess into a lookup.
+    """
+    db_path = _resolve_db(db_path)
+    with closing(_connect(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT recipient, COUNT(*) AS total,"
+            " SUM(CASE WHEN acked_at IS NULL THEN 1 ELSE 0 END) AS unread,"
+            " MAX(created_at) AS newest"
+            " FROM messages GROUP BY recipient ORDER BY recipient"
+        ).fetchall()
+        return [
+            {
+                "recipient": r["recipient"],
+                "total": r["total"],
+                "unread": r["unread"] or 0,
+                "newest": r["newest"],
+            }
+            for r in rows
+        ]
+
+
+def senders(*, db_path: Optional[Path] = None) -> list[str]:
+    """Distinct sender names the mailbox has seen."""
+    db_path = _resolve_db(db_path)
+    with closing(_connect(db_path)) as conn:
+        return [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT sender FROM messages ORDER BY sender"
+            ).fetchall()
+        ]
+
+
 def peek(message_id: int, *, db_path: Optional[Path] = None) -> Optional[dict]:
     """One message by id, or None. Lets a caller check who a message belongs
     to before acting on it (see ``ack``'s lane guard)."""

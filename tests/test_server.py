@@ -303,7 +303,9 @@ def test_async_executor_shutdown_is_registered_so_teardown_is_bounded():
 
 
 @pytest.mark.anyio
-async def test_all_ten_tools_registered():
+async def test_tool_roster_is_exactly_this():
+    # Named for the roster rather than a count: the count changed three times
+    # and the name went stale each time while still asserting the right thing.
     tools = await server.mcp.list_tools()
     names = {t.name for t in tools}
     assert names == {
@@ -312,6 +314,8 @@ async def test_all_ten_tools_registered():
         "peek",
         "ack",
         "history",
+        "list_agents",
+        "server_info",
         "ask_hermes",
         "ask_codex",
         "ask_codex_async",
@@ -504,6 +508,7 @@ def test_ask_codex_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
         label=None,
         model=None,
         effort="default",
+        mode="default",
         workdir=None,
         write=False,
     )
@@ -516,7 +521,7 @@ async def test_ask_codex_async_delivers_result_via_mailbox(monkeypatch, tmp_path
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
     def fake_ask_codex(
-        prompt, *, model=None, effort="default", workdir=None, write=False
+        prompt, *, model=None, effort="default", mode="default", workdir=None, write=False
     ):
         return {"ok": True, "reply": f"handled: {prompt}"}
 
@@ -550,7 +555,7 @@ async def test_ask_codex_async_survives_adapter_exception(monkeypatch, tmp_path)
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
     def raising_ask_codex(
-        prompt, *, model=None, effort="default", workdir=None, write=False
+        prompt, *, model=None, effort="default", mode="default", workdir=None, write=False
     ):
         raise RuntimeError("unexpected adapter failure")
 
@@ -601,6 +606,7 @@ def test_ask_claude_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
         label=None,
         model=None,
         effort="default",
+        mode="default",
         workdir=None,
         write=False,
     )
@@ -613,7 +619,7 @@ async def test_ask_claude_async_delivers_result_via_mailbox(monkeypatch, tmp_pat
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
     def fake_ask_claude(
-        prompt, *, model=None, effort="default", workdir=None, write=False
+        prompt, *, model=None, effort="default", mode="default", workdir=None, write=False
     ):
         return {"ok": True, "reply": f"handled: {prompt}"}
 
@@ -716,6 +722,117 @@ async def test_peek_reports_a_missing_message(monkeypatch, tmp_path):
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
     got = await server.peek(message_id=999999)
     assert got["ok"] is False and "999999" in got["error"]
+
+
+@pytest.mark.anyio
+async def test_whole_inbox_response_is_bounded_not_just_each_body(monkeypatch, tmp_path):
+    """Per-body capping alone still let a full batch reach ~200KB, which the
+    host then truncated itself - so the response was cut anyway and the
+    `truncated` flag understated it."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    for i in range(25):
+        server.mailbox.send("codex", "hermes", f"{i}:" + "x" * 20_000, db_path=db)
+
+    got = await server.inbox(agent="hermes")
+    total = sum(len(m["body"]) for m in got["messages"])
+    assert got["count"] == 25  # a consuming read must return everything it took
+    assert total <= server._MAX_RESPONSE_CHARS * 1.1  # allow truncation notes
+    assert got["truncated"] == 25
+
+
+@pytest.mark.anyio
+async def test_consuming_read_returns_a_recovery_cursor(monkeypatch, tmp_path):
+    """The ack commits before the response can reach the caller, so the ids
+    of what was consumed are what make a lost response recoverable."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    ids = [
+        server.mailbox.send("codex", "hermes", f"m{i}", db_path=db)["message_id"]
+        for i in range(4)
+    ]
+
+    got = await server.inbox(agent="hermes", limit=3)
+    assert got["first_message_id"] == ids[0]
+    assert got["last_message_id"] == ids[2]
+    assert "history(" in got["recover_with"]
+
+    # The cursor really does re-fetch the consumed batch: history ignores acks.
+    back = await server.history(agent="hermes", before_id=got["last_message_id"] + 1)
+    assert [m["message_id"] for m in back["messages"]] == list(reversed(ids[:3]))
+
+
+@pytest.mark.anyio
+async def test_history_caps_the_whole_page_and_hands_back_a_cursor(monkeypatch, tmp_path):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    for i in range(60):
+        server.mailbox.send("codex", "hermes", f"{i}:" + "y" * 8_000, db_path=db)
+
+    page = await server.history(agent="hermes", limit=50)
+    total = sum(len(m["body"]) for m in page["messages"])
+    assert total <= server._MAX_RESPONSE_CHARS * 1.1
+    assert page["dropped"] > 0          # the page really was shortened
+    assert page["has_more"] is True
+    assert page["next_before_id"] == page["messages"][-1]["message_id"]
+
+    # Paging with the returned cursor continues without overlap.
+    nxt = await server.history(
+        agent="hermes", limit=50, before_id=page["next_before_id"]
+    )
+    first_ids = {m["message_id"] for m in page["messages"]}
+    next_ids = {m["message_id"] for m in nxt["messages"]}
+    assert not (first_ids & next_ids)
+
+
+@pytest.mark.anyio
+async def test_history_explains_an_unknown_agent_instead_of_returning_silence(
+    monkeypatch, tmp_path
+):
+    """An empty page for a filtered query read as 'no messages' when it
+    actually meant 'wrong name' - an agent searched its display name for a
+    while before learning its mailbox identity was 'hermes'."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("claude", "hermes", "real traffic", db_path=db)
+
+    got = await server.history(agent="MrAnderson")
+    assert got["count"] == 0
+    assert "not a known agent" in got["hint"]
+    assert "list_agents" in got["hint"]
+
+    # A known agent with genuinely no traffic gets no misleading hint.
+    quiet = await server.history(agent="codex")
+    assert quiet["count"] == 0 and "hint" not in quiet
+
+
+@pytest.mark.anyio
+async def test_list_agents_reports_roster_observed_names_and_own_identity(
+    monkeypatch, tmp_path, in_session
+):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("claude", "hermes", "a", db_path=db)
+    server.mailbox.send("codex", f"claude:{in_session}", "b", db_path=db)
+
+    got = await server.list_agents()
+    assert set(got["agents"]) == set(server.adapters.known_agents())
+    observed = {r["recipient"] for r in got["observed_recipients"]}
+    assert observed == {"hermes", f"claude:{in_session}"}
+    assert got["you"]["lane_suffix"] == in_session
+    assert got["you"]["lane_for_claude"] == f"claude:{in_session}"
+    assert "codex" in got["observed_senders"]
+
+
+@pytest.mark.anyio
+async def test_server_info_reports_version_limits_and_timeouts(monkeypatch, tmp_path):
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    got = await server.server_info()
+    assert got["limits"]["inbox_default"] == server.mailbox.DEFAULT_INBOX_LIMIT
+    assert got["limits"]["max_response_chars"] == server._MAX_RESPONSE_CHARS
+    assert set(got["timeouts_s"]) == set(server.adapters.known_agents())
+    assert got["module_path"].endswith("mailbox.py")
+    assert isinstance(got["write_enabled"], bool)
 
 
 @pytest.mark.anyio

@@ -1075,6 +1075,63 @@ def test_ask_timeout_is_handled(monkeypatch):
     assert "timeout" in out["error"].lower()
 
 
+def test_timeout_preserves_the_partial_output_it_used_to_discard(monkeypatch):
+    """A bare "timeout after 900s" threw away work that had really been done.
+
+    TimeoutExpired carries whatever the child had already written; discarding
+    it destroyed a partially complete answer and left no way to tell a
+    healthy-but-slow agent from one wedged since the first second.
+    """
+    _capture_run(
+        monkeypatch,
+        exc=subprocess.TimeoutExpired(
+            cmd="claude",
+            timeout=900,
+            output="the first half of a real answer",
+            stderr="a warning",
+        ),
+    )
+    out = adapters.ask("hermes", "x")
+
+    assert out["ok"] is False
+    assert out["timed_out"] is True
+    assert out["timeout_s"] == adapters._TIMEOUT_S
+    assert out["timeout_layer"] == "subprocess"
+    assert out["produced_output"] is True
+    assert out["stdout_chars"] == len("the first half of a real answer")
+    assert "the first half of a real answer" in out["partial_stdout"]["raw_excerpt"]
+    assert "a warning" in out["partial_stderr"]["raw_excerpt"]
+    assert isinstance(out["elapsed_s"], float)
+
+
+def test_timeout_with_no_output_is_distinguishable_from_a_slow_one(monkeypatch):
+    """The slow-vs-wedged signal: a child that emitted nothing in the whole
+    budget is a different failure from one cut off mid-answer."""
+    _capture_run(
+        monkeypatch, exc=subprocess.TimeoutExpired(cmd="claude", timeout=900)
+    )
+    out = adapters.ask("hermes", "x")
+    assert out["timed_out"] is True
+    assert out["produced_output"] is False
+    assert out["stdout_chars"] == 0
+    assert "partial_stdout" not in out
+
+
+def test_timeout_decodes_bytes_payloads(monkeypatch):
+    """TimeoutExpired's payload comes from a partially drained pipe and is
+    bytes on some paths even under text=True - reporting a timeout must not
+    itself crash."""
+    _capture_run(
+        monkeypatch,
+        exc=subprocess.TimeoutExpired(
+            cmd="claude", timeout=900, output=b"partial \xe2\x9c\x94 bytes"
+        ),
+    )
+    out = adapters.ask("hermes", "x")
+    assert out["produced_output"] is True
+    assert "partial" in out["partial_stdout"]["raw_excerpt"]
+
+
 def test_ask_missing_binary_is_handled(monkeypatch):
     _capture_run(monkeypatch, exc=FileNotFoundError("hermes not found"))
     out = adapters.ask("hermes", "x")
