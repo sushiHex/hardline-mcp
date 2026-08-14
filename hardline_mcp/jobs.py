@@ -394,14 +394,18 @@ def finish(
                 ),
             )
             # A cancelled job still records what the killed run produced.
+            # Owner-scoped like the main CAS above. Without it any caller could
+            # populate the result of a cancelled job it never ran.
             conn.execute(
                 "UPDATE jobs SET result = COALESCE(result, ?), finished_at ="
-                " COALESCE(finished_at, ?) WHERE job_id = ? AND state = ?",
+                " COALESCE(finished_at, ?)"
+                " WHERE job_id = ? AND state = ? AND owner_pid = ?",
                 (
                     json.dumps(result, default=str) if result is not None else None,
                     _iso(now_fn()),
                     job_id,
                     CANCELLED,
+                    os.getpid(),
                 ),
             )
 
@@ -737,17 +741,26 @@ def listing_with_counts(
     db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
         _sweep_lost(conn, now_fn)
-        rows = _query(
-            conn,
-            state=state,
-            agent=agent,
-            requester=requester,
-            active_only=active_only,
-            limit=limit,
-        )
-        summary = conn.execute(
-            "SELECT state, COUNT(*) FROM jobs GROUP BY state"
-        ).fetchall()
+        # One read transaction across BOTH statements. In autocommit mode
+        # another process can insert or transition a job between them, so the
+        # summary could describe a newer database than the page beside it -
+        # a listing disagreeing with its own counts. Sharing a connection does
+        # not give a shared snapshot; a transaction does.
+        conn.execute("BEGIN")
+        try:
+            rows = _query(
+                conn,
+                state=state,
+                agent=agent,
+                requester=requester,
+                active_only=active_only,
+                limit=limit,
+            )
+            summary = conn.execute(
+                "SELECT state, COUNT(*) FROM jobs GROUP BY state"
+            ).fetchall()
+        finally:
+            conn.rollback()  # read-only; nothing to commit
     return [_row_to_dict(r) for r in rows], {r[0]: r[1] for r in summary}
 
 

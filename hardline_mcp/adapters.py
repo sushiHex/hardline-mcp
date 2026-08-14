@@ -298,13 +298,25 @@ def _run_cmd(
             claimed = True
         if claimed is False:
             _kill_tree(proc)
-            _reap(proc)
-            return {
+            reaped = _reap(proc)
+            response = {
                 "ok": False,
                 "error": "cancelled before the child could be recorded",
                 "cancelled": True,
+                "child_reaped": reaped,
                 "elapsed_s": round(time.monotonic() - started, 1),
             }
+            if not reaped:
+                # _kill_tree suppresses every failure and _reap is bounded, so
+                # "we tried" is not "it stopped". Reporting cancelled here
+                # regardless would tell the requester the work was stopped
+                # while it kept running with no pid recorded anywhere - the
+                # worst of both, since nothing can find it to try again.
+                response["warning"] = (
+                    f"child pid {proc.pid} was not confirmed dead; it may still "
+                    "be running and no pid was recorded for it"
+                )
+            return response
 
     try:
         stdout, stderr = proc.communicate(timeout=timeout_s)

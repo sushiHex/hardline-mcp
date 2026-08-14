@@ -1165,6 +1165,68 @@ def test_timeout_preserves_the_partial_output_it_used_to_discard(monkeypatch):
     assert isinstance(out["elapsed_s"], float)
 
 
+class _Reapable:
+    """Minimal stand-in with real pipe objects, so _reap's two jobs — closing
+    the pipes and waiting — are both observable."""
+
+    def __init__(self, wait_raises=False):
+        self.pid = 4242
+        self._wait_raises = wait_raises
+
+        class _Pipe:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        self.stdout, self.stderr, self.stdin = _Pipe(), _Pipe(), _Pipe()
+
+    def wait(self, timeout=None):
+        if self._wait_raises:
+            raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+        return 0
+
+
+def test_reap_reports_failure_rather_than_claiming_a_guarantee():
+    """_reap is BOUNDED, not guaranteed: if the kill silently failed or
+    teardown outlives the wait, the child is abandoned. Saying so is the
+    point - a claimed guarantee is how the leak would go unnoticed."""
+    stuck = _Reapable(wait_raises=True)
+    assert adapters._reap(stuck) is False
+    # Pipes are still closed even when the wait gives up - two leaked
+    # descriptors per occurrence in a long-lived server otherwise.
+    assert stuck.stdout.closed and stuck.stderr.closed and stuck.stdin.closed
+
+    clean = _Reapable()
+    assert adapters._reap(clean) is True
+    assert clean.stdout.closed
+
+
+def test_abort_warns_when_the_child_was_not_confirmed_dead(monkeypatch):
+    """_kill_tree suppresses every failure and _reap is bounded, so "we tried"
+    is not "it stopped". Reporting cancelled regardless would tell the
+    requester the work was stopped while it kept running with no pid recorded
+    anywhere - nothing could then find it to try again."""
+    _capture_run(monkeypatch)
+    monkeypatch.setattr(adapters, "_reap", lambda proc: False)
+
+    out = adapters._run_cmd(["x"], on_spawn=lambda pid: False)
+    assert out["cancelled"] is True
+    assert out["child_reaped"] is False
+    assert "may still be running" in out["warning"]
+
+
+def test_abort_is_clean_when_the_child_was_reaped(monkeypatch):
+    _capture_run(monkeypatch)
+    monkeypatch.setattr(adapters, "_reap", lambda proc: True)
+
+    out = adapters._run_cmd(["x"], on_spawn=lambda pid: False)
+    assert out["cancelled"] is True
+    assert out["child_reaped"] is True
+    assert "warning" not in out
+
+
 def test_timeout_with_no_output_is_distinguishable_from_a_slow_one(monkeypatch):
     """The slow-vs-wedged signal: a child that emitted nothing in the whole
     budget is a different failure from one cut off mid-answer."""
