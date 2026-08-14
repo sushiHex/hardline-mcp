@@ -55,6 +55,18 @@ ACTIVE_STATES = frozenset({QUEUED, RUNNING})
 DEFAULT_JOB_LIMIT = 25
 MAX_JOB_LIMIT = 200
 
+# Why a kill did not happen. These are sentinels rather than prose because the
+# caller must DISTINGUISH them: "the child was already gone" and "the pid now
+# belongs to someone else" both mean our child is dead and the cancel is
+# clean, while a genuine failure means the row says cancelled and a real
+# process may still be running - the one case worth warning about.
+ALREADY_GONE = "process is gone; nothing to kill"
+IDENTITY_MISMATCH = (
+    "refusing to kill: pid was reused by a different process "
+    "(identity token does not match the one recorded at spawn)"
+)
+_CHILD_ALREADY_DEAD = frozenset({ALREADY_GONE, IDENTITY_MISMATCH})
+
 
 def new_job_id() -> str:
     """Short, unambiguous, and not a sequence number.
@@ -491,12 +503,9 @@ def kill_process_tree(
     if expect_key is not None:
         actual = process_key(pid)
         if actual is None:
-            return False, "process is gone; nothing to kill"
+            return False, ALREADY_GONE
         if actual != expect_key:
-            return False, (
-                "refusing to kill: pid was reused by a different process "
-                "(identity token does not match the one recorded at spawn)"
-            )
+            return False, IDENTITY_MISMATCH
     try:
         if os.name == "nt":
             proc = subprocess.run(
@@ -582,7 +591,7 @@ def request_cancel(
                 job["child_pid"], expect_key=job.get("child_key")
             )
 
-    return {
+    out = {
         "ok": True,
         "job_id": job_id,
         "state": CANCELLED,
@@ -594,6 +603,14 @@ def request_cancel(
             else "job had not spawned a child yet; marked cancelled before start"
         ),
     }
+    if job["child_pid"] and not killed and kill_error not in _CHILD_ALREADY_DEAD:
+        # The row says cancelled but a real process may still be running, and
+        # reporting that identically to a clean cancel would be a quiet lie.
+        out["warning"] = (
+            "job is recorded cancelled but its child could not be killed "
+            f"({kill_error}); it may still be running as pid {job['child_pid']}"
+        )
+    return out
 
 
 def counts(

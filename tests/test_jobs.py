@@ -280,12 +280,43 @@ def test_kill_refuses_a_pid_whose_identity_no_longer_matches(tmp_path):
     taskkill /T would destroy an unrelated process tree."""
     ok, err = jobs.kill_process_tree(os.getpid(), expect_key="definitely-not-mine")
     assert ok is False
-    assert "reused" in err
+    assert err == jobs.IDENTITY_MISMATCH
 
     # A pid that no longer exists is refused too, rather than signalled blind.
     ok, err = jobs.kill_process_tree(0x7FFFFFFE, expect_key="anything")
     assert ok is False
-    assert "gone" in err
+    assert err == jobs.ALREADY_GONE
+
+
+def test_cancel_warns_when_the_child_survived_the_kill(tmp_path, monkeypatch):
+    """A row that says cancelled while a real process keeps running must not
+    be reported identically to a clean cancel."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, child_pid=31337, db_path=db)
+    monkeypatch.setattr(
+        jobs, "kill_process_tree", lambda pid, expect_key=None: (False, "taskkill: boom")
+    )
+
+    out = jobs.request_cancel(job_id, db_path=db)
+    assert out["ok"] is True and out["child_killed"] is False
+    assert "may still be running" in out["warning"]
+    assert "31337" in out["warning"]
+
+
+@pytest.mark.parametrize("reason", [jobs.ALREADY_GONE, jobs.IDENTITY_MISMATCH])
+def test_cancel_does_not_warn_when_the_child_was_already_dead(
+    tmp_path, monkeypatch, reason
+):
+    """Both refusals mean our child is gone, so the cancel is clean - warning
+    there would train the reader to ignore the warning that matters."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, child_pid=31337, db_path=db)
+    monkeypatch.setattr(
+        jobs, "kill_process_tree", lambda pid, expect_key=None: (False, reason)
+    )
+    assert "warning" not in jobs.request_cancel(job_id, db_path=db)
 
 
 def test_process_key_identifies_an_instance_not_a_slot(tmp_path):
