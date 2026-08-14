@@ -271,7 +271,11 @@ async def ack(message_id: int) -> dict:
 
 
 @mcp.tool()
-async def history(limit: int = mailbox.DEFAULT_HISTORY_LIMIT, agent: str | None = None) -> dict:
+async def history(
+    limit: int = mailbox.DEFAULT_HISTORY_LIMIT,
+    agent: str | None = None,
+    before_id: int | None = None,
+) -> dict:
     """Recent messages, newest first — the visibility / audit feed.
 
     ``agent``, if given, filters to messages where it is either sender or
@@ -283,9 +287,14 @@ async def history(limit: int = mailbox.DEFAULT_HISTORY_LIMIT, agent: str | None 
     a ceiling is the same context flood through another door. Use
     ``peek(message_id)`` for one body in full.
 
+    ``before_id`` pages backward: pass the lowest ``message_id`` you have seen
+    to get the page before it. Since ``inbox`` consumes what it returns, this
+    is the route to a result whose response was lost — and without paging,
+    anything older than one capped page was unreachable.
+
     Returns ``{"messages", "count", "truncated"}``.
     """
-    msgs = await _in_thread(mailbox.history, limit, agent)
+    msgs = await _in_thread(mailbox.history, limit, agent, before_id=before_id)
     msgs, truncated = _truncate_bodies(msgs)
     return {"messages": msgs, "count": len(msgs), "truncated": truncated}
 

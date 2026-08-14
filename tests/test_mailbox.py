@@ -301,6 +301,61 @@ def test_history_limit_is_clamped_and_negative_is_not_unlimited(tmp_path):
     assert len(mailbox.history(limit="junk", db_path=db)) == mailbox.DEFAULT_HISTORY_LIMIT
 
 
+def test_history_pages_backward_to_reach_a_consumed_message(tmp_path):
+    """``inbox`` consumes what it returns, so history is the recovery route -
+    but newest-first plus a cap left anything older than one page
+    unreachable, and you do not know the id to ``peek`` when the response
+    itself was lost. Paging is what makes recovery possible."""
+    db = tmp_path / "mb.db"
+    total = mailbox.MAX_HISTORY_LIMIT + 60
+    for i in range(total):
+        mailbox.send("codex", "hermes", f"m{i}", db_path=db)
+
+    # Consume everything, as the default read now does.
+    while mailbox.inbox("hermes", limit=mailbox.MAX_INBOX_LIMIT, db_path=db)[1]:
+        pass
+
+    page1 = mailbox.history(limit=mailbox.MAX_HISTORY_LIMIT, agent="hermes", db_path=db)
+    assert len(page1) == mailbox.MAX_HISTORY_LIMIT
+    oldest_seen = page1[-1]["message_id"]
+
+    # m0 is older than one capped page: unreachable without paging.
+    assert "m0" not in {m["body"] for m in page1}
+
+    page2 = mailbox.history(
+        limit=mailbox.MAX_HISTORY_LIMIT,
+        agent="hermes",
+        before_id=oldest_seen,
+        db_path=db,
+    )
+    assert len(page2) == 60
+    assert "m0" in {m["body"] for m in page2}  # recovered
+    # Pages do not overlap, so a caller walking back sees each message once.
+    assert not ({m["message_id"] for m in page1} & {m["message_id"] for m in page2})
+
+
+def test_history_before_id_composes_with_the_agent_filter(tmp_path):
+    """The agent predicate is an OR-chain; unparenthesized, `AND id < ?`
+    would bind to only its last term and leak other agents' messages."""
+    db = tmp_path / "mb.db"
+    hermes_ids = []
+    for i in range(6):
+        hermes_ids.append(
+            mailbox.send("codex", "hermes", f"h{i}", db_path=db)["message_id"]
+        )
+        mailbox.send("codex", "claude", f"c{i}", db_path=db)
+
+    # The cutoff must actually EXCLUDE matching rows, otherwise the precedence
+    # bug has no visible effect and this test cannot fail.
+    rows = mailbox.history(
+        limit=100, agent="hermes", before_id=hermes_ids[3], db_path=db
+    )
+    # Unparenthesized, `recipient = 'hermes'` alone would satisfy the WHERE and
+    # drag h3-h5 back in despite the cutoff.
+    assert {m["body"] for m in rows} == {"h0", "h1", "h2"}
+    assert all(m["recipient"] == "hermes" for m in rows)
+
+
 def test_concurrent_pollers_never_receive_the_same_message(tmp_path):
     """The claim a bare `with conn:` could not make.
 

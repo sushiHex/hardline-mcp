@@ -364,9 +364,10 @@ def ack(
 
 
 def history(
-    limit: int = 50,
+    limit: int = DEFAULT_HISTORY_LIMIT,
     agent: Optional[str] = None,
     *,
+    before_id: Optional[int] = None,
     db_path: Optional[Path] = None,
 ) -> list[dict]:
     """Recent messages newest-first (the visibility/log feed). ``agent``, if
@@ -382,6 +383,16 @@ def history(
 
     A lane-qualified ``agent`` still matches only itself - ``claude:a`` does
     not gain sublanes.
+
+    ``before_id`` pages backward (``id < before_id``), which is what makes
+    this feed a usable recovery path rather than a peephole. ``inbox``
+    consumes what it returns, so a response lost in transit is recoverable
+    only through here - but newest-first plus a capped limit meant anything
+    older than one page was unreachable, and you do not know the message id
+    to ``peek`` precisely when you lost the response. Paging closes that.
+
+    Note the agent predicate is parenthesized: it is an OR-chain, so an
+    unparenthesized form would bind a later AND to only its last term.
 
     DELIBERATE: this sees every lane, so it is NOT session-isolated the way
     ``inbox`` and ``ack`` are. That is the point of an audit feed on a
@@ -402,11 +413,19 @@ def history(
         limit = DEFAULT_HISTORY_LIMIT
     limit = max(1, min(limit, MAX_HISTORY_LIMIT))
     params: tuple = ()
-    sql = "SELECT * FROM messages"
+    where: list[str] = []
     if agent is not None:
         lane_glob = f"{agent}:%"
-        sql += " WHERE sender = ? OR recipient = ? OR sender LIKE ? OR recipient LIKE ?"
+        where.append(
+            "(sender = ? OR recipient = ? OR sender LIKE ? OR recipient LIKE ?)"
+        )
         params = (agent, agent, lane_glob, lane_glob)
+    if before_id is not None:
+        where.append("id < ?")
+        params = params + (before_id,)
+    sql = "SELECT * FROM messages"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY id DESC LIMIT ?"
     params = params + (limit,)
     with closing(_connect(db_path)) as conn:
