@@ -225,6 +225,9 @@ async def inbox(
         unread_only=unread_only,
         limit=limit,
         auto_ack=auto_ack,
+        # Same lane identity the explicit ack tool uses, so a consuming read
+        # cannot drain a lane this session does not own.
+        lane_suffix=adapters.lane_suffix(),
     )
     msgs, truncated = _truncate_bodies(msgs)
     return {
@@ -268,14 +271,23 @@ async def ack(message_id: int) -> dict:
 
 
 @mcp.tool()
-async def history(limit: int = 50, agent: str | None = None) -> dict:
+async def history(limit: int = mailbox.DEFAULT_HISTORY_LIMIT, agent: str | None = None) -> dict:
     """Recent messages, newest first — the visibility / audit feed.
 
     ``agent``, if given, filters to messages where it is either sender or
-    recipient. Returns ``{"messages": [...], "count": N}``.
+    recipient. Never acks and never hides acked messages, which is what makes
+    it the recovery path for anything ``inbox`` consumed.
+
+    ``limit`` is capped at ``MAX_HISTORY_LIMIT`` and bodies are truncated on
+    the same rule as ``inbox`` — an audit feed returning whole bodies without
+    a ceiling is the same context flood through another door. Use
+    ``peek(message_id)`` for one body in full.
+
+    Returns ``{"messages", "count", "truncated"}``.
     """
     msgs = await _in_thread(mailbox.history, limit, agent)
-    return {"messages": msgs, "count": len(msgs)}
+    msgs, truncated = _truncate_bodies(msgs)
+    return {"messages": msgs, "count": len(msgs), "truncated": truncated}
 
 
 # ── live query tools ─────────────────────────────────────────────────────────

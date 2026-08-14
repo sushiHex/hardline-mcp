@@ -655,6 +655,33 @@ async def test_ask_claude_async_omits_label_when_not_supplied(monkeypatch, tmp_p
 
 
 @pytest.mark.anyio
+async def test_auto_ack_cannot_consume_another_sessions_lane(
+    monkeypatch, tmp_path, in_session
+):
+    """auto_ack must honour the SAME lane guard as the explicit ack tool.
+
+    ``ack`` passes this process's lane suffix and refuses a message qualified
+    to a different lane. A consuming read that skipped that guard would let
+    any process call inbox(agent="claude:other") and silently drain another
+    session's results - exactly the failure lanes were introduced to stop,
+    and reachable through the plain default now that reads consume.
+    """
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    server.mailbox.send("codex", "claude:other.9999zzzz", "theirs", db_path=db)
+
+    got = await server.inbox(agent="claude:other.9999zzzz")
+    assert [m["body"] for m in got["messages"]] == ["theirs"]  # visible
+
+    # ...but NOT consumed: it is still unread for its real owner.
+    still_unread, _ = server.mailbox.inbox(
+        "claude:other.9999zzzz", auto_ack=False, db_path=db
+    )
+    assert len(still_unread) == 1
+    assert still_unread[0]["acked_at"] is None
+
+
+@pytest.mark.anyio
 async def test_inbox_truncates_oversized_bodies_and_peek_returns_them_whole(
     monkeypatch, tmp_path
 ):

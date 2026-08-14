@@ -69,6 +69,11 @@ _INIT_BACKOFF_S = 0.05
 DEFAULT_INBOX_LIMIT = 25
 MAX_INBOX_LIMIT = 200
 
+# history returns whole bodies, so it needs the same ceiling or it is simply
+# the same flood through another door. Its default is unchanged (50).
+DEFAULT_HISTORY_LIMIT = 50
+MAX_HISTORY_LIMIT = 200
+
 
 def _default_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -136,6 +141,25 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _lane_ackable(recipient: str, lane_suffix: Optional[str]) -> bool:
+    """May a process holding ``lane_suffix`` consume a message sent to
+    ``recipient``?
+
+    The Python mirror of the SQL guard in ``ack``: unqualified recipients stay
+    shared and consumable by anyone, a lane-qualified one only by the process
+    holding that lane, and a process with no lane owns no lane so it may
+    consume only bare recipients. Kept as one predicate because ``inbox``'s
+    consuming read must not be able to drift from ``ack``'s rule - a read that
+    consumed what an ack would have refused is the same defect with a
+    different entry point.
+    """
+    if ":" not in recipient:
+        return True
+    if not lane_suffix:
+        return False
+    return recipient.split(":", 1)[1] == lane_suffix
+
+
 def _row_to_dict(row: sqlite3.Row) -> dict:
     return {
         "message_id": row["id"],
@@ -178,6 +202,7 @@ def inbox(
     unread_only: bool = True,
     limit: int = DEFAULT_INBOX_LIMIT,
     auto_ack: bool = True,
+    lane_suffix: Optional[str] = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> tuple[list[dict], int]:
@@ -199,17 +224,18 @@ def inbox(
     ~168k tokens, on a single poll), so a caller must not be able to opt back
     out of the bound by passing a huge limit.
 
-    ``auto_ack`` (default) marks exactly the returned ids read, in the SAME
-    transaction as the read. This is what makes ``limit`` safe rather than
-    harmful: oldest-first + a limit + nothing acking pins the caller to the
-    same oldest batch forever and it never sees a new message again. Acking
-    server-side advances the cursor per poll, so the backlog drains.
+    ``auto_ack`` (default) consumes exactly the returned ids under a single
+    atomic claim (BEGIN IMMEDIATE). This is what makes ``limit`` safe rather
+    than harmful: oldest-first + a limit + nothing acking pins the caller to
+    the same oldest batch forever and it never sees a new message again.
+    Consuming server-side advances the cursor per poll, so a backlog drains.
 
-    Acking only ids this call returned is inherently lane-correct - the
-    SELECT already restricts to ``agents``, and the UPDATE re-asserts that
-    recipient scope so no id can ack outside the requested recipients. Nothing
-    is destroyed: ``history`` ignores ``acked_at`` and remains the recovery
-    path for anything acked.
+    Consuming honours ``lane_suffix`` exactly as ``ack`` does, so reading a
+    lane you do not own shows you the messages but does NOT consume them.
+    It is also ignored unless ``unread_only`` - see ``consuming`` below.
+
+    Nothing is destroyed: ``history`` ignores ``acked_at`` and remains the
+    recovery path for anything consumed.
     """
     db_path = _resolve_db(db_path)
     agents = [agent] if isinstance(agent, str) else list(agent)
@@ -221,6 +247,12 @@ def inbox(
         limit = DEFAULT_INBOX_LIMIT
     limit = max(1, min(limit, MAX_INBOX_LIMIT))
 
+    # Consuming an already-acked row is impossible, so pairing auto_ack with
+    # unread_only=False would re-serve the same oldest acked batch on every
+    # call while ``remaining`` stayed positive - reintroducing, in a browsing
+    # mode, the exact pin that consuming exists to prevent.
+    consuming = auto_ack and unread_only
+
     placeholders = ", ".join("?" for _ in agents)
     sql = f"SELECT * FROM messages WHERE recipient IN ({placeholders})"
     if unread_only:
@@ -228,24 +260,55 @@ def inbox(
     sql += " ORDER BY id ASC LIMIT ?"
 
     with closing(_connect(db_path)) as conn:
-        # One transaction: read, consume, then count what is left. A concurrent
-        # poller on the shared db therefore cannot be handed the same batch.
-        with conn:
+        # BEGIN IMMEDIATE, not `with conn:`. Python's legacy transaction mode
+        # opens a transaction only on DML, so a bare `with conn:` leaves the
+        # SELECT outside it entirely: two pollers both read the same ids, one
+        # UPDATE wins and the other matches zero rows - yet BOTH return the
+        # batch. Verified: that interleaving double-delivers. Reserving the
+        # writer up front makes read-then-consume a single atomic claim.
+        # (BEGIN DEFERRED is not enough under WAL - the upgrade can fail with
+        # SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot resolve.)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(sql, (*agents, limit)).fetchall()
             messages = [_row_to_dict(r) for r in rows]
-            if auto_ack and messages:
-                ids = [m["message_id"] for m in messages]
-                id_marks = ", ".join("?" for _ in ids)
-                conn.execute(
-                    f"UPDATE messages SET acked_at = ? WHERE id IN ({id_marks})"
-                    f" AND recipient IN ({placeholders}) AND acked_at IS NULL",
-                    (_iso(now_fn()), *ids, *agents),
-                )
+
+            if consuming and messages:
+                # Same ownership rule as ``ack``: a lane-qualified message is
+                # consumable only by the process holding that lane. Without
+                # this, inbox(agent="claude:other") would silently drain
+                # another session's results through the default path - the
+                # precise failure lanes were introduced to prevent.
+                ackable = [
+                    m["message_id"]
+                    for m in messages
+                    if _lane_ackable(m["recipient"], lane_suffix)
+                ]
+                if ackable:
+                    stamp = _iso(now_fn())
+                    id_marks = ", ".join("?" for _ in ackable)
+                    conn.execute(
+                        f"UPDATE messages SET acked_at = ? WHERE id IN ({id_marks})"
+                        f" AND recipient IN ({placeholders}) AND acked_at IS NULL",
+                        (stamp, *ackable, *agents),
+                    )
+                    # Reflect the commit in what we hand back; returning
+                    # acked_at=None for a row this call just consumed is a
+                    # stale representation the caller may act on.
+                    consumed = set(ackable)
+                    for msg in messages:
+                        if msg["message_id"] in consumed:
+                            msg["acked_at"] = stamp
+
             remaining = conn.execute(
                 f"SELECT COUNT(*) FROM messages WHERE recipient IN ({placeholders})"
                 " AND acked_at IS NULL",
                 tuple(agents),
             ).fetchone()[0]
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         return messages, remaining
 
 
@@ -330,6 +393,14 @@ def history(
     different threat model.
     """
     db_path = _resolve_db(db_path)
+    # Clamped for the same reason inbox is: this returns whole bodies, so an
+    # unbounded limit is the identical context flood through another door.
+    # SQLite also reads a negative LIMIT as "no limit", so -1 was unbounded.
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_HISTORY_LIMIT
+    limit = max(1, min(limit, MAX_HISTORY_LIMIT))
     params: tuple = ()
     sql = "SELECT * FROM messages"
     if agent is not None:
