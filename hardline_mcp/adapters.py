@@ -1161,6 +1161,13 @@ def ask_claude(
     bypassPermissions`` - stdin is ``/dev/null``, so any interactive
     permission prompt would otherwise hang until timeout instead of ever
     being answered.
+
+    One consequence of dropping the host settings layer on read calls: an
+    omitted ``model``/``effort`` now falls to Claude Code's BUILT-IN defaults,
+    not to whatever the host's settings.json configures. On a host that sets a
+    high default effort this is a quieter, cheaper answer than the same call
+    made before - pass ``effort`` explicitly when that matters, since an
+    explicit value is honoured either way.
     """
     if effort not in _CLAUDE_EFFORTS:
         return {
