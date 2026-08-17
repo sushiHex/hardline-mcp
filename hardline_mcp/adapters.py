@@ -139,17 +139,39 @@ _CLAUDE_READONLY_DENIED_TOOLS = "Edit,Write,NotebookEdit"
 # write=True) again and recurse unattended.
 _CLAUDE_NO_MCP = ["--strict-mcp-config"]
 
-# Load NO settings.json layer. This is what makes read-only actually read-only,
-# and it was measured rather than assumed: with the host's settings loaded, a
-# blanket `Bash(*)` permission overrides Claude Code's built-in Bash write
-# guard, so `--disallowedTools Edit,Write,NotebookEdit` stopped the Edit/Write
-# TOOLS while `echo x > file` wrote the file anyway. Dropping the settings
-# layer restores that guard.
+# Load NO settings.json layer. Measured rather than assumed: with the host's
+# settings loaded, a blanket `Bash(*)` permission overrides Claude Code's
+# built-in Bash write guard, so `--disallowedTools Edit,Write,NotebookEdit`
+# stopped the Edit/Write TOOLS while `echo x > file` wrote the file anyway.
+# Dropping the settings layer restores that guard.
 #
-# Deliberately NOT applied to the write path: hooks and deny rules also live
-# in settings.json, and on this host they are what keeps a spawned Claude out
-# of the Hermes skill tree. Stripping them from the one mode that is allowed
-# to write would trade a small exposure for a larger one.
+# It restores a GUARD, not a sandbox, and the distinction matters. The guard is
+# a command classifier, so it catches a direct write; it cannot catch a write
+# that is a side effect - `pytest` dropping a cache, a build writing artifacts,
+# a git command firing a hook, an interpreter whose name says nothing about
+# what it does. Read mode is the default-safe posture, and it is a real
+# improvement over writing files on request, but it is not a containment
+# boundary and must not be described as one.
+#
+# Deliberately NOT applied to the write path, because PreToolUse HOOKS live in
+# settings.json and on this host a hook is what keeps a spawned Claude out of
+# the Hermes skill tree. Stripping it from the one mode allowed to write would
+# remove that for no gain - the mode is supposed to write.
+#
+# Measured, not assumed. A spawned Claude asked to run a hook-guarded command
+# under --permission-mode bypassPermissions:
+#   with the host settings layer   -> hook fired, command refused
+#   with --setting-sources ""      -> hook absent, command ran
+# So bypassPermissions does NOT suppress hooks, and the settings layer is what
+# carries them. (Probe with a NON-exempt command: the host guard exempts
+# ls/pwd/git-status, so probing with one of those tests the exemption rather
+# than the hook - which is what a first attempt here did.)
+#
+# Scope of that claim: HOOKS were measured. `permissions.deny` was NOT, and
+# bypassPermissions is documented to bypass permission checks, so deny rules
+# are not relied on here and must not be treated as an enforcement boundary
+# without their own behavioural test. A hook is host-controlled code, not a
+# sandbox either; this is defence in depth, not containment.
 _CLAUDE_NO_HOST_SETTINGS = ["--setting-sources", ""]
 _CLAUDE_AUTH_OVERRIDE_ENV = frozenset(
     {
@@ -483,12 +505,26 @@ def _as_text(stream: object) -> str:
     return str(stream)
 
 
-def _run_agent_cmd(agent: str, argv: list[str], **kwargs) -> dict:
+# Never inherited by a spawned agent. --strict-mcp-config stops the child
+# DISCOVERING hardline through the host's MCP config, but it does not stop it
+# reaching hardline another way - launching `claude --mcp-config`, running the
+# hardline executable, or starting any other agent CLI that can. With this
+# variable inherited, every one of those routes comes back write-enabled, so
+# one authorized write call multiplies into unbounded unattended ones. Removing
+# it from the child's environment is the boundary; hiding one discovery route
+# is not.
+_AGENT_CHILD_STRIPPED_ENV = frozenset({"HARDLINE_ALLOW_WRITE"})
+
+
+def _run_agent_cmd(agent: str, argv: list[str], *, env: dict | None = None, **kwargs) -> dict:
     try:
         timeout_s = _timeout_for(agent)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
-    return _run_cmd(argv, timeout_s=timeout_s, **kwargs)
+    child_env = dict(os.environ if env is None else env)
+    for name in _AGENT_CHILD_STRIPPED_ENV:
+        child_env.pop(name, None)
+    return _run_cmd(argv, timeout_s=timeout_s, env=child_env, **kwargs)
 
 
 # Recognized tokens for HARDLINE_ALLOW_WRITE, matched case-insensitively
