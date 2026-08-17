@@ -842,6 +842,87 @@ def test_ask_claude_optioned_call_also_denies_edit_write_by_default(
     assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,NotebookEdit"
 
 
+def test_read_only_calls_drop_the_host_settings_layer(monkeypatch):
+    """What actually makes read-only read-only.
+
+    Measured, not assumed: with the host's settings loaded, a blanket
+    ``Bash(*)`` permission overrides Claude Code's built-in Bash write guard,
+    so ``--disallowedTools Edit,Write,NotebookEdit`` stopped the Edit/Write
+    TOOLS while ``echo x > file`` wrote the file anyway. A probe against a real
+    ``claude -p`` wrote the file on the shipped flags and did not once the
+    settings layer was dropped.
+    """
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="ok"))
+    adapters.ask_claude("read something")
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert "--strict-mcp-config" in argv
+
+    # ...and on the optioned read path too, not only the plain one.
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"result"}'))
+    adapters.ask_claude("read something", effort="high")
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert "--strict-mcp-config" in argv
+
+
+def test_write_mode_keeps_host_settings_but_still_loads_no_mcp(
+    monkeypatch, tmp_path, allow_write
+):
+    """The deliberate asymmetry.
+
+    Write mode must NOT drop the settings layer: hooks and deny rules live
+    there, and on this host they are what keeps a spawned Claude out of the
+    Hermes skill tree. Stripping them from the one mode allowed to write would
+    trade a small exposure for a larger one. MCP is still disabled, because
+    the child would otherwise load hardline itself, inherit this process's
+    environment, and be able to recurse into another write-enabled call.
+    """
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"result"}'))
+    adapters.ask_claude("fix it", workdir=str(tmp_path), write=True)
+    argv = calls[0]["cmd"]
+
+    assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+    assert "--strict-mcp-config" in argv
+    assert "--setting-sources" not in argv
+
+
+def test_spawned_agents_never_inherit_the_write_opt_in(
+    monkeypatch, tmp_path, allow_write
+):
+    """The actual recursion boundary.
+
+    --strict-mcp-config stops the child DISCOVERING hardline through the host's
+    MCP config; it does not stop it reaching hardline another way (launching
+    `claude --mcp-config`, running the hardline executable, starting another
+    agent CLI). With HARDLINE_ALLOW_WRITE inherited, every one of those routes
+    comes back write-enabled and one authorized call multiplies into unbounded
+    unattended ones.
+    """
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"result"}'))
+    adapters.ask_claude("fix it", workdir=str(tmp_path), write=True)
+    child_env = calls[0]["kwargs"]["env"]
+
+    assert "HARDLINE_ALLOW_WRITE" not in child_env
+    # ...while the rest of the environment is still inherited, so the child can
+    # still find its own CLI, auth, and PATH.
+    assert "PATH" in child_env or "Path" in child_env
+
+
+def test_codex_children_also_lose_the_write_opt_in(monkeypatch, tmp_path, allow_write):
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    adapters.ask_codex("fix it", workdir=str(tmp_path), write=True)
+    assert "HARDLINE_ALLOW_WRITE" not in calls[0]["kwargs"]["env"]
+
+
+def test_read_only_children_lose_it_too(monkeypatch, allow_write):
+    """Read mode never needed it, and leaving it set would hand a read-mode
+    child the same multiplier."""
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="ok"))
+    adapters.ask_claude("read something")
+    assert "HARDLINE_ALLOW_WRITE" not in calls[0]["kwargs"]["env"]
+
+
 def test_ask_claude_write_disabled_by_default(monkeypatch, tmp_path):
     # Same gate as Codex's write path - a hardline registration that never
     # sets HARDLINE_ALLOW_WRITE (e.g. Hermes's) cannot reach bypassPermissions
