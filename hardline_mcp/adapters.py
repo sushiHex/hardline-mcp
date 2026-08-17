@@ -132,6 +132,25 @@ _CLAUDE_MODES = frozenset({"default", "advisory"})
 # narrower "can't mutate the workspace" line, not advisory mode's no-tools-
 # at-all isolation.
 _CLAUDE_READONLY_DENIED_TOOLS = "Edit,Write,NotebookEdit"
+
+# No MCP servers in a spawned Claude. Without this the child loads the host's
+# whole MCP configuration - including hardline-mcp itself, inheriting this
+# process's environment, so a write-enabled server could call ask_claude(
+# write=True) again and recurse unattended.
+_CLAUDE_NO_MCP = ["--strict-mcp-config"]
+
+# Load NO settings.json layer. This is what makes read-only actually read-only,
+# and it was measured rather than assumed: with the host's settings loaded, a
+# blanket `Bash(*)` permission overrides Claude Code's built-in Bash write
+# guard, so `--disallowedTools Edit,Write,NotebookEdit` stopped the Edit/Write
+# TOOLS while `echo x > file` wrote the file anyway. Dropping the settings
+# layer restores that guard.
+#
+# Deliberately NOT applied to the write path: hooks and deny rules also live
+# in settings.json, and on this host they are what keeps a spawned Claude out
+# of the Hermes skill tree. Stripping them from the one mode that is allowed
+# to write would trade a small exposure for a larger one.
+_CLAUDE_NO_HOST_SETTINGS = ["--setting-sources", ""]
 _CLAUDE_AUTH_OVERRIDE_ENV = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -1136,6 +1155,8 @@ def ask_claude(
         return _run_agent_cmd(
             "claude",
             _prefix_for("claude")
+            + _CLAUDE_NO_MCP
+            + _CLAUDE_NO_HOST_SETTINGS
             + [
                 "--disallowedTools",
                 _CLAUDE_READONLY_DENIED_TOOLS,
@@ -1181,9 +1202,16 @@ def ask_claude(
         ]
         run_cwd = neutral_cwd
     elif write:
-        argv += ["--permission-mode", "bypassPermissions"]
+        # No settings stripping here on purpose - see _CLAUDE_NO_HOST_SETTINGS.
+        # This is the mode that is supposed to write, so the host's hooks and
+        # deny rules are protection worth keeping, not noise to remove.
+        argv += _CLAUDE_NO_MCP + ["--permission-mode", "bypassPermissions"]
     else:
-        argv += ["--disallowedTools", _CLAUDE_READONLY_DENIED_TOOLS]
+        argv += (
+            _CLAUDE_NO_MCP
+            + _CLAUDE_NO_HOST_SETTINGS
+            + ["--disallowedTools", _CLAUDE_READONLY_DENIED_TOOLS]
+        )
     # Stop option parsing before the untrusted prompt. Otherwise a prompt that
     # begins with ``--`` can be interpreted as another Claude CLI flag.
     argv += ["--", prompt]
