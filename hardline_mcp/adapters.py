@@ -1035,12 +1035,36 @@ def ask_codex(
             # evidence exists to prevent. Attach it to the process error.
             run.update(_raw_evidence(failed_output))
         return run
-    return _parse_codex_jsonl(
-        run.get("reply", ""),
-        requested_model=model,
-        requested_effort=effort,
-        subscription_configured=subscription_configured,
+    return _carry_process_telemetry(
+        _parse_codex_jsonl(
+            run.get("reply", ""),
+            requested_model=model,
+            requested_effort=effort,
+            subscription_configured=subscription_configured,
+        ),
+        run,
     )
+
+
+# Process-level facts that belong to the RUN, not to anything the agent said.
+# The JSONL parsers build a fresh result dict from the stream, so without this
+# they silently dropped them: a plain call reported elapsed_s and timeout_s
+# while the same call with a model or effort set reported neither, and "how
+# long did that take / what budget was it under" became unanswerable on
+# exactly the calls slow enough for anyone to ask.
+_PROCESS_TELEMETRY = ("elapsed_s", "timeout_s")
+
+
+def _carry_process_telemetry(parsed: dict, run: dict) -> dict:
+    """Copy run-level timing onto a parsed result, without overwriting it.
+
+    Never clobbers: if a parser ever reports its own timing from the stream,
+    that is the more precise number and wins.
+    """
+    for key in _PROCESS_TELEMETRY:
+        if key in run and key not in parsed:
+            parsed[key] = run[key]
+    return parsed
 
 
 def _parse_claude_stream(
@@ -1281,11 +1305,14 @@ def ask_claude(
         if failed_output:
             run.update(_raw_evidence(failed_output))
         return run
-    return _parse_claude_stream(
-        run.get("reply", ""),
-        requested_model=model,
-        requested_effort=effort,
-        require_base_subscription=mode == "advisory",
+    return _carry_process_telemetry(
+        _parse_claude_stream(
+            run.get("reply", ""),
+            requested_model=model,
+            requested_effort=effort,
+            require_base_subscription=mode == "advisory",
+        ),
+        run,
     )
 
 

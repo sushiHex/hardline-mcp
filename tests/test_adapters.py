@@ -887,6 +887,39 @@ def test_write_mode_keeps_host_settings_but_still_loads_no_mcp(
     assert "--setting-sources" not in argv
 
 
+def test_run_timing_survives_the_jsonl_parse(monkeypatch):
+    """The parsers build a fresh result dict from the stream, so run-level
+    facts were dropped: a plain call reported elapsed_s/timeout_s while the
+    same call with a model or effort set reported neither - unanswerable on
+    exactly the calls slow enough for anyone to ask."""
+    _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"result"}'))
+    optioned = adapters.ask_claude("go", effort="high")
+    assert isinstance(optioned["elapsed_s"], float)
+    assert optioned["timeout_s"] == adapters._CLAUDE_TIMEOUT_S
+
+    _capture_run(monkeypatch, _FakeCompleted(stdout="ok"))
+    plain = adapters.ask_claude("go")
+    assert isinstance(plain["elapsed_s"], float)
+    assert plain["timeout_s"] == adapters._CLAUDE_TIMEOUT_S
+
+    _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    codex = adapters.ask_codex("go", effort="high")
+    assert isinstance(codex["elapsed_s"], float)
+    assert codex["timeout_s"] == adapters._CODEX_TIMEOUT_S
+
+
+def test_a_parsers_own_timing_is_not_clobbered(monkeypatch):
+    """If a parser ever reports timing from the stream itself, that is the
+    more precise number and must win over the process-level one."""
+    _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"result"}'))
+    monkeypatch.setattr(
+        adapters, "_parse_claude_stream", lambda *a, **k: {"ok": True, "elapsed_s": 1.5}
+    )
+    out = adapters.ask_claude("go", effort="high")
+    assert out["elapsed_s"] == 1.5  # not overwritten by the run's own value
+    assert out["timeout_s"] == adapters._CLAUDE_TIMEOUT_S  # ...but this filled in
+
+
 def test_spawned_agents_never_inherit_the_write_opt_in(
     monkeypatch, tmp_path, allow_write
 ):
