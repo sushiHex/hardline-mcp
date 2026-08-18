@@ -220,7 +220,23 @@ async def test_slow_dispatch_still_reports_dispatched(monkeypatch, tmp_path):
         assert not finished.is_set(), "waited the task out instead of dispatching"
         assert elapsed < 10, "returned far too slowly to be a dispatch"
     finally:
-        release.set()  # let the pool thread drain rather than leaking it
+        release.set()
+        # Wait for the worker to DELIVER before this test returns.
+        # mailbox.send resolves _DEFAULT_PATH at call time and monkeypatch
+        # restores it the instant the test ends, so a worker that delivers
+        # late writes into the operator's REAL ~/.cache mailbox. That leak had
+        # been dropping a stray {"reply": "eventually"} into production on
+        # every run since 2026-07-30 - 71 of them by the time it was noticed.
+        deadline = time.monotonic() + 30
+        delivered = []
+        while time.monotonic() < deadline:
+            delivered, _ = server.mailbox.inbox(
+                "claude", auto_ack=False, db_path=tmp_path / "mb.db"
+            )
+            if delivered:
+                break
+            time.sleep(0.02)
+    assert delivered, "worker never delivered into the test mailbox"
 
 
 def test_unlaned_process_cannot_ack_a_lane(monkeypatch, tmp_path):
