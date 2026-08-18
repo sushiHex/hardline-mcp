@@ -1206,6 +1206,13 @@ def ask_claude(
     permission prompt would otherwise hang until timeout instead of ever
     being answered.
 
+    Point ``workdir`` at a disposable git WORKTREE for write work. Starting
+    from a clean worktree makes ``git status --porcelain`` afterwards the
+    complete and authoritative list of what the run changed - no before-and-
+    after snapshot, no interference from anything else in flight, and no need
+    to take the agent's own account of what it did on trust. An agent's prose
+    summary of its work is a claim; the worktree makes checking it one command.
+
     One consequence of dropping the host settings layer on read calls: an
     omitted ``model``/``effort`` now falls to Claude Code's BUILT-IN defaults,
     not to whatever the host's settings.json configures. On a host that sets a
