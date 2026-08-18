@@ -188,11 +188,20 @@ async def test_slow_dispatch_still_reports_dispatched(monkeypatch, tmp_path):
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
     monkeypatch.setattr(server, "_ASYNC_EARLY_FAILURE_S", 0.2)
 
+    # The worker blocks on an event the TEST releases, rather than sleeping a
+    # fixed duration. The old version slept 1.0s and asserted `started.is_set()`
+    # immediately after dispatch, which required the pool to have SCHEDULED the
+    # thread inside the 0.2s early-failure window - scheduler timing, not the
+    # property under test. It failed on a loaded CI runner (ubuntu 3.13) while
+    # passing everywhere else, which is the worst way for a test to be wrong.
     started = threading.Event()
+    finished = threading.Event()
+    release = threading.Event()
 
     def slow_ask(prompt, **kwargs):
         started.set()
-        time.sleep(1.0)  # outlives the early-failure window
+        release.wait(timeout=30)  # cannot finish until the test says so
+        finished.set()
         return {"ok": True, "reply": "eventually"}
 
     monkeypatch.setattr(server.adapters, "ask_codex", slow_ask)
@@ -201,10 +210,17 @@ async def test_slow_dispatch_still_reports_dispatched(monkeypatch, tmp_path):
     dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
     elapsed = time.monotonic() - began
 
-    assert dispatched["ok"] is True
-    assert dispatched["dispatched"] is True
-    assert started.is_set(), "the task should actually be running"
-    assert elapsed < 0.9, "must return while the task runs, not wait it out"
+    try:
+        assert dispatched["ok"] is True
+        assert dispatched["dispatched"] is True
+        # Wait for the worker instead of assuming it was scheduled promptly.
+        assert started.wait(timeout=30), "the task never started"
+        # The real property: the dispatch returned while the task was STILL
+        # running. Deterministic - it cannot have finished, we never released it.
+        assert not finished.is_set(), "waited the task out instead of dispatching"
+        assert elapsed < 10, "returned far too slowly to be a dispatch"
+    finally:
+        release.set()  # let the pool thread drain rather than leaking it
 
 
 def test_unlaned_process_cannot_ack_a_lane(monkeypatch, tmp_path):
