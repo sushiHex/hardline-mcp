@@ -234,14 +234,30 @@ everywhere else, e.g. an always-on gateway's registration.
 ### Codex write access and background dispatch
 
 `ask_codex` is read-only unless `write=True` is passed explicitly (and
-`HARDLINE_ALLOW_WRITE=1` is set — see above) — omit `write` and behavior is
-unchanged from before this option existed. `write=True` requires an explicit
-`workdir` (never an implicit cwd) and is rejected with `mode="advisory"`
-(advisory is fixed read-only by design). It adds `--sandbox workspace-write
--a never`: approvals are disabled because a spawned Codex process's stdin is
-`/dev/null`, so any approval prompt would just hang until timeout instead of
-ever being answered — the sandbox boundary is what keeps an unattended,
-un-approvable run safe.
+`HARDLINE_ALLOW_WRITE=1` is set — see above). Every non-advisory read call
+pins `--sandbox read-only` rather than leaving it to the host.
+
+That pin is the guarantee. `--sandbox` used to be passed only for `write`
+(`workspace-write`) and advisory (`read-only`), so the default path silently
+inherited whatever `~/.codex/config.toml` set. Measured on a host with
+`[windows] sandbox = "elevated"` and the target project marked
+`trust_level = "trusted"`: a plain `ask_codex` call ran `echo x > probe.txt`
+and **the file was written**, while this README promised read-only. (In an
+*untrusted* directory Codex refuses to run at all, which is why the hole was
+easy to miss — the obvious test never exercises the sandbox.) A safety claim
+has to be enforced by a flag hardline passes, not by the operator's config
+happening to agree with it.
+
+Unlike Claude's read posture — a command classifier, see below — this is a
+real OS-level sandbox, so a side-effect write from a test run or build is
+blocked too.
+
+`write=True` requires an explicit `workdir` (never an implicit cwd) and is
+rejected with `mode="advisory"` (advisory is fixed read-only by design). It
+swaps in `--sandbox workspace-write -a never`: approvals are disabled because
+a spawned Codex process's stdin is `/dev/null`, so any approval prompt would
+just hang until timeout instead of ever being answered — the sandbox boundary
+is what keeps an unattended, un-approvable run safe.
 
 ```text
 ask_codex(
@@ -333,10 +349,45 @@ wrappers and admin-managed Claude settings remain outside Hardline's control.
 Parity with Codex: unless `write=True` is passed, every `ask_claude` call —
 including the bare `ask_claude(prompt)` path — denies Claude the
 `Edit`/`Write`/`NotebookEdit` tools (`--disallowedTools Edit,Write,
-NotebookEdit`). Read/Grep/Bash and the rest of the built-in toolset still
-work, the same way Codex's read-only sandbox permits inspection but not
-mutation — this is a closer analog than advisory mode's zero-tools
+NotebookEdit`) and drops the host's settings layer (`--setting-sources ""`).
+Read/Grep/Bash and the rest of the built-in toolset still work — a closer
+analog to Codex's read-only sandbox than advisory mode's zero-tools
 restriction, which is a separate, stricter concept for isolated opinions.
+
+**Both halves are load-bearing.** `--disallowedTools` denies the Edit/Write
+*tools* and nothing more; Bash writes files just as well. A host whose
+`settings.json` grants a blanket `Bash(*)` permission overrides Claude Code's
+own built-in Bash write guard, and for a while every "read-only" `ask_claude`
+call here could modify the filesystem. Measured against a real `claude -p`
+asked to run `echo x > probe.txt`:
+
+| flags | file written |
+| --- | --- |
+| `--disallowedTools Edit,Write,NotebookEdit` | **yes** |
+| `+ --strict-mcp-config` | **yes** |
+| `+ --setting-sources ""` | no |
+
+**Read mode is a posture, not a sandbox.** Dropping the settings layer
+restores a command *classifier*. It catches a direct write; it cannot catch a
+write that is a side effect — a test run dropping a cache, a build emitting
+artifacts, a `git` command firing a hook, an interpreter whose name says
+nothing about what it does. Treat it as default-safe, never as containment.
+
+One consequence: with the host settings layer gone, an omitted `model`/`effort`
+on a read call falls to Claude Code's **built-in** defaults rather than
+whatever `settings.json` configures. On a host set to a high default effort
+that is a cheaper, shallower answer than the same call used to give — pass
+`effort` explicitly when it matters. `CLAUDE.md` is unaffected
+(`--setting-sources` selects settings layers only), so a spawned Claude still
+picks up the target repo's conventions.
+
+`--strict-mcp-config` is passed on **every** spawn, read and write alike, so a
+spawned agent loads no MCP servers. It is not, on its own, a recursion
+boundary: it stops the child *discovering* hardline through the host's MCP
+config, but not from launching `claude --mcp-config`, running the hardline
+executable, or starting another agent CLI. The boundary is the environment —
+`HARDLINE_ALLOW_WRITE` is stripped from every spawned child, so no route back
+into hardline arrives write-enabled.
 
 `write=True` requires an explicit `workdir` (never write into hardline-mcp's
 own cwd), is rejected with `mode="advisory"`, and is refused unless
@@ -354,6 +405,21 @@ ask_claude(
   write=True,
 )
 ```
+
+**Point `workdir` at a git worktree.** The reason write mode exists is to stop
+an orchestrating agent asking for a change in prose and then reimplementing it
+itself — paying for the same work twice. Have Claude edit the files, then
+review a `git diff` rather than re-deriving the change. A worktree keeps that
+isolated from anything else in flight and makes the review a clean diff:
+
+```text
+git worktree add ../proj-feature -b feature
+ask_claude(prompt="...", workdir="C:/src/proj-feature", write=True)
+git -C ../proj-feature diff
+```
+
+The directory must already exist — `write=True` will not create it, and a
+missing `workdir` is rejected rather than silently falling back to a default.
 
 `workdir` also works without `write` — Claude has no `-C`/`--cd` flag, so
 hardline targets it by launching the child process with that directory as

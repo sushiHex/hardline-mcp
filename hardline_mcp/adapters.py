@@ -139,6 +139,12 @@ _CLAUDE_READONLY_DENIED_TOOLS = "Edit,Write,NotebookEdit"
 # write=True) again and recurse unattended.
 _CLAUDE_NO_MCP = ["--strict-mcp-config"]
 
+# Codex's read-only sandbox, pinned rather than inherited. Codex DOES have a
+# real OS-level sandbox - unlike Claude, whose read-only posture is a command
+# classifier - but hardline only ever asked for it on the advisory path, so the
+# default path took whatever the host config said. Ask for it explicitly.
+_CODEX_READONLY_SANDBOX = ["--sandbox", "read-only"]
+
 # Load NO settings.json layer. Measured rather than assumed: with the host's
 # settings loaded, a blanket `Bash(*)` permission overrides Claude Code's
 # built-in Bash write guard, so `--disallowedTools Edit,Write,NotebookEdit`
@@ -941,7 +947,11 @@ def ask_codex(
         return error
     argv = _prefix_for("codex") + ["--ephemeral"]
     if _is_plain_call(model, effort, mode, workdir, write):
-        return _run_agent_cmd("codex", argv + ["--", prompt], on_spawn=on_spawn)
+        return _run_agent_cmd(
+            "codex",
+            argv + _CODEX_READONLY_SANDBOX + ["--", prompt],
+            on_spawn=on_spawn,
+        )
     if model is not None:
         argv += ["--model", model]
     argv.append("--json")
@@ -956,6 +966,16 @@ def ask_codex(
         argv += ["-C", workdir]
     if write:
         argv += ["--sandbox", "workspace-write", "-a", "never"]
+    elif mode != "advisory":
+        # Pin read-only EXPLICITLY. --sandbox was previously passed only for
+        # write (workspace-write) and advisory (read-only), so the default path
+        # inherited whatever the host's ~/.codex/config.toml set. Measured: on
+        # a host with `[windows] sandbox = "elevated"` and the target project
+        # marked trust_level = "trusted", a default ask_codex call ran
+        # `echo x > probe.txt` and the file was written - while the docs
+        # promised read-only unless write=True. The guarantee has to come from
+        # the flag we pass, not from the operator's config happening to agree.
+        argv += _CODEX_READONLY_SANDBOX
     if mode == "advisory":
         child_env = dict(os.environ)
         if _codex_auth_mode(child_env) != "chatgpt":
