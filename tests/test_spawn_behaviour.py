@@ -11,6 +11,7 @@ tens of seconds. Opt in with HARDLINE_TEST_SPAWN=1.
 """
 
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -53,6 +54,32 @@ def test_read_mode_does_not_write_through_bash(monkeypatch):
     assert not (workdir / "probe.txt").exists(), (
         "read mode wrote a file through Bash: " + (out.get("reply") or "")[:200]
     )
+
+
+def test_codex_read_mode_does_not_write_in_a_trusted_project(monkeypatch, tmp_path):
+    """Codex has a REAL sandbox, but hardline only asked for it on the advisory
+    path - so the default path inherited the host's ~/.codex/config.toml. On a
+    host with `[windows] sandbox = "elevated"` and the target project marked
+    trust_level = "trusted", a default ask_codex call wrote the file.
+
+    Needs a trusted project to be meaningful: in an untrusted directory codex
+    refuses to run at all ("Not inside a trusted directory"), so the sandbox is
+    never exercised. HARDLINE_TEST_TRUSTED_DIR names one.
+    """
+    trusted = os.environ.get("HARDLINE_TEST_TRUSTED_DIR", "")
+    if not trusted or not Path(trusted).is_dir():
+        pytest.skip("set HARDLINE_TEST_TRUSTED_DIR to a codex-trusted project")
+    workdir = Path(trusted) / ".tmp" / "hardline-codex-probe"
+    if workdir.exists():
+        shutil.rmtree(workdir, ignore_errors=True)
+    workdir.mkdir(parents=True)
+    try:
+        out = adapters.ask_codex(_WRITE_PROMPT, workdir=str(workdir))
+        assert not (workdir / "probe.txt").exists(), (
+            "codex read mode wrote a file: " + str(out)[:200]
+        )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def test_write_mode_still_writes(monkeypatch, tmp_path):

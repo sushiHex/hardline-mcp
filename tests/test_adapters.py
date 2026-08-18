@@ -539,9 +539,18 @@ def test_ask_codex_write_adds_workspace_write_sandbox(
     assert argv[argv.index("-C") + 1] == str(tmp_path)
 
 
-def test_ask_codex_write_false_keeps_prior_argv_shape(monkeypatch):
-    # Default (write=False) must stay byte-for-byte identical to before this
-    # param existed - Hermes's existing bare ask_codex() calls depend on it.
+def test_ask_codex_default_pins_the_read_only_sandbox(monkeypatch):
+    """This test previously asserted `--sandbox` was ABSENT by default, to keep
+    the argv byte-identical to before the write param existed. That preserved a
+    hole: with no --sandbox flag the child inherits the host's
+    ~/.codex/config.toml, and on a host with `[windows] sandbox = "elevated"`
+    and the target project marked trusted, a default ask_codex call ran
+    `echo x > probe.txt` and the file WAS written - while the docs promised
+    read-only unless write=True.
+
+    Stability of the argv is not worth an unenforced safety claim. The
+    guarantee has to come from the flag we pass.
+    """
     monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
@@ -550,8 +559,25 @@ def test_ask_codex_write_false_keeps_prior_argv_shape(monkeypatch):
 
     assert out["ok"] is True
     argv = calls[0]["cmd"]
-    assert "--sandbox" not in argv
-    assert "-a" not in argv
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert "-a" not in argv  # approvals untouched on the read path
+
+
+def test_ask_codex_optioned_read_also_pins_read_only(monkeypatch):
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    adapters.ask_codex("summarize", effort="high")
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+
+
+def test_ask_codex_write_still_gets_workspace_write(monkeypatch, tmp_path, allow_write):
+    """The read-only pin must not shadow the write sandbox."""
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    adapters.ask_codex("fix it", workdir=str(tmp_path), write=True)
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert "read-only" not in argv
+    assert argv[argv.index("-a") + 1] == "never"
 
 
 def test_ask_codex_ignores_transient_error_before_completed_turn(monkeypatch):
