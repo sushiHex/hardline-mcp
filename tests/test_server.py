@@ -30,6 +30,24 @@ def _immediate_submit(fn, *args, **kwargs):
     return _ImmediateFuture(fn(*args, **kwargs))
 
 
+def _enable_quota_decision(monkeypatch, selected_provider, *, reason="quota policy"):
+    monkeypatch.setattr(server.adapters, "_quota_router_configured", lambda: True)
+    monkeypatch.setattr(
+        server.adapters,
+        "_claude_quota_route",
+        lambda **kwargs: {
+            "requested_provider": "claude",
+            "selected_provider": selected_provider,
+            "reserve_percent": 5.0,
+            "reserve_enforced": selected_provider != "claude",
+            "quota_status": "available",
+            "claude_remaining_percent": 2.0,
+            "chatgpt_remaining_percent": 86.0,
+            "reason": reason,
+        },
+    )
+
+
 @pytest.mark.anyio
 async def test_async_result_goes_to_this_sessions_lane(
     monkeypatch, tmp_path, in_session
@@ -482,6 +500,29 @@ async def test_ask_claude_defaults_remain_backward_compatible(monkeypatch):
     }
 
 
+@pytest.mark.anyio
+async def test_ask_claude_forwards_explicit_claude_requirement(monkeypatch):
+    captured = {}
+
+    _enable_quota_decision(monkeypatch, "claude")
+
+    def fake_ask_claude(prompt, **kwargs):
+        captured.update(prompt=prompt, **kwargs)
+        return {"ok": True, "reply": "Claude-specific response"}
+
+    monkeypatch.setattr(server.adapters, "ask_claude", fake_ask_claude)
+
+    result = await server.ask_claude(
+        prompt="Claude-specific review",
+        require_claude=True,
+    )
+
+    assert result["ok"] is True
+    assert "require_claude" not in captured
+    assert result["routing"]["executed_agent"] == "claude"
+    assert result["routing"]["decision"] == "executed"
+
+
 def test_send_impl_persists_without_deliver(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
@@ -704,6 +745,92 @@ async def test_ask_claude_async_delivers_result_via_mailbox(monkeypatch, tmp_pat
 
 
 @pytest.mark.anyio
+async def test_ask_claude_async_reports_chatgpt_as_sender_after_redirect(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    _enable_quota_decision(monkeypatch, "chatgpt", reason="ChatGPT has more headroom")
+    codex_calls = []
+    monkeypatch.setattr(
+        server.adapters,
+        "ask_codex",
+        lambda prompt, **kwargs: codex_calls.append((prompt, kwargs)) or {
+            "ok": True,
+            "reply": "handled by ChatGPT",
+        },
+    )
+
+    dispatched = await server.ask_claude_async(
+        prompt="route this", from_agent="hermes"
+    )
+
+    message = (await server.inbox(agent="hermes"))["messages"][0]
+    assert message["sender"] == "codex"
+    body = json.loads(message["body"])
+    assert body["routing"]["selected_provider"] == "chatgpt"
+    assert body["routing"]["executed_agent"] == "codex"
+    assert body["routing"]["option_mapping"]["mode"]["applied"] == "advisory"
+    assert dispatched["routing"] == body["routing"]
+    status = await server.job_status(job_id=dispatched["job_id"])
+    assert status["job"]["agent"] == "codex"
+    assert status["job"]["request"]["routing"]["decision"] == "redirected"
+    assert codex_calls[0][1]["mode"] == "advisory"
+    assert codex_calls[0][1]["model"] is None
+    assert codex_calls[0][1]["workdir"] is None
+    assert codex_calls[0][1]["write"] is False
+
+
+@pytest.mark.anyio
+async def test_claude_model_pin_blocks_instead_of_being_relabelled(monkeypatch):
+    _enable_quota_decision(monkeypatch, "chatgpt")
+    monkeypatch.setattr(
+        server.adapters,
+        "ask_claude",
+        lambda *args, **kwargs: pytest.fail("Claude must not spawn below reserve"),
+    )
+    monkeypatch.setattr(
+        server.adapters,
+        "ask_codex",
+        lambda *args, **kwargs: pytest.fail("Claude model pin is not portable"),
+    )
+
+    result = await server.ask_claude(prompt="review", model="opus")
+
+    assert result["ok"] is False
+    assert result["routing"]["decision"] == "blocked"
+    assert result["routing"]["executed_agent"] is None
+    assert "model pin" in result["error"].lower()
+
+
+@pytest.mark.anyio
+async def test_quota_policy_block_creates_no_async_job(monkeypatch):
+    _enable_quota_decision(monkeypatch, None, reason="quota telemetry unavailable")
+    monkeypatch.setattr(
+        server._async_executor,
+        "submit",
+        lambda *args, **kwargs: pytest.fail("blocked work must not create a task"),
+    )
+    monkeypatch.setattr(
+        server.adapters,
+        "ask_claude",
+        lambda *args, **kwargs: pytest.fail("blocked work must not spawn Claude"),
+    )
+    monkeypatch.setattr(
+        server.adapters,
+        "ask_codex",
+        lambda *args, **kwargs: pytest.fail("unknown telemetry must not guess Codex"),
+    )
+
+    result = await server.ask_claude_async(prompt="review", from_agent="hermes")
+
+    assert result["ok"] is False
+    assert result["dispatched"] is False
+    assert "job_id" not in result
+    assert result["routing"]["decision"] == "blocked"
+
+
+@pytest.mark.anyio
 async def test_ask_claude_async_omits_label_when_not_supplied(monkeypatch, tmp_path):
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
@@ -911,12 +1038,16 @@ async def test_list_agents_reports_roster_observed_names_and_own_identity(
 @pytest.mark.anyio
 async def test_server_info_reports_version_limits_and_timeouts(monkeypatch, tmp_path):
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_QUOTA_ROUTER_COMMAND_JSON", '["quota-router"]')
+    monkeypatch.setenv("HARDLINE_CLAUDE_WEEKLY_RESERVE_PERCENT", "7")
     got = await server.server_info()
     assert got["limits"]["inbox_default"] == server.mailbox.DEFAULT_INBOX_LIMIT
     assert got["limits"]["max_response_chars"] == server._MAX_RESPONSE_CHARS
     assert set(got["timeouts_s"]) == set(server.adapters.known_agents())
     assert got["module_path"].endswith("mailbox.py")
     assert isinstance(got["write_enabled"], bool)
+    assert got["quota_routing"]["configured"] is True
+    assert got["quota_routing"]["claude_weekly_reserve_percent"] == 7
 
 
 @pytest.mark.anyio

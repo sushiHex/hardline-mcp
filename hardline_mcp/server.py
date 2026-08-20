@@ -419,6 +419,13 @@ async def server_info() -> dict:
         "async_max_workers": _ASYNC_MAX_WORKERS,
         "write_enabled": write_ok,
         "write_note": write_err,
+        "quota_routing": {
+            "configured": adapters._quota_router_configured(),
+            "claude_weekly_reserve_percent": adapters._quota_env_float(
+                "HARDLINE_CLAUDE_WEEKLY_RESERVE_PERCENT", 5.0
+            ),
+            "policy": "prefer-more-weekly-headroom; Claude reserve is fail-closed",
+        },
     }
 
 
@@ -682,6 +689,152 @@ async def ask_codex(
     )
 
 
+def _routing_metadata(raw: dict, *, selected_agent: str | None, decision: str) -> dict:
+    routing = dict(raw)
+    routing.update(
+        requested_tool="ask_claude",
+        requested_agent="claude",
+        executed_agent=selected_agent,
+        decision=decision,
+    )
+    return routing
+
+
+def _ask_claude_with_reserve_guard(
+    prompt: str,
+    *,
+    model: str | None,
+    effort: str,
+    mode: str,
+    workdir: str | None,
+    write: bool,
+    require_claude: bool,
+    on_spawn=None,
+) -> dict:
+    """Serialize the final live reserve check together with a Claude launch."""
+    with adapters._CLAUDE_DISPATCH_LOCK:
+        raw = adapters._claude_quota_route(require_claude=require_claude)
+        if raw is None or raw.get("selected_provider") != "claude":
+            raw = raw or {
+                "requested_provider": "claude",
+                "selected_provider": None,
+                "reason": "Claude reserve policy was not configured at launch time.",
+            }
+            routing = _routing_metadata(raw, selected_agent=None, decision="blocked")
+            return {
+                "ok": False,
+                "error": f"{routing['reason']} Claude was not started.",
+                "routing": routing,
+            }
+        result = adapters.ask_claude(
+            prompt,
+            model=model,
+            effort=effort,
+            mode=mode,
+            workdir=workdir,
+            write=write,
+            on_spawn=on_spawn,
+        )
+        result = dict(result)
+        result["routing"] = _routing_metadata(
+            raw, selected_agent="claude", decision="executed"
+        )
+        return result
+
+
+def _plan_claude_dispatch(
+    *,
+    model: str | None,
+    effort: str,
+    mode: str,
+    workdir: str | None,
+    write: bool,
+    require_claude: bool,
+) -> dict:
+    """Plan the actual provider before any subprocess or durable job exists."""
+    claude_kwargs = {
+        "model": model,
+        "effort": effort,
+        "mode": mode,
+        "workdir": workdir,
+        "write": write,
+    }
+    if not adapters._quota_router_configured():
+        return {
+            "ok": True,
+            "agent": "claude",
+            "ask_fn": adapters.ask_claude,
+            "ask_kwargs": claude_kwargs,
+            "routing": None,
+        }
+
+    raw = adapters._claude_quota_route(require_claude=require_claude)
+    selected = raw.get("selected_provider") if raw else None
+    if selected is None:
+        routing = _routing_metadata(raw or {}, selected_agent=None, decision="blocked")
+        return {
+            "ok": False,
+            "error": routing.get("reason", "Claude reserve blocked dispatch"),
+            "routing": routing,
+        }
+
+    if selected == "claude":
+        guarded_kwargs = dict(claude_kwargs)
+        guarded_kwargs["require_claude"] = require_claude
+        return {
+            "ok": True,
+            "agent": "claude",
+            "ask_fn": _ask_claude_with_reserve_guard,
+            "ask_kwargs": guarded_kwargs,
+            "routing": _routing_metadata(
+                raw, selected_agent="claude", decision="selected"
+            ),
+        }
+
+    ineligible = None
+    if model is not None:
+        ineligible = "A Claude-specific model pin cannot be translated to ChatGPT."
+    elif write:
+        ineligible = "A write-enabled Claude request cannot be redirected safely."
+    elif workdir is not None:
+        ineligible = (
+            "A workspace-targeted Claude request cannot be redirected "
+            "in subscription-only mode."
+        )
+    elif mode not in {"default", "advisory"}:
+        ineligible = f"Unsupported Claude mode for redirection: {mode!r}."
+    if ineligible:
+        routing = _routing_metadata(raw, selected_agent=None, decision="blocked")
+        routing["redirect_ineligible_reason"] = ineligible
+        return {
+            "ok": False,
+            "error": f"{raw['reason']} {ineligible}",
+            "routing": routing,
+        }
+
+    routing = _routing_metadata(raw, selected_agent="codex", decision="redirected")
+    routing["option_mapping"] = {
+        "model": {"requested": model, "applied": None},
+        "effort": {"requested": effort, "applied": effort},
+        "mode": {"requested": mode, "applied": "advisory"},
+        "workdir": {"requested": workdir, "applied": None},
+        "write": {"requested": write, "applied": False},
+    }
+    return {
+        "ok": True,
+        "agent": "codex",
+        "ask_fn": adapters.ask_codex,
+        "ask_kwargs": {
+            "model": None,
+            "effort": effort,
+            "mode": "advisory",
+            "workdir": None,
+            "write": False,
+        },
+        "routing": routing,
+    }
+
+
 def _ask_async_impl(
     agent: str,
     ask_fn,
@@ -694,6 +847,7 @@ def _ask_async_impl(
     mode: str,
     workdir: str | None,
     write: bool,
+    routing: dict | None = None,
 ) -> dict:
     """Shared body for ask_codex_async/ask_claude_async - only the adapter
     function and the mailbox sender identity differ between agents.
@@ -728,6 +882,7 @@ def _ask_async_impl(
             "mode": mode,
             "workdir": workdir,
             "write": write,
+            **({"routing": routing} if routing is not None else {}),
         },
     )
 
@@ -749,6 +904,8 @@ def _ask_async_impl(
                 "job_id": job_id,
                 "cancelled_before_start": True,
             }
+            if routing is not None:
+                cancelled["routing"] = routing
             if label is not None:
                 cancelled["label"] = label
             try:
@@ -757,8 +914,7 @@ def _ask_async_impl(
                 traceback.print_exc()
             return cancelled
         try:
-            result = ask_fn(
-                prompt,
+            ask_kwargs = dict(
                 model=model,
                 effort=effort,
                 mode=mode,
@@ -771,12 +927,15 @@ def _ask_async_impl(
                     job_id, pid, started_key=jobs.process_key(pid)
                 ),
             )
+            result = ask_fn(prompt, **ask_kwargs)
         except Exception as exc:  # noqa: BLE001 - last-resort dispatch backstop
             result = {
                 "ok": False,
                 "error": f"{agent} async dispatch raised {type(exc).__name__}: {exc}",
                 "traceback": traceback.format_exc(),
             }
+        if routing is not None and "routing" not in result:
+            result["routing"] = routing
         if label is not None:
             result["label"] = label
         result["job_id"] = job_id
@@ -832,7 +991,7 @@ def _ask_async_impl(
         # Failed before we finished waiting. The mailbox copy is still written
         # (above), so the record survives; this just refuses to call it a
         # successful dispatch.
-        return {
+        failure = {
             "ok": False,
             "dispatched": False,
             "error": early.get("error", f"{agent} dispatch failed immediately"),
@@ -840,7 +999,10 @@ def _ask_async_impl(
             "label": label,
             "lane": recipient,
         }
-    return {
+        if routing is not None:
+            failure["routing"] = routing
+        return failure
+    receipt = {
         "ok": True,
         "dispatched": True,
         # The durable handle. A label is a correlation aid the caller chooses
@@ -850,6 +1012,9 @@ def _ask_async_impl(
         "lane": recipient,
         "track_with": f"job_status(job_id={job_id!r})",
     }
+    if routing is not None:
+        receipt["routing"] = routing
+    return receipt
 
 
 @mcp.tool()
@@ -899,6 +1064,7 @@ async def ask_claude(
     mode: ClaudeMode = "default",
     workdir: str | None = None,
     write: bool = False,
+    require_claude: bool = False,
 ) -> dict:
     """Ask Claude Code a question and wait for its reply.
 
@@ -922,6 +1088,12 @@ async def ask_claude(
     auth-verification, and safeguard fallback metadata in addition to
     ``ok``/``reply``.
 
+    When quota routing is configured, suitable requests are redirected to
+    ChatGPT whenever it has more weekly headroom. ``require_claude=True`` keeps
+    genuinely Claude-specific work on Claude only while the protected weekly
+    reserve remains; it never overrides the reserve floor. Results include a
+    ``routing`` object identifying the requested and selected providers.
+
     DAMAGED OUTPUT: if any output line could not be parsed, the result comes
     back ``ok: false`` with ``malformed_lines`` and the recovered text under
     ``partial_reply`` instead of ``reply`` — content preserved but NOT
@@ -929,15 +1101,22 @@ async def ask_claude(
     terminal event, making the survivor stale. Do not discard a
     ``partial_reply`` on ``ok: false`` alone; read it and judge it.
     """
-    return await _in_thread(
-        adapters.ask_claude,
-        prompt,
+    plan = await _in_thread(
+        _plan_claude_dispatch,
         model=model,
         effort=effort,
         mode=mode,
         workdir=workdir,
         write=write,
+        require_claude=require_claude,
     )
+    if not plan["ok"]:
+        return {"ok": False, "error": plan["error"], "routing": plan["routing"]}
+    result = await _in_thread(plan["ask_fn"], prompt, **plan["ask_kwargs"])
+    result = dict(result)
+    if plan["routing"] is not None and "routing" not in result:
+        result["routing"] = plan["routing"]
+    return result
 
 
 @mcp.tool()
@@ -950,12 +1129,14 @@ async def ask_claude_async(
     mode: ClaudeMode = "default",
     workdir: str | None = None,
     write: bool = False,
+    require_claude: bool = False,
 ) -> dict:
     """Dispatch a Claude task in the background; returns immediately.
 
     Runs the same ``ask_claude`` in a background thread, then delivers the
-    result through the existing mailbox as a message from "claude" to
-    ``from_agent`` — poll it with ``inbox(agent=from_agent)``. The delivered
+    result through the existing mailbox to ``from_agent`` — poll it with
+    ``inbox(agent=from_agent)``. The sender is ``claude`` when Claude runs and
+    ``codex`` when quota policy redirects the task to ChatGPT. The delivered
     message body is the JSON-encoded ``ask_claude`` result, plus ``label`` if
     supplied (use it to match results when firing several concurrent
     dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
@@ -964,18 +1145,36 @@ async def ask_claude_async(
     ``mode`` mirrors ``ask_claude`` — background review is exactly where
     advisory isolation is wanted, and omitting it here was a parity gap.
     """
-    return await _in_thread(
-        _ask_async_impl,
-        "claude",
-        adapters.ask_claude,
-        prompt,
-        from_agent,
-        label=label,
+    plan = await _in_thread(
+        _plan_claude_dispatch,
         model=model,
         effort=effort,
         mode=mode,
         workdir=workdir,
         write=write,
+        require_claude=require_claude,
+    )
+    if not plan["ok"]:
+        return {
+            "ok": False,
+            "dispatched": False,
+            "error": plan["error"],
+            "routing": plan["routing"],
+        }
+    ask_kwargs = plan["ask_kwargs"]
+    return await _in_thread(
+        _ask_async_impl,
+        plan["agent"],
+        plan["ask_fn"],
+        prompt,
+        from_agent,
+        label=label,
+        model=ask_kwargs["model"],
+        effort=ask_kwargs["effort"],
+        mode=ask_kwargs["mode"],
+        workdir=ask_kwargs["workdir"],
+        write=ask_kwargs["write"],
+        routing=plan["routing"],
     )
 
 

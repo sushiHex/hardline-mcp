@@ -840,6 +840,92 @@ def test_ask_claude_rejects_unknown_mode(monkeypatch):
     assert calls == []
 
 
+def _quota_snapshot(*, claude_remaining, chatgpt_remaining):
+    return {
+        "providers": {
+            "claude": {
+                "status": "available",
+                "weekly": {
+                    "remaining_percent": claude_remaining,
+                    "reset_at_utc": "2026-08-21T00:00:00+00:00",
+                },
+            },
+            "chatgpt": {
+                "status": "available",
+                "weekly": {
+                    "remaining_percent": chatgpt_remaining,
+                    "reset_at_utc": "2026-08-27T03:31:34+00:00",
+                },
+            },
+        }
+    }
+
+
+def _enable_quota_router(monkeypatch, snapshot):
+    monkeypatch.setenv("HARDLINE_QUOTA_ROUTER_COMMAND_JSON", '["quota-router"]')
+    monkeypatch.setenv("HARDLINE_CLAUDE_WEEKLY_RESERVE_PERCENT", "5")
+    monkeypatch.setattr(adapters, "_fetch_subscription_quota", lambda: snapshot)
+
+
+def test_ask_claude_redirects_to_chatgpt_when_it_has_more_weekly_quota(monkeypatch):
+    _enable_quota_router(
+        monkeypatch,
+        _quota_snapshot(claude_remaining=2, chatgpt_remaining=86),
+    )
+    decision = adapters._claude_quota_route(require_claude=False)
+
+    assert decision["requested_provider"] == "claude"
+    assert decision["selected_provider"] == "chatgpt"
+    assert decision["claude_remaining_percent"] == 2
+    assert decision["chatgpt_remaining_percent"] == 86
+
+
+def test_required_claude_is_refused_below_reserve_instead_of_consuming(monkeypatch):
+    _enable_quota_router(
+        monkeypatch,
+        _quota_snapshot(claude_remaining=2, chatgpt_remaining=86),
+    )
+    decision = adapters._claude_quota_route(require_claude=True)
+
+    assert decision["selected_provider"] is None
+    assert decision["reserve_enforced"] is True
+    assert "reserve" in decision["reason"].lower()
+
+
+def test_required_claude_can_run_above_reserve_despite_chatgpt_headroom(monkeypatch):
+    _enable_quota_router(
+        monkeypatch,
+        _quota_snapshot(claude_remaining=20, chatgpt_remaining=86),
+    )
+    decision = adapters._claude_quota_route(require_claude=True)
+
+    assert decision["selected_provider"] == "claude"
+
+
+def test_claude_becomes_preferred_automatically_after_its_reset(monkeypatch):
+    _enable_quota_router(
+        monkeypatch,
+        _quota_snapshot(claude_remaining=99, chatgpt_remaining=86),
+    )
+    decision = adapters._claude_quota_route(require_claude=False)
+
+    assert decision["selected_provider"] == "claude"
+    assert decision["claude_remaining_percent"] == 99
+
+
+def test_quota_lookup_failure_blocks_without_guessing_chatgpt(monkeypatch):
+    monkeypatch.setenv("HARDLINE_QUOTA_ROUTER_COMMAND_JSON", '["quota-router"]')
+    monkeypatch.setattr(
+        adapters,
+        "_fetch_subscription_quota",
+        lambda: (_ for _ in ()).throw(RuntimeError("telemetry unavailable")),
+    )
+    decision = adapters._claude_quota_route(require_claude=False)
+
+    assert decision["selected_provider"] is None
+    assert decision["quota_status"] == "unavailable"
+
+
 def test_ask_claude_default_denies_edit_write(monkeypatch):
     # Parity with Codex: safe by default, matching test_ask_codex_write_false_keeps_prior_argv_shape.
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="claude reply"))
