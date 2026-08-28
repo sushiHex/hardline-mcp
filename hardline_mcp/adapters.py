@@ -1206,10 +1206,12 @@ def _fetch_subscription_quota() -> dict:
     try:
         completed = subprocess.run(
             argv,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
+            close_fds=True,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"quota router command failed: {exc}") from exc
@@ -1254,6 +1256,12 @@ def _claude_quota_route(*, require_claude: bool) -> dict | None:
             quota_status="unavailable",
             reserve_enforced=True,
             reason=f"Claude quota telemetry unavailable; failing closed: {exc}",
+            retry_policy={
+                "unchanged_retry_allowed": False,
+                "retry_after_fresh_telemetry": True,
+                "maximum_retries_after_change": 1,
+                "bypass_allowed": False,
+            },
         )
         return base
 

@@ -867,6 +867,28 @@ def _enable_quota_router(monkeypatch, snapshot):
     monkeypatch.setattr(adapters, "_fetch_subscription_quota", lambda: snapshot)
 
 
+def test_quota_router_detaches_inherited_mcp_stdin(monkeypatch):
+    """The long-lived MCP pipe must not reach the quota collector on Windows.
+
+    Python 3.11 can stall during child interpreter initialization while probing
+    an inherited stdio handle.  The collector then appears to be a slow quota
+    endpoint even though it has not reached provider telemetry at all.
+    """
+    monkeypatch.setenv("HARDLINE_QUOTA_ROUTER_COMMAND_JSON", '["quota-router"]')
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured.update(argv=argv, kwargs=kwargs)
+        return _FakeCompleted(stdout='{"providers": {}}')
+
+    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+
+    assert adapters._fetch_subscription_quota() == {"providers": {}}
+    assert captured["argv"] == ["quota-router"]
+    assert captured["kwargs"]["stdin"] is subprocess.DEVNULL
+    assert captured["kwargs"]["close_fds"] is True
+
+
 def test_ask_claude_redirects_to_chatgpt_when_it_has_more_weekly_quota(monkeypatch):
     _enable_quota_router(
         monkeypatch,
@@ -924,6 +946,12 @@ def test_quota_lookup_failure_blocks_without_guessing_chatgpt(monkeypatch):
 
     assert decision["selected_provider"] is None
     assert decision["quota_status"] == "unavailable"
+    assert decision["retry_policy"] == {
+        "unchanged_retry_allowed": False,
+        "retry_after_fresh_telemetry": True,
+        "maximum_retries_after_change": 1,
+        "bypass_allowed": False,
+    }
 
 
 def test_ask_claude_default_denies_edit_write(monkeypatch):

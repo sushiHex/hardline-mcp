@@ -1093,6 +1093,9 @@ async def ask_claude(
     genuinely Claude-specific work on Claude only while the protected weekly
     reserve remains; it never overrides the reserve floor. Results include a
     ``routing`` object identifying the requested and selected providers.
+    A fail-closed routing result is authoritative: do not retry it unchanged or
+    bypass Hardline through a raw CLI/SDK. Diagnose telemetry first; after a
+    fresh authoritative quota probe succeeds, make at most one retry.
 
     DAMAGED OUTPUT: if any output line could not be parsed, the result comes
     back ``ok: false`` with ``malformed_lines`` and the recovered text under
