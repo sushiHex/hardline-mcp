@@ -39,6 +39,7 @@ Only the executable is resolved this way; the fixed subcommand
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -1185,9 +1186,10 @@ def _quota_env_float(name: str, default: float) -> float:
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
         raw = raw[1:-1]
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         return default
+    return value if math.isfinite(value) else default
 
 
 def _fetch_subscription_quota() -> dict:
@@ -1229,7 +1231,12 @@ def _fetch_subscription_quota() -> dict:
     return payload
 
 
-def _claude_quota_route(*, require_claude: bool) -> dict | None:
+def _claude_quota_route(
+    *,
+    require_claude: bool,
+    override_claude_reserve: bool = False,
+    override_reason: str | None = None,
+) -> dict | None:
     """Choose Claude, ChatGPT, or refusal from live weekly headroom."""
     if not _quota_router_configured():
         return None
@@ -1241,6 +1248,31 @@ def _claude_quota_route(*, require_claude: bool) -> dict | None:
         "reserve_percent": reserve,
         "reserve_enforced": False,
     }
+    if override_claude_reserve or override_reason is not None:
+        normalized_reason = override_reason.strip() if isinstance(override_reason, str) else ""
+        base["reserve_override"] = {
+            "requested": override_claude_reserve,
+            "applied": False,
+            "reason": normalized_reason or None,
+            "authority": "caller_asserted",
+        }
+        if not override_claude_reserve or not normalized_reason:
+            base.update(
+                quota_status="invalid_override",
+                reserve_enforced=True,
+                reason=(
+                    "override_claude_reserve=true requires a non-empty "
+                    "override_reason; override_reason is invalid without the override flag."
+                ),
+            )
+            return base
+        if len(normalized_reason) > 500:
+            base.update(
+                quota_status="invalid_override",
+                reserve_enforced=True,
+                reason="override_reason exceeds the 500-character audit limit.",
+            )
+            return base
     try:
         snapshot = _fetch_subscription_quota()
         providers = snapshot["providers"]
@@ -1250,6 +1282,14 @@ def _claude_quota_route(*, require_claude: bool) -> dict | None:
         chatgpt_weekly = chatgpt["weekly"]
         claude_remaining = float(claude_weekly["remaining_percent"])
         chatgpt_remaining = float(chatgpt_weekly["remaining_percent"])
+        remaining_values = (claude_remaining, chatgpt_remaining)
+        if not all(
+            math.isfinite(value) and 0 <= value <= 100
+            for value in remaining_values
+        ):
+            raise ValueError(
+                "remaining_percent values must be finite percentages in [0, 100]"
+            )
     except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         base.update(
             selected_provider=None,
@@ -1272,7 +1312,23 @@ def _claude_quota_route(*, require_claude: bool) -> dict | None:
         claude_reset_at_utc=claude_weekly.get("reset_at_utc"),
         chatgpt_reset_at_utc=chatgpt_weekly.get("reset_at_utc"),
     )
-    if claude.get("status") != "available" or claude_remaining <= reserve:
+    if claude.get("status") != "available" or claude_remaining <= 0:
+        redirect_available = (
+            not require_claude
+            and chatgpt.get("status") == "available"
+            and chatgpt_remaining > 0
+        )
+        base.update(
+            selected_provider="chatgpt" if redirect_available else None,
+            reserve_enforced=True,
+            reason=(
+                "Claude quota is unavailable or exhausted "
+                f"({claude_remaining:g}% weekly remaining)."
+            ),
+        )
+        return base
+    below_reserve = claude_remaining <= reserve
+    if below_reserve and not override_claude_reserve:
         redirect_available = (
             not require_claude
             and chatgpt.get("status") == "available"
@@ -1288,9 +1344,16 @@ def _claude_quota_route(*, require_claude: bool) -> dict | None:
         )
         return base
     if require_claude:
+        if below_reserve:
+            base["reserve_override"]["applied"] = True
         base.update(
             selected_provider="claude",
-            reason="Caller marked the task Claude-specific and reserve remains available.",
+            reserve_enforced=False,
+            reason=(
+                "Explicit one-call Claude reserve override applied."
+                if below_reserve
+                else "Caller marked the task Claude-specific and reserve remains available."
+            ),
         )
         return base
     if chatgpt.get("status") == "available" and chatgpt_remaining > claude_remaining:
@@ -1301,8 +1364,11 @@ def _claude_quota_route(*, require_claude: bool) -> dict | None:
         return base
     base.update(
         selected_provider="claude",
+        reserve_enforced=False,
         reason="Claude has at least as much weekly allowance remaining as ChatGPT.",
     )
+    if below_reserve:
+        base["reserve_override"]["applied"] = True
     return base
 
 

@@ -689,7 +689,13 @@ async def ask_codex(
     )
 
 
-def _routing_metadata(raw: dict, *, selected_agent: str | None, decision: str) -> dict:
+def _routing_metadata(
+    raw: dict,
+    *,
+    selected_agent: str | None,
+    decision: str,
+    invocation_overrides: dict | None = None,
+) -> dict:
     routing = dict(raw)
     routing.update(
         requested_tool="ask_claude",
@@ -697,7 +703,99 @@ def _routing_metadata(raw: dict, *, selected_agent: str | None, decision: str) -
         executed_agent=selected_agent,
         decision=decision,
     )
+    if invocation_overrides:
+        routing["invocation_overrides"] = invocation_overrides
     return routing
+
+
+def _bounded_override_reason_for_audit(
+    reason: str | None,
+) -> tuple[str | None, dict]:
+    """Preserve a supplied reason without permitting unbounded durable payloads."""
+    if not isinstance(reason, str) or len(reason) <= 500:
+        return reason, {}
+    return reason[:500], {
+        "reason_truncated": True,
+        "supplied_reason_chars": len(reason),
+    }
+
+
+def _reserve_override_audit(
+    *, requested: bool, applied: bool, reason: str | None
+) -> dict:
+    audited_reason, truncation = _bounded_override_reason_for_audit(reason)
+    return {
+        "requested": requested,
+        "applied": applied,
+        "reason": audited_reason,
+        "authority": "caller_asserted",
+        **truncation,
+    }
+
+
+def _claude_invocation_overrides(
+    *,
+    model: str | None,
+    effort: str,
+    mode: str,
+    workdir: str | None,
+    write: bool,
+    require_claude: bool,
+    override_claude_reserve: bool,
+    override_reason: str | None,
+) -> dict:
+    """Return only non-default caller choices for durable audit metadata."""
+    overrides = {}
+    if model is not None:
+        overrides["model"] = model
+    if effort != "default":
+        overrides["effort"] = effort
+    if mode != "default":
+        overrides["mode"] = mode
+    if workdir is not None:
+        overrides["workdir"] = workdir
+    if write:
+        overrides["write"] = True
+    if require_claude:
+        overrides["require_claude"] = True
+    if override_claude_reserve:
+        audited_reason, truncation = _bounded_override_reason_for_audit(
+            override_reason
+        )
+        overrides["claude_weekly_reserve"] = {
+            "bypass": True,
+            "reason": audited_reason,
+            "authority": "caller_asserted",
+            **truncation,
+        }
+    elif override_reason is not None:
+        audited_reason, truncation = _bounded_override_reason_for_audit(
+            override_reason
+        )
+        overrides["override_reason"] = (
+            {"value": audited_reason, **truncation}
+            if truncation
+            else audited_reason
+        )
+    return overrides
+
+
+def _validate_claude_reserve_override(
+    *, override_claude_reserve: bool, override_reason: str | None
+) -> tuple[str | None, str | None]:
+    """Validate and normalize the one-call reserve bypass audit reason."""
+    if not override_claude_reserve:
+        if override_reason is not None:
+            return None, "override_reason requires override_claude_reserve=true."
+        return None, None
+    if not isinstance(override_reason, str) or not override_reason.strip():
+        return None, (
+            "override_claude_reserve=true requires a non-empty override_reason."
+        )
+    normalized = override_reason.strip()
+    if len(normalized) > 500:
+        return None, "override_reason exceeds the 500-character audit limit."
+    return normalized, None
 
 
 def _ask_claude_with_reserve_guard(
@@ -709,18 +807,39 @@ def _ask_claude_with_reserve_guard(
     workdir: str | None,
     write: bool,
     require_claude: bool,
+    override_claude_reserve: bool,
+    override_reason: str | None,
     on_spawn=None,
 ) -> dict:
     """Serialize the final live reserve check together with a Claude launch."""
+    invocation_overrides = _claude_invocation_overrides(
+        model=model,
+        effort=effort,
+        mode=mode,
+        workdir=workdir,
+        write=write,
+        require_claude=require_claude,
+        override_claude_reserve=override_claude_reserve,
+        override_reason=override_reason,
+    )
     with adapters._CLAUDE_DISPATCH_LOCK:
-        raw = adapters._claude_quota_route(require_claude=require_claude)
+        raw = adapters._claude_quota_route(
+            require_claude=require_claude,
+            override_claude_reserve=override_claude_reserve,
+            override_reason=override_reason,
+        )
         if raw is None or raw.get("selected_provider") != "claude":
             raw = raw or {
                 "requested_provider": "claude",
                 "selected_provider": None,
                 "reason": "Claude reserve policy was not configured at launch time.",
             }
-            routing = _routing_metadata(raw, selected_agent=None, decision="blocked")
+            routing = _routing_metadata(
+                raw,
+                selected_agent=None,
+                decision="blocked",
+                invocation_overrides=invocation_overrides,
+            )
             return {
                 "ok": False,
                 "error": f"{routing['reason']} Claude was not started.",
@@ -737,7 +856,10 @@ def _ask_claude_with_reserve_guard(
         )
         result = dict(result)
         result["routing"] = _routing_metadata(
-            raw, selected_agent="claude", decision="executed"
+            raw,
+            selected_agent="claude",
+            decision="executed",
+            invocation_overrides=invocation_overrides,
         )
         return result
 
@@ -750,8 +872,46 @@ def _plan_claude_dispatch(
     workdir: str | None,
     write: bool,
     require_claude: bool,
+    override_claude_reserve: bool,
+    override_reason: str | None,
 ) -> dict:
     """Plan the actual provider before any subprocess or durable job exists."""
+    supplied_override_reason = override_reason
+    override_reason, override_error = _validate_claude_reserve_override(
+        override_claude_reserve=override_claude_reserve,
+        override_reason=override_reason,
+    )
+    audit_reason = (
+        override_reason if override_error is None else supplied_override_reason
+    )
+    invocation_overrides = _claude_invocation_overrides(
+        model=model,
+        effort=effort,
+        mode=mode,
+        workdir=workdir,
+        write=write,
+        require_claude=require_claude,
+        override_claude_reserve=override_claude_reserve,
+        override_reason=audit_reason,
+    )
+    if override_error is not None:
+        routing = _routing_metadata(
+            {
+                "requested_provider": "claude",
+                "selected_provider": None,
+                "reason": override_error,
+                "reserve_override": _reserve_override_audit(
+                    requested=override_claude_reserve,
+                    applied=False,
+                    reason=audit_reason,
+                ),
+            },
+            selected_agent=None,
+            decision="blocked",
+            invocation_overrides=invocation_overrides,
+        )
+        return {"ok": False, "error": override_error, "routing": routing}
+
     claude_kwargs = {
         "model": model,
         "effort": effort,
@@ -760,18 +920,59 @@ def _plan_claude_dispatch(
         "write": write,
     }
     if not adapters._quota_router_configured():
+        if override_claude_reserve:
+            error = "Claude reserve override requires configured quota routing."
+            routing = _routing_metadata(
+                {
+                    "requested_provider": "claude",
+                    "selected_provider": None,
+                    "reason": error,
+                    "reserve_override": {
+                        "requested": True,
+                        "applied": False,
+                        "reason": override_reason,
+                        "authority": "caller_asserted",
+                    },
+                },
+                selected_agent=None,
+                decision="blocked",
+                invocation_overrides=invocation_overrides,
+            )
+            return {"ok": False, "error": error, "routing": routing}
         return {
             "ok": True,
             "agent": "claude",
             "ask_fn": adapters.ask_claude,
             "ask_kwargs": claude_kwargs,
-            "routing": None,
+            "routing": (
+                _routing_metadata(
+                    {
+                        "requested_provider": "claude",
+                        "selected_provider": "claude",
+                        "reason": "Quota routing is not configured; direct Claude dispatch.",
+                    },
+                    selected_agent="claude",
+                    decision="selected",
+                    invocation_overrides=invocation_overrides,
+                )
+                if invocation_overrides
+                else None
+            ),
         }
 
-    raw = adapters._claude_quota_route(require_claude=require_claude)
+    raw = adapters._claude_quota_route(
+        require_claude=require_claude,
+        override_claude_reserve=override_claude_reserve,
+        override_reason=override_reason,
+    )
     selected = raw.get("selected_provider") if raw else None
     if selected is None:
-        routing = _routing_metadata(raw or {}, selected_agent=None, decision="blocked")
+        routing = _routing_metadata(
+            raw or {},
+            selected_agent=None,
+            decision="blocked",
+            invocation_overrides=invocation_overrides,
+        )
         return {
             "ok": False,
             "error": routing.get("reason", "Claude reserve blocked dispatch"),
@@ -780,14 +981,21 @@ def _plan_claude_dispatch(
 
     if selected == "claude":
         guarded_kwargs = dict(claude_kwargs)
-        guarded_kwargs["require_claude"] = require_claude
+        guarded_kwargs.update(
+            require_claude=require_claude,
+            override_claude_reserve=override_claude_reserve,
+            override_reason=override_reason,
+        )
         return {
             "ok": True,
             "agent": "claude",
             "ask_fn": _ask_claude_with_reserve_guard,
             "ask_kwargs": guarded_kwargs,
             "routing": _routing_metadata(
-                raw, selected_agent="claude", decision="selected"
+                raw,
+                selected_agent="claude",
+                decision="selected",
+                invocation_overrides=invocation_overrides,
             ),
         }
 
@@ -804,7 +1012,12 @@ def _plan_claude_dispatch(
     elif mode not in {"default", "advisory"}:
         ineligible = f"Unsupported Claude mode for redirection: {mode!r}."
     if ineligible:
-        routing = _routing_metadata(raw, selected_agent=None, decision="blocked")
+        routing = _routing_metadata(
+            raw,
+            selected_agent=None,
+            decision="blocked",
+            invocation_overrides=invocation_overrides,
+        )
         routing["redirect_ineligible_reason"] = ineligible
         return {
             "ok": False,
@@ -812,7 +1025,12 @@ def _plan_claude_dispatch(
             "routing": routing,
         }
 
-    routing = _routing_metadata(raw, selected_agent="codex", decision="redirected")
+    routing = _routing_metadata(
+        raw,
+        selected_agent="codex",
+        decision="redirected",
+        invocation_overrides=invocation_overrides,
+    )
     routing["option_mapping"] = {
         "model": {"requested": model, "applied": None},
         "effort": {"requested": effort, "applied": effort},
@@ -848,6 +1066,7 @@ def _ask_async_impl(
     workdir: str | None,
     write: bool,
     routing: dict | None = None,
+    extra_ask_kwargs: dict | None = None,
 ) -> dict:
     """Shared body for ask_codex_async/ask_claude_async - only the adapter
     function and the mailbox sender identity differ between agents.
@@ -927,6 +1146,8 @@ def _ask_async_impl(
                     job_id, pid, started_key=jobs.process_key(pid)
                 ),
             )
+            if extra_ask_kwargs:
+                ask_kwargs.update(extra_ask_kwargs)
             result = ask_fn(prompt, **ask_kwargs)
         except Exception as exc:  # noqa: BLE001 - last-resort dispatch backstop
             result = {
@@ -1065,6 +1286,8 @@ async def ask_claude(
     workdir: str | None = None,
     write: bool = False,
     require_claude: bool = False,
+    override_claude_reserve: bool = False,
+    override_reason: str | None = None,
 ) -> dict:
     """Ask Claude Code a question and wait for its reply.
 
@@ -1096,6 +1319,11 @@ async def ask_claude(
     A fail-closed routing result is authoritative: do not retry it unchanged or
     bypass Hardline through a raw CLI/SDK. Diagnose telemetry first; after a
     fresh authoritative quota probe succeeds, make at most one retry.
+    ``override_claude_reserve=True`` is an explicit one-call exception to the
+    configured weekly reserve floor. It requires a non-empty
+    ``override_reason`` (maximum 500 characters), never bypasses unavailable
+    telemetry or exhausted quota, and is echoed with every non-default request
+    option under ``routing.invocation_overrides`` and ``routing.reserve_override``.
 
     DAMAGED OUTPUT: if any output line could not be parsed, the result comes
     back ``ok: false`` with ``malformed_lines`` and the recovered text under
@@ -1112,6 +1340,8 @@ async def ask_claude(
         workdir=workdir,
         write=write,
         require_claude=require_claude,
+        override_claude_reserve=override_claude_reserve,
+        override_reason=override_reason,
     )
     if not plan["ok"]:
         return {"ok": False, "error": plan["error"], "routing": plan["routing"]}
@@ -1133,6 +1363,8 @@ async def ask_claude_async(
     workdir: str | None = None,
     write: bool = False,
     require_claude: bool = False,
+    override_claude_reserve: bool = False,
+    override_reason: str | None = None,
 ) -> dict:
     """Dispatch a Claude task in the background; returns immediately.
 
@@ -1156,6 +1388,8 @@ async def ask_claude_async(
         workdir=workdir,
         write=write,
         require_claude=require_claude,
+        override_claude_reserve=override_claude_reserve,
+        override_reason=override_reason,
     )
     if not plan["ok"]:
         return {
@@ -1178,6 +1412,15 @@ async def ask_claude_async(
         workdir=ask_kwargs["workdir"],
         write=ask_kwargs["write"],
         routing=plan["routing"],
+        extra_ask_kwargs={
+            key: ask_kwargs[key]
+            for key in (
+                "require_claude",
+                "override_claude_reserve",
+                "override_reason",
+            )
+            if key in ask_kwargs
+        },
     )
 
 

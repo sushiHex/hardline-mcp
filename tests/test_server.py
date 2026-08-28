@@ -523,6 +523,262 @@ async def test_ask_claude_forwards_explicit_claude_requirement(monkeypatch):
     assert result["routing"]["decision"] == "executed"
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("override", "reason", "error_fragment"),
+    [
+        (True, None, "non-empty override_reason"),
+        (False, "orphan reason", "requires override_claude_reserve=true"),
+        (True, "x" * 501, "500-character"),
+    ],
+)
+async def test_claude_reserve_override_requires_a_visible_reason(
+    monkeypatch, override, reason, error_fragment
+):
+    monkeypatch.setattr(server.adapters, "_quota_router_configured", lambda: True)
+    monkeypatch.setattr(
+        server.adapters,
+        "_claude_quota_route",
+        lambda **kwargs: pytest.fail("invalid override must fail before quota lookup"),
+    )
+
+    result = await server.ask_claude(
+        prompt="review this",
+        require_claude=True,
+        override_claude_reserve=override,
+        override_reason=reason,
+    )
+
+    assert result["ok"] is False
+    assert error_fragment in result["error"]
+    assert result["routing"]["decision"] == "blocked"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("override", "reason", "expected_invocation", "expected_reason", "truncated"),
+    [
+        (
+            False,
+            "orphan reason",
+            {"override_reason": "orphan reason"},
+            "orphan reason",
+            False,
+        ),
+        (
+            True,
+            "x" * 501,
+            {
+                "claude_weekly_reserve": {
+                    "bypass": True,
+                    "reason": "x" * 500,
+                    "authority": "caller_asserted",
+                    "reason_truncated": True,
+                    "supplied_reason_chars": 501,
+                }
+            },
+            "x" * 500,
+            True,
+        ),
+    ],
+)
+async def test_invalid_override_attempt_remains_in_bounded_audit(
+    monkeypatch,
+    override,
+    reason,
+    expected_invocation,
+    expected_reason,
+    truncated,
+):
+    monkeypatch.setattr(server.adapters, "_quota_router_configured", lambda: True)
+    monkeypatch.setattr(
+        server.adapters,
+        "_claude_quota_route",
+        lambda **kwargs: pytest.fail("invalid override must fail before quota lookup"),
+    )
+
+    result = await server.ask_claude(
+        prompt="review this",
+        require_claude=True,
+        override_claude_reserve=override,
+        override_reason=reason,
+    )
+
+    routing = result["routing"]
+    assert routing["decision"] == "blocked"
+    assert routing["invocation_overrides"] == {
+        "require_claude": True,
+        **expected_invocation,
+    }
+    assert routing["reserve_override"]["reason"] == expected_reason
+    assert routing["reserve_override"].get("reason_truncated", False) is truncated
+    if truncated:
+        assert routing["reserve_override"]["supplied_reason_chars"] == 501
+
+
+@pytest.mark.anyio
+async def test_claude_reserve_override_is_rechecked_and_audited(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(server.adapters, "_quota_router_configured", lambda: True)
+
+    def fake_route(**kwargs):
+        calls.append(kwargs)
+        return {
+            "requested_provider": "claude",
+            "selected_provider": "claude",
+            "quota_status": "available",
+            "reserve_percent": 100.0,
+            "reserve_enforced": False,
+            "reserve_override": {
+                "requested": True,
+                "applied": True,
+                "reason": "Owner approved review A2 in this task.",
+                "authority": "caller_asserted",
+            },
+            "reason": "Explicit one-call reserve override applied.",
+        }
+
+    monkeypatch.setattr(server.adapters, "_claude_quota_route", fake_route)
+    monkeypatch.setattr(
+        server.adapters,
+        "ask_claude",
+        lambda prompt, **kwargs: {"ok": True, "reply": "reviewed"},
+    )
+
+    result = await server.ask_claude(
+        prompt="review this",
+        model="opus",
+        effort="max",
+        require_claude=True,
+        override_claude_reserve=True,
+        override_reason="Owner approved review A2 in this task.",
+    )
+
+    assert result["ok"] is True
+    assert calls == [
+        {
+            "require_claude": True,
+            "override_claude_reserve": True,
+            "override_reason": "Owner approved review A2 in this task.",
+        },
+        {
+            "require_claude": True,
+            "override_claude_reserve": True,
+            "override_reason": "Owner approved review A2 in this task.",
+        },
+    ]
+    assert result["routing"]["decision"] == "executed"
+    assert result["routing"]["reserve_override"]["applied"] is True
+    assert result["routing"]["invocation_overrides"] == {
+        "model": "opus",
+        "effort": "max",
+        "require_claude": True,
+        "claude_weekly_reserve": {
+            "bypass": True,
+            "reason": "Owner approved review A2 in this task.",
+            "authority": "caller_asserted",
+        },
+    }
+
+
+def test_claude_invocation_audit_lists_every_non_default_override():
+    assert server._claude_invocation_overrides(
+        model="opus",
+        effort="max",
+        mode="advisory",
+        workdir="C:/review",
+        write=True,
+        require_claude=True,
+        override_claude_reserve=True,
+        override_reason="Owner approved one run.",
+    ) == {
+        "model": "opus",
+        "effort": "max",
+        "mode": "advisory",
+        "workdir": "C:/review",
+        "write": True,
+        "require_claude": True,
+        "claude_weekly_reserve": {
+            "bypass": True,
+            "reason": "Owner approved one run.",
+            "authority": "caller_asserted",
+        },
+    }
+    assert server._claude_invocation_overrides(
+        model=None,
+        effort="default",
+        mode="default",
+        workdir=None,
+        write=False,
+        require_claude=False,
+        override_claude_reserve=False,
+        override_reason=None,
+    ) == {}
+
+
+@pytest.mark.anyio
+async def test_async_reserve_override_reaches_final_guard_and_job_audit(
+    monkeypatch, tmp_path
+):
+    calls = []
+    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "state.db")
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(server.adapters, "_quota_router_configured", lambda: True)
+
+    def fake_route(**kwargs):
+        calls.append(kwargs)
+        return {
+            "requested_provider": "claude",
+            "selected_provider": "claude",
+            "quota_status": "available",
+            "reserve_percent": 100.0,
+            "reserve_enforced": False,
+            "reserve_override": {
+                "requested": True,
+                "applied": True,
+                "reason": "Owner approved async review.",
+                "authority": "caller_asserted",
+            },
+            "reason": "Explicit one-call reserve override applied.",
+        }
+
+    monkeypatch.setattr(server.adapters, "_claude_quota_route", fake_route)
+    monkeypatch.setattr(
+        server.adapters,
+        "ask_claude",
+        lambda prompt, **kwargs: {"ok": True, "reply": "reviewed"},
+    )
+
+    dispatched = await server.ask_claude_async(
+        prompt="review this",
+        from_agent="hermes",
+        require_claude=True,
+        override_claude_reserve=True,
+        override_reason="Owner approved async review.",
+    )
+
+    assert dispatched["ok"] is True
+    assert calls == [
+        {
+            "require_claude": True,
+            "override_claude_reserve": True,
+            "override_reason": "Owner approved async review.",
+        },
+        {
+            "require_claude": True,
+            "override_claude_reserve": True,
+            "override_reason": "Owner approved async review.",
+        },
+    ]
+    completed = server.jobs.get(dispatched["job_id"], db_path=tmp_path / "state.db")
+    assert completed["request"]["routing"]["invocation_overrides"][
+        "claude_weekly_reserve"
+    ]["reason"] == "Owner approved async review."
+    assert completed["result"]["routing"]["decision"] == "executed"
+    assert completed["result"]["routing"]["reserve_override"]["applied"] is True
+
+
 def test_send_impl_persists_without_deliver(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
     monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)

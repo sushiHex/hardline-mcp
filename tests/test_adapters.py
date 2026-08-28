@@ -867,6 +867,15 @@ def _enable_quota_router(monkeypatch, snapshot):
     monkeypatch.setattr(adapters, "_fetch_subscription_quota", lambda: snapshot)
 
 
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf"])
+def test_nonfinite_quota_config_uses_bounded_default(monkeypatch, raw):
+    monkeypatch.setenv("HARDLINE_CLAUDE_WEEKLY_RESERVE_PERCENT", raw)
+
+    assert adapters._quota_env_float(
+        "HARDLINE_CLAUDE_WEEKLY_RESERVE_PERCENT", 5.0
+    ) == 5.0
+
+
 def test_quota_router_detaches_inherited_mcp_stdin(monkeypatch):
     """The long-lived MCP pipe must not reach the quota collector on Windows.
 
@@ -912,6 +921,85 @@ def test_required_claude_is_refused_below_reserve_instead_of_consuming(monkeypat
     assert decision["selected_provider"] is None
     assert decision["reserve_enforced"] is True
     assert "reserve" in decision["reason"].lower()
+
+
+def test_required_claude_explicit_reserve_override_bypasses_floor(monkeypatch):
+    _enable_quota_router(
+        monkeypatch,
+        _quota_snapshot(claude_remaining=2, chatgpt_remaining=86),
+    )
+
+    decision = adapters._claude_quota_route(
+        require_claude=True,
+        override_claude_reserve=True,
+        override_reason="Owner approved this one review in the current task.",
+    )
+
+    assert decision["selected_provider"] == "claude"
+    assert decision["reserve_enforced"] is False
+    assert decision["reserve_override"] == {
+        "requested": True,
+        "applied": True,
+        "reason": "Owner approved this one review in the current task.",
+        "authority": "caller_asserted",
+    }
+
+
+def test_reserve_override_never_bypasses_telemetry_failure(monkeypatch):
+    monkeypatch.setenv("HARDLINE_QUOTA_ROUTER_COMMAND_JSON", '["quota-router"]')
+    monkeypatch.setattr(
+        adapters,
+        "_fetch_subscription_quota",
+        lambda: (_ for _ in ()).throw(RuntimeError("telemetry unavailable")),
+    )
+
+    decision = adapters._claude_quota_route(
+        require_claude=True,
+        override_claude_reserve=True,
+        override_reason="Owner approved this one review in the current task.",
+    )
+
+    assert decision["selected_provider"] is None
+    assert decision["quota_status"] == "unavailable"
+    assert decision["reserve_override"]["requested"] is True
+    assert decision["reserve_override"]["applied"] is False
+
+
+def test_reserve_override_never_bypasses_exhausted_allowance(monkeypatch):
+    _enable_quota_router(
+        monkeypatch,
+        _quota_snapshot(claude_remaining=0, chatgpt_remaining=86),
+    )
+
+    decision = adapters._claude_quota_route(
+        require_claude=True,
+        override_claude_reserve=True,
+        override_reason="Owner approved this one review in the current task.",
+    )
+
+    assert decision["selected_provider"] is None
+    assert decision["reserve_enforced"] is True
+    assert decision["reserve_override"]["applied"] is False
+    assert "exhausted" in decision["reason"].lower()
+
+
+@pytest.mark.parametrize("malformed", [float("nan"), float("inf"), -1, 101])
+def test_reserve_override_rejects_malformed_numeric_telemetry(monkeypatch, malformed):
+    _enable_quota_router(
+        monkeypatch,
+        _quota_snapshot(claude_remaining=malformed, chatgpt_remaining=86),
+    )
+
+    decision = adapters._claude_quota_route(
+        require_claude=True,
+        override_claude_reserve=True,
+        override_reason="Owner approved this one review in the current task.",
+    )
+
+    assert decision["selected_provider"] is None
+    assert decision["quota_status"] == "unavailable"
+    assert decision["reserve_override"]["applied"] is False
+    assert "finite percentages" in decision["reason"]
 
 
 def test_required_claude_can_run_above_reserve_despite_chatgpt_headroom(monkeypatch):
