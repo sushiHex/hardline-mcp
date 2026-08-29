@@ -39,10 +39,13 @@ Only the executable is resolved this way; the fixed subcommand
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -1168,6 +1171,205 @@ def _parse_claude_stream(
             result.get("result") or result.get("subtype") or "Claude request failed"
         )
     return _demote_if_damaged(response, malformed, output)
+
+
+_CLAUDE_DISPATCH_LOCK = threading.Lock()
+
+
+def _quota_router_configured() -> bool:
+    return bool(os.environ.get("HARDLINE_QUOTA_ROUTER_COMMAND_JSON", "").strip())
+
+
+def _quota_env_float(name: str, default: float) -> float:
+    """Parse config values even when a YAML/CLI layer retained quote marks."""
+    raw = os.environ.get(name, str(default)).strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+        raw = raw[1:-1]
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if math.isfinite(value) else default
+
+
+def _fetch_subscription_quota() -> dict:
+    """Run the owner-configured live quota collector and return its JSON."""
+    raw = os.environ.get("HARDLINE_QUOTA_ROUTER_COMMAND_JSON", "")
+    try:
+        argv = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("quota router command is not valid JSON") from exc
+    if not isinstance(argv, list) or not argv or not all(
+        isinstance(item, str) and item for item in argv
+    ):
+        raise RuntimeError("quota router command must be a non-empty JSON argv array")
+    timeout = _quota_env_float("HARDLINE_QUOTA_ROUTER_TIMEOUT", 30.0)
+    timeout = min(120.0, max(1.0, timeout))
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            close_fds=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"quota router command failed: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(
+            f"quota router command exited {completed.returncode}: {detail[:500]}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("quota router command returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("quota router command did not return an object")
+    return payload
+
+
+def _claude_quota_route(
+    *,
+    require_claude: bool,
+    override_claude_reserve: bool = False,
+    override_reason: str | None = None,
+) -> dict | None:
+    """Choose Claude, ChatGPT, or refusal from live weekly headroom."""
+    if not _quota_router_configured():
+        return None
+    reserve = _quota_env_float("HARDLINE_CLAUDE_WEEKLY_RESERVE_PERCENT", 5.0)
+    reserve = min(100.0, max(0.0, reserve))
+    base = {
+        "requested_provider": "claude",
+        "selected_provider": None,
+        "reserve_percent": reserve,
+        "reserve_enforced": False,
+    }
+    if override_claude_reserve or override_reason is not None:
+        normalized_reason = override_reason.strip() if isinstance(override_reason, str) else ""
+        base["reserve_override"] = {
+            "requested": override_claude_reserve,
+            "applied": False,
+            "reason": normalized_reason or None,
+            "authority": "caller_asserted",
+        }
+        if not override_claude_reserve or not normalized_reason:
+            base.update(
+                quota_status="invalid_override",
+                reserve_enforced=True,
+                reason=(
+                    "override_claude_reserve=true requires a non-empty "
+                    "override_reason; override_reason is invalid without the override flag."
+                ),
+            )
+            return base
+        if len(normalized_reason) > 500:
+            base.update(
+                quota_status="invalid_override",
+                reserve_enforced=True,
+                reason="override_reason exceeds the 500-character audit limit.",
+            )
+            return base
+    try:
+        snapshot = _fetch_subscription_quota()
+        providers = snapshot["providers"]
+        claude = providers["claude"]
+        chatgpt = providers["chatgpt"]
+        claude_weekly = claude["weekly"]
+        chatgpt_weekly = chatgpt["weekly"]
+        claude_remaining = float(claude_weekly["remaining_percent"])
+        chatgpt_remaining = float(chatgpt_weekly["remaining_percent"])
+        remaining_values = (claude_remaining, chatgpt_remaining)
+        if not all(
+            math.isfinite(value) and 0 <= value <= 100
+            for value in remaining_values
+        ):
+            raise ValueError(
+                "remaining_percent values must be finite percentages in [0, 100]"
+            )
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+        base.update(
+            selected_provider=None,
+            quota_status="unavailable",
+            reserve_enforced=True,
+            reason=f"Claude quota telemetry unavailable; failing closed: {exc}",
+            retry_policy={
+                "unchanged_retry_allowed": False,
+                "retry_after_fresh_telemetry": True,
+                "maximum_retries_after_change": 1,
+                "bypass_allowed": False,
+            },
+        )
+        return base
+
+    base.update(
+        quota_status="available",
+        claude_remaining_percent=claude_remaining,
+        chatgpt_remaining_percent=chatgpt_remaining,
+        claude_reset_at_utc=claude_weekly.get("reset_at_utc"),
+        chatgpt_reset_at_utc=chatgpt_weekly.get("reset_at_utc"),
+    )
+    if claude.get("status") != "available" or claude_remaining <= 0:
+        redirect_available = (
+            not require_claude
+            and chatgpt.get("status") == "available"
+            and chatgpt_remaining > 0
+        )
+        base.update(
+            selected_provider="chatgpt" if redirect_available else None,
+            reserve_enforced=True,
+            reason=(
+                "Claude quota is unavailable or exhausted "
+                f"({claude_remaining:g}% weekly remaining)."
+            ),
+        )
+        return base
+    below_reserve = claude_remaining <= reserve
+    if below_reserve and not override_claude_reserve:
+        redirect_available = (
+            not require_claude
+            and chatgpt.get("status") == "available"
+            and chatgpt_remaining > 0
+        )
+        base.update(
+            selected_provider="chatgpt" if redirect_available else None,
+            reserve_enforced=True,
+            reason=(
+                f"Claude weekly reserve protected at {claude_remaining:g}% "
+                f"remaining (floor {reserve:g}%)."
+            ),
+        )
+        return base
+    if require_claude:
+        if below_reserve:
+            base["reserve_override"]["applied"] = True
+        base.update(
+            selected_provider="claude",
+            reserve_enforced=False,
+            reason=(
+                "Explicit one-call Claude reserve override applied."
+                if below_reserve
+                else "Caller marked the task Claude-specific and reserve remains available."
+            ),
+        )
+        return base
+    if chatgpt.get("status") == "available" and chatgpt_remaining > claude_remaining:
+        base.update(
+            selected_provider="chatgpt",
+            reason="ChatGPT has more weekly allowance remaining than Claude.",
+        )
+        return base
+    base.update(
+        selected_provider="claude",
+        reserve_enforced=False,
+        reason="Claude has at least as much weekly allowance remaining as ChatGPT.",
+    )
+    if below_reserve:
+        base["reserve_override"]["applied"] = True
+    return base
 
 
 def ask_claude(

@@ -52,8 +52,8 @@ splits the problem:
 | `ask_hermes(prompt)` | Live query → `hermes chat -Q -q`. |
 | `ask_codex(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Ephemeral live query → `codex exec` (omitted `model` defers to Codex's own configured default); optional routing, isolation, telemetry, and opt-in write access. |
 | `ask_codex_async(prompt, from_agent, label=None, model=None, effort="default", mode="default", workdir=None, write=False)` | Fire-and-forget `ask_codex` dispatched on a bounded background thread pool; result is delivered through the mailbox (`sender="codex"`, `recipient=from_agent`) — poll it with `inbox`. |
-| `ask_claude(prompt, model=None, effort="default", mode="default", workdir=None, write=False)` | Live query → `claude -p` (omitted `model` defers to Claude Code's own configured default); optional routing, isolation, telemetry, and opt-in write access (parity with `ask_codex`). |
-| `ask_claude_async(prompt, from_agent, label=None, model=None, effort="default", mode="default", workdir=None, write=False)` | Fire-and-forget `ask_claude` dispatched on a bounded background thread pool; result is delivered through the mailbox (`sender="claude"`, `recipient=from_agent`) — poll it with `inbox`. |
+| `ask_claude(prompt, model=None, effort="default", mode="default", workdir=None, write=False, require_claude=False, override_claude_reserve=False, override_reason=None)` | Live query with optional quota-aware ChatGPT redirection; a one-call reserve bypass must set both explicit override fields and is returned in routing audit metadata. |
+| `ask_claude_async(prompt, from_agent, label=None, model=None, effort="default", mode="default", workdir=None, write=False, require_claude=False, override_claude_reserve=False, override_reason=None)` | Background form of `ask_claude`; redirected results are delivered with `sender="codex"`, otherwise `sender="claude"`; override metadata is persisted with the job. |
 
 Async dispatch is backed by a durable job. `ask_*_async` returns a `job_id`
 that identifies the run across a hardline-mcp restart — a label is a
@@ -426,10 +426,48 @@ hardline targets it by launching the child process with that directory as
 its `cwd`; omitted, `ask_claude` inherits whatever directory hardline-mcp
 itself was started from, same as before this option existed.
 
+### Quota-aware Claude routing
+
+Set `HARDLINE_QUOTA_ROUTER_COMMAND_JSON` to a JSON argv array for a command
+that prints the unified subscription snapshot documented below. Before each
+Claude launch, Hardline compares weekly remaining percentages. Suitable work
+is sent to ChatGPT when it has more headroom. Claude-specific work can pass
+`require_claude=True`; that bypasses balancing but not the reserve floor.
+
+A one-call reserve exception must expose itself in the invocation with
+`override_claude_reserve=True` and a non-empty `override_reason` of at most 500
+characters. Hardline repeats the override, reason, whether it was actually
+applied, and every other non-default request option in `routing` metadata. The
+authority is marked `caller_asserted`: Hardline records the invocation but
+does not falsely claim that an MCP argument cryptographically proves owner
+approval. The same metadata is persisted in async job requests and terminal
+results. Invalid override attempts are also retained: overlong reasons are
+bounded to 500 characters with the original length and truncation recorded. The
+override does not bypass unavailable telemetry, an unavailable provider, or
+zero remaining allowance, and the final locked pre-launch check revalidates it.
+
+```text
+HARDLINE_QUOTA_ROUTER_COMMAND_JSON=["python","subscription_quota_monitor.py","--json"]
+HARDLINE_CLAUDE_WEEKLY_RESERVE_PERCENT=5
+HARDLINE_QUOTA_ROUTER_TIMEOUT=30
+```
+
+The snapshot must contain
+`providers.{claude,chatgpt}.{status,weekly.remaining_percent}`. A missing,
+malformed, failed, or timed-out collector blocks both providers rather than
+guessing which has more allowance. Automatic redirection is deliberately
+narrow: it accepts no Claude model pin, workspace, or write request, and runs
+Codex in `advisory` mode so ChatGPT subscription authentication is checked.
+Ineligible requests are refused with an explicit reason instead of silently
+changing semantics. The dispatch lock serializes the final quota-check-plus-
+Claude-run so concurrent async tasks cannot all spend from one stale sample.
+A provider reset is observed on the next call; no scheduled re-enable is
+necessary.
+
 `ask_claude_async` mirrors `ask_codex_async` exactly: dispatches `ask_claude`
 through the same bounded background thread pool and delivers the result
-through the mailbox (`sender="claude"`, `recipient=from_agent`) once it
-finishes.
+through the mailbox once it finishes. The sender records the provider that
+actually ran: `claude`, or `codex` after a ChatGPT redirect.
 
 ```text
 ask_claude_async(
