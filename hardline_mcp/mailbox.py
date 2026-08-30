@@ -20,7 +20,11 @@ import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional, Union
+
+# "Which lanes does this caller own": none, one, or several. Several arises
+# once a session can be renamed - see _lanes.
+LaneSpec = Union[str, Iterable[str], None]
 
 _DEFAULT_PATH = Path.home() / ".cache" / "hardline-mcp" / "mailbox.db"
 
@@ -39,7 +43,7 @@ def _resolve_db(db_path: Optional[Path]) -> Path:
 # Bumped when a table is added or a column's meaning changes. Recorded in
 # `meta` so a running server can report what store it is talking to rather
 # than leaving "is this the new schema?" to be inferred from behaviour.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -81,6 +85,39 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs (state, created_at);
 CREATE INDEX IF NOT EXISTS jobs_requester_idx ON jobs (requester, created_at);
+
+-- Identity was the one thing here with no durable record. Jobs and messages
+-- both survive a restart; the SESSION that owns a lane existed only as a
+-- function of one process's environment, so nothing could answer "who can I
+-- address?" or "is that lane still held?". Callers guessed, and lane-qualified
+-- mail sent to a session that had exited became permanently unconsumable -
+-- only the lane's holder may ack it, and the holder was gone.
+--
+-- One row per hardline PROCESS, because the process IS the session. Liveness
+-- is NOT stored: it is derived on read from the pid and its creation-time
+-- token, exactly as jobs derives `lost`. A crashed session therefore needs no
+-- cleanup - it simply stops being alive - and a stale row is overwritten when
+-- the OS reuses its pid.
+CREATE TABLE IF NOT EXISTS sessions (
+    pid         INTEGER PRIMARY KEY,
+    agent       TEXT NOT NULL,
+    -- Fully-qualified recipient ("codex:construction", or bare "codex" when
+    -- the process holds no lane), so it compares directly against
+    -- messages.recipient with no reassembly.
+    lane        TEXT NOT NULL,
+    -- The human name claimed via register_session, NULL when the lane was
+    -- derived from the environment. Distinguishes "chose to be called this"
+    -- from "this is what the env implied".
+    label       TEXT,
+    -- Creation-time token for pid. A pid is not an identity: without this, a
+    -- reused pid would inherit the previous session's lane and its mail.
+    process_key TEXT,
+    cwd         TEXT,
+    started_at  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS sessions_lane_idx ON sessions (lane);
 """
 
 # One-time per-db init (schema + WAL) is guarded so it happens exactly once
@@ -224,23 +261,64 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _lane_ackable(recipient: str, lane_suffix: Optional[str]) -> bool:
-    """May a process holding ``lane_suffix`` consume a message sent to
+def _lanes(lane_suffix: LaneSpec) -> tuple[str, ...]:
+    """Normalize "which lanes does this caller own" to a tuple, once.
+
+    A process owns SEVERAL lanes as soon as it can be renamed: the lane it
+    derived from its environment, plus every name it has since claimed. Mail
+    addressed to the old one is still owed to it - a rename that stranded
+    in-flight results would recreate the exact defect lanes exist to prevent
+    (an async result's recipient is captured at dispatch, so a rename between
+    dispatch and delivery lands mail on the previous lane).
+
+    Accepting a bare string as well as a collection keeps every existing
+    caller and test honest without a flag day; normalizing here means the
+    three places that enforce the rule receive one shape.
+    """
+    if not lane_suffix:
+        return ()
+    if isinstance(lane_suffix, str):
+        return (lane_suffix,)
+    return tuple(dict.fromkeys(s for s in lane_suffix if s))
+
+
+def _lane_clause(lanes: tuple[str, ...]) -> tuple[str, tuple]:
+    """SQL for "this caller may consume this recipient", plus its params.
+
+    The rule lives in exactly two forms - this and ``_lane_ackable`` - because
+    it is enforced in both SQL and Python. It used to live in three, the same
+    predicate hand-written into ``ack`` and into ``inbox``'s remaining count,
+    which is one copy more than can be kept in step: widening ownership to
+    several lanes would have had to be got right independently in each.
+    """
+    if not lanes:
+        # A process with no lane owns no lane, so it may consume only bare
+        # recipients. Guarded explicitly rather than skipped: an unconditional
+        # branch here let any process without a lane ack every session's mail.
+        return " AND instr(recipient, ':') = 0", ()
+    marks = ", ".join("?" for _ in lanes)
+    return (
+        " AND (instr(recipient, ':') = 0"
+        f" OR substr(recipient, instr(recipient, ':') + 1) IN ({marks}))",
+        lanes,
+    )
+
+
+def _lane_ackable(recipient: str, lane_suffix: LaneSpec) -> bool:
+    """May a process owning ``lane_suffix`` consume a message sent to
     ``recipient``?
 
-    The Python mirror of the SQL guard in ``ack``: unqualified recipients stay
-    shared and consumable by anyone, a lane-qualified one only by the process
-    holding that lane, and a process with no lane owns no lane so it may
-    consume only bare recipients. Kept as one predicate because ``inbox``'s
-    consuming read must not be able to drift from ``ack``'s rule - a read that
-    consumed what an ack would have refused is the same defect with a
-    different entry point.
+    The Python mirror of ``_lane_clause``: unqualified recipients stay shared
+    and consumable by anyone, a lane-qualified one only by a process holding
+    that lane, and a process with no lane owns no lane so it may consume only
+    bare recipients. Kept beside its SQL twin because ``inbox``'s consuming
+    read must not be able to drift from ``ack``'s rule - a read that consumed
+    what an ack would have refused is the same defect with a different entry
+    point.
     """
     if ":" not in recipient:
         return True
-    if not lane_suffix:
-        return False
-    return recipient.split(":", 1)[1] == lane_suffix
+    return recipient.split(":", 1)[1] in _lanes(lane_suffix)
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -285,7 +363,7 @@ def inbox(
     unread_only: bool = True,
     limit: int = DEFAULT_INBOX_LIMIT,
     auto_ack: bool = True,
-    lane_suffix: Optional[str] = None,
+    lane_suffix: LaneSpec = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> tuple[list[dict], int]:
@@ -399,20 +477,14 @@ def inbox(
             # ``remaining`` permanently positive, and the documented "poll
             # while remaining" loop would never terminate - head-of-line
             # blocking behind mail that is not yours to take.
+            lane_clause, lane_params = _lane_clause(_lanes(lane_suffix))
             remaining_sql = (
                 f"SELECT COUNT(*) FROM messages WHERE recipient IN ({placeholders})"
-                " AND acked_at IS NULL"
+                " AND acked_at IS NULL" + lane_clause
             )
-            remaining_params: tuple = tuple(agents)
-            if lane_suffix:
-                remaining_sql += (
-                    " AND (instr(recipient, ':') = 0"
-                    " OR substr(recipient, instr(recipient, ':') + 1) = ?)"
-                )
-                remaining_params = remaining_params + (lane_suffix,)
-            else:
-                remaining_sql += " AND instr(recipient, ':') = 0"
-            remaining = conn.execute(remaining_sql, remaining_params).fetchone()[0]
+            remaining = conn.execute(
+                remaining_sql, tuple(agents) + lane_params
+            ).fetchone()[0]
             if consuming:
                 conn.commit()
         except BaseException:
@@ -475,7 +547,7 @@ def peek(message_id: int, *, db_path: Optional[Path] = None) -> Optional[dict]:
 def ack(
     message_id: int,
     *,
-    lane_suffix: Optional[str] = None,
+    lane_suffix: LaneSpec = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> dict:
@@ -494,18 +566,15 @@ def ack(
     could ack every other session's mail - the exact defect lanes exist to
     prevent, reachable by the callers most likely to poll a shared mailbox.
     A process with no lane owns no lane, so it may ack only bare recipients.
+
+    ``lane_suffix`` may name SEVERAL lanes (see ``_lanes``): a session that has
+    been renamed still owns the lane it was addressed by beforehand, and mail
+    already in flight to it must stay consumable.
     """
     db_path = _resolve_db(db_path)
-    sql = "UPDATE messages SET acked_at = ? WHERE id = ? AND acked_at IS NULL"
-    params: tuple = (_iso(now_fn()), message_id)
-    if lane_suffix:
-        sql += (
-            " AND (instr(recipient, ':') = 0"
-            " OR substr(recipient, instr(recipient, ':') + 1) = ?)"
-        )
-        params = params + (lane_suffix,)
-    else:
-        sql += " AND instr(recipient, ':') = 0"
+    clause, lane_params = _lane_clause(_lanes(lane_suffix))
+    sql = "UPDATE messages SET acked_at = ? WHERE id = ? AND acked_at IS NULL" + clause
+    params: tuple = (_iso(now_fn()), message_id) + lane_params
     with closing(_connect(db_path)) as conn:
         with conn:  # transaction: commit on success, rollback on error
             cur = conn.execute(sql, params)

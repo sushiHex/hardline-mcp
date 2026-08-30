@@ -85,6 +85,24 @@ def _no_ambient_lane(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_leaked_claims():
+    """Forget runtime lane claims between tests.
+
+    A claim is process-local state, not an env var, so monkeypatch cannot undo
+    it: without this a test that renames its session silently changes the
+    identity of every test that runs afterwards, and the failures land
+    somewhere else entirely.
+    """
+    from hardline_mcp import adapters, server
+
+    adapters.reset_claimed_lanes()
+    server._reset_registry_state()
+    yield
+    adapters.reset_claimed_lanes()
+    server._reset_registry_state()
+
+
 @pytest.fixture
 def in_session(monkeypatch):
     """Act as a Claude Code session: returns the lane suffix it produces."""

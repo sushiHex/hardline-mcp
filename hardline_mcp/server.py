@@ -32,7 +32,7 @@ from typing import Literal
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 
-from . import adapters, jobs, mailbox
+from . import adapters, jobs, mailbox, sessions
 
 mcp = FastMCP("hardline-mcp")
 
@@ -198,6 +198,79 @@ async def _in_thread(fn, *args, **kwargs):
     return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
 
 
+# ── session registry ─────────────────────────────────────────────────────────
+
+_registry_lock = threading.Lock()
+_registered_lane: list[str] = []
+
+
+def _announce_self(agent: str | None = None, label: str | None = None) -> str | None:
+    """Record this process in the session registry; return the lane, or None.
+
+    Called at startup and again whenever the lane changes. Cheap and idempotent
+    in between: the row is only rewritten when this process's identity actually
+    differs from what was last written, so polling ``inbox`` does not turn into
+    a write per call.
+
+    Silently does nothing when the agent cannot be determined. That is not a
+    failure - a Codex or Hermes session is genuinely anonymous until it calls
+    ``register_session``, and inventing a name for it would put a destination
+    in the registry that nobody can be sure how to reach.
+    """
+    agent = agent or adapters.self_agent()
+    if not agent:
+        return None
+    lane = adapters.lane_for(agent)
+    with _registry_lock:
+        if _registered_lane and _registered_lane[-1] == lane:
+            return lane
+        try:
+            sessions.register(agent=agent, lane=lane, label=label)
+        except Exception:  # noqa: BLE001 - discovery is a convenience, never
+            # a reason to fail the call the caller actually made.
+            traceback.print_exc()
+            return None
+        _registered_lane.append(lane)
+    return lane
+
+
+def _reset_registry_state() -> None:
+    """Forget what this process believes it has registered. Tests only."""
+    with _registry_lock:
+        _registered_lane.clear()
+
+
+def _lane_advice(to_agent: str) -> str | None:
+    """Warn when a lane-qualified send has no live session to receive it.
+
+    A lane-qualified message is consumable ONLY by the process holding that
+    lane, so addressing one nobody holds does not mean "delivered late" - it
+    means never. That is how 51 messages accumulated across 11 dead lanes.
+
+    A warning rather than a rejection, deliberately: a Claude lane is keyed on
+    the session id and survives a ``/mcp`` reconnect, so a session that is
+    momentarily between hardline processes will legitimately come back to the
+    same lane and collect its mail. Refusing would break that. The message
+    still persists either way; the caller is simply told what it just did.
+    """
+    if ":" not in to_agent:
+        return None
+    try:
+        if sessions.holders(to_agent):
+            return None
+        live = [s["lane"] for s in sessions.live(agent=adapters.base_agent(to_agent))]
+    except Exception:  # noqa: BLE001 - never fail a send over discovery
+        return None
+    known = ", ".join(sorted(live)) if live else "none"
+    return (
+        f"no live session holds {to_agent!r}, so nothing can consume this "
+        f"message unless that exact lane comes back (a Claude lane survives a "
+        f"/mcp reconnect; a claimed one does not outlive its process). "
+        f"Live lanes for {adapters.base_agent(to_agent)!r}: {known}. "
+        "Call list_agents() to see every live session."
+    )
+
+
 # ── mailbox tools ────────────────────────────────────────────────────────────
 
 
@@ -217,6 +290,12 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
 
     result = mailbox.send(from_agent, to_agent, message)
     result["ok"] = True
+    # The base-name guard above catches "clod:x" but not "codex:typo": any lane
+    # is accepted after a valid agent, which is the same silent black hole one
+    # level down. The registry can finally tell the difference.
+    advice = _lane_advice(to_agent)
+    if advice:
+        result["warning"] = advice
     if deliver:
         notice = (
             f"[hardline] new message #{result['message_id']} from {from_agent}. "
@@ -293,8 +372,15 @@ async def inbox(
     if ":" in agent:
         agents = [agent]
     else:
-        lane = adapters.lane_for(agent)
-        agents = [agent] if lane == agent else [agent, lane]
+        # EVERY lane this process holds, not just its current one. A session
+        # that renamed itself is still owed the results it dispatched under its
+        # previous name - their recipient was fixed at dispatch time.
+        base = adapters.base_agent(agent)
+        agents = [agent] + [
+            f"{base}:{suffix}"
+            for suffix in adapters.held_lanes()
+            if f"{base}:{suffix}" != agent
+        ]
     msgs, remaining = await _in_thread(
         mailbox.inbox,
         agents,
@@ -303,7 +389,7 @@ async def inbox(
         auto_ack=auto_ack,
         # Same lane identity the explicit ack tool uses, so a consuming read
         # cannot drain a lane this session does not own.
-        lane_suffix=adapters.lane_suffix(),
+        lane_suffix=adapters.held_lanes(),
     )
     msgs, truncated, _ = _fit_response(msgs, allow_drop=False)
     response = {
@@ -336,31 +422,146 @@ async def list_agents() -> dict:
     messages" rather than "wrong name" — one agent searched its own display
     name before learning its mailbox identity was ``hermes``.
 
-    ``agents`` is the dispatchable roster. ``observed`` is every recipient the
-    mailbox has actually seen, including lane-qualified forms, with unread
-    counts. ``you`` is this process's own identity, which is the answer to
-    "what do I pass as from_agent".
+    ``agents`` is the dispatchable roster. ``live_sessions`` is who is actually
+    running right now and can therefore receive lane-qualified mail.
+    ``observed`` is every recipient the mailbox has ever seen, which is a
+    HISTORY and not a destination list — each lane-qualified entry is marked
+    ``live`` so the two are not confused. They were, for a long time: a dead
+    session's lane looks exactly like a live one in the mailbox, so 11 of them
+    were presented as places to send mail and 51 messages went there.
+
+    ``you`` is this process's own identity — the answer to "what do I pass as
+    from_agent", and now also "am I addressable individually".
     """
+    await _in_thread(_announce_self)
     observed = await _in_thread(mailbox.recipients)
     seen_senders = await _in_thread(mailbox.senders)
+    live = await _in_thread(sessions.live)
+    live_lanes = {s["lane"] for s in live}
+
+    stale = 0
+    for entry in observed:
+        recipient = entry["recipient"]
+        if ":" not in recipient:
+            continue
+        entry["live"] = recipient in live_lanes
+        if not entry["live"] and entry.get("unread"):
+            stale += 1
+
     suffix = adapters.lane_suffix()
-    return {
+    held = adapters.held_lanes()
+    agent = adapters.self_agent()
+    you: dict = {
+        "agent": agent,
+        "lane_suffix": suffix or None,
+        "lane_for_claude": adapters.lane_for("claude"),
+        "held_lanes": list(held),
+        "note": (
+            "Pass a bare roster name as from_agent; results are delivered "
+            "to your lane automatically."
+        ),
+    }
+    if not agent:
+        you["addressable"] = False
+        you["how_to_register"] = (
+            "This process cannot tell which agent it serves, so it is absent "
+            "from live_sessions and cannot be addressed individually. Call "
+            "register_session(label='...', agent='codex'|'hermes'|'claude') to "
+            "claim a name for it."
+        )
+    elif not suffix:
+        you["addressable"] = False
+        you["how_to_register"] = (
+            f"Every {agent} session shares the unqualified name {agent!r}, so "
+            "mail cannot be aimed at this one. Call register_session"
+            "(label='...') to claim a lane."
+        )
+    else:
+        you["addressable"] = True
+
+    result = {
         "agents": list(adapters.known_agents()),
-        "you": {
-            "lane_suffix": suffix or None,
-            "lane_for_claude": adapters.lane_for("claude"),
-            "note": (
-                "Pass a bare roster name as from_agent; results are delivered "
-                "to your lane automatically."
-            ),
-        },
+        "you": you,
+        "live_sessions": live,
         "observed_recipients": observed,
         "observed_senders": seen_senders,
         "recipient_syntax": (
             "'<agent>' addresses everyone with that name; '<agent>:<lane>' "
             "addresses one session. inbox('<agent>') reads the bare name AND "
-            "your own lane. Only the lane's owner may consume a "
-            "lane-qualified message."
+            "every lane you hold. Only a lane's holder may consume a "
+            "lane-qualified message — so a lane with no live holder is a "
+            "message nobody can ever read."
+        ),
+    }
+    if stale:
+        result["stale_lanes_note"] = (
+            f"{stale} lane(s) below hold unread mail but have no live session. "
+            "Those messages are unconsumable unless that exact lane returns."
+        )
+    return result
+
+
+@mcp.tool()
+async def register_session(label: str, agent: str | None = None) -> dict:
+    """Claim ``label`` as this session's name, so mail can be aimed at it.
+
+    Answers the question a static MCP registration cannot: a Codex or Hermes
+    config supplies ONE env block to every session it launches, so
+    ``HARDLINE_AGENT_LABEL`` cannot give two of them different names, and
+    without a name every Codex session shares the unqualified identity
+    ``codex``. Claiming one at runtime is per-session by construction.
+
+    After this, ``send(to_agent="codex:construction", ...)`` reaches THIS
+    session and only this session, and ``list_agents`` reports it as live.
+
+    ``agent`` may be omitted where it is inferable (a Claude Code session, or
+    ``HARDLINE_AGENT`` set in the registration); Codex and Hermes must pass it.
+
+    The previous lane is kept, not surrendered: results already dispatched
+    under it were addressed when the job started and must stay consumable.
+    Renaming therefore never strands mail. Refused if a LIVE session already
+    holds the name — a dead holder's claim is ignored, so a label does not
+    become unusable forever because the session that used it crashed.
+    """
+    agent = (agent or adapters.self_agent() or "").strip().lower()
+    if not agent:
+        return {
+            "ok": False,
+            "error": (
+                "cannot tell which agent this session serves; pass agent="
+                f"{sorted(adapters.known_agents())}"
+            ),
+        }
+    if agent not in adapters.known_agents():
+        return {
+            "ok": False,
+            "error": (
+                f"unknown agent {agent!r}; known: {sorted(adapters.known_agents())}"
+            ),
+        }
+    problem = adapters.validate_label(label)
+    if problem:
+        return {"ok": False, "error": problem}
+
+    label = label.strip()
+    claimed = await _in_thread(sessions.claim, agent=agent, label=label)
+    if not claimed.get("ok"):
+        return claimed
+
+    # Only adopt the lane locally once the registry has accepted it. Claiming
+    # first would rename this process to a name it lost the race for, and every
+    # subsequent dispatch would address results to a lane held by someone else.
+    adapters.claim_lane(label)
+    await _in_thread(_announce_self, agent, label)
+    return {
+        "ok": True,
+        "lane": claimed["lane"],
+        "agent": agent,
+        "label": label,
+        "held_lanes": list(adapters.held_lanes()),
+        "note": (
+            f"Others can now reach this session as {claimed['lane']!r}. "
+            "inbox() continues to read every lane you have held."
         ),
     }
 
@@ -451,7 +652,7 @@ async def ack(message_id: int) -> dict:
     existed and was ackable by this session (idempotent — a second ack
     returns false).
     """
-    return await _in_thread(mailbox.ack, message_id, lane_suffix=adapters.lane_suffix())
+    return await _in_thread(mailbox.ack, message_id, lane_suffix=adapters.held_lanes())
 
 
 @mcp.tool()
@@ -981,7 +1182,26 @@ async def ask_claude_async(
 
 def main() -> None:
     """Console-script entry point (``hardline-mcp``). Serves over stdio."""
+    # Announce before serving, so a session is discoverable from its first
+    # moment rather than only after it happens to call a tool. Best effort by
+    # construction (see _announce_self): a registry problem must not stop the
+    # server from doing its actual job.
+    _announce_self()
+    atexit.register(_unregister_self)
     mcp.run()
+
+
+def _unregister_self() -> None:
+    """Drop this process's registry row on a clean exit.
+
+    Not required for correctness - a vanished process is pruned by the next
+    reader either way - but it closes the window where a session that has just
+    exited still looks like a destination.
+    """
+    try:
+        sessions.unregister()
+    except Exception:  # noqa: BLE001 - shutdown must not raise
+        pass
 
 
 if __name__ == "__main__":
