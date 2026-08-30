@@ -443,7 +443,12 @@ async def list_agents() -> dict:
     observed = await _in_thread(mailbox.recipients)
     seen_senders = await _in_thread(mailbox.senders)
     live = await _in_thread(sessions.live)
-    live_lanes = {s["lane"] for s in live}
+    # EVERY lane each session holds, not just the name it is currently
+    # addressed by. A renamed session still consumes its previous lanes, so
+    # collapsing to the current name here would mark them dead and count their
+    # mail as stranded - undoing, in the reporting layer, the whole reason the
+    # registry records more than one lane per session.
+    live_lanes = {lane for s in live for lane in s["lanes"]}
 
     stale = 0
     for entry in observed:
@@ -550,6 +555,13 @@ async def register_session(label: str, agent: str | None = None) -> dict:
         return {"ok": False, "error": problem}
 
     label = label.strip()
+    # Ask BEFORE writing anything durable. A local refusal after the registry
+    # row exists leaves a lane this process never adopted and does not read,
+    # advertised to senders as held and unclaimable by anyone else.
+    refused = adapters.claim_refusal(label)
+    if refused:
+        return {"ok": False, "error": refused}
+
     claimed = await _in_thread(
         sessions.claim,
         agent=agent,
@@ -564,7 +576,17 @@ async def register_session(label: str, agent: str | None = None) -> dict:
     # subsequent dispatch would address results to a lane held by someone else.
     refused = adapters.claim_lane(label)
     if refused:
+        # The pre-check passed and this still refused, so two concurrent
+        # register_session calls filled the last slot between them. Undo the
+        # durable half rather than leave the orphan the pre-check exists to
+        # prevent.
+        await _in_thread(sessions.drop_lane, claimed["lane"])
         return {"ok": False, "error": refused, "lane": claimed["lane"]}
+
+    # Remember the identity too, not just the name. Every later ownership check
+    # re-derives it, and for the sessions that must pass `agent` explicitly
+    # there is nothing in the environment to re-derive it FROM.
+    adapters.declare_agent(agent)
     await _in_thread(_announce_self, agent, label)
     return {
         "ok": True,

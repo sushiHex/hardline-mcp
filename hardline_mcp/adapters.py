@@ -323,11 +323,56 @@ def claim_lane(label: str) -> Optional[str]:
     return None
 
 
+def claim_refusal(label: str) -> Optional[str]:
+    """Why ``claim_lane`` would refuse, without claiming. None if it would not.
+
+    Exists so a caller can find out BEFORE taking a durable action on the
+    strength of a claim that is about to be rejected locally - which would
+    leave a registry row for a name this process never adopted and does not
+    read, advertised to senders as held and unclaimable by anyone else.
+    """
+    label = (label or "").strip()
+    with _claim_lock:
+        if label in _claimed_lanes:
+            return None
+        if len(_claimed_lanes) >= MAX_CLAIMED_LANES:
+            return (
+                f"this session has already claimed {MAX_CLAIMED_LANES} names and "
+                "keeps consuming mail for all of them; refusing another rather "
+                "than dropping one somebody may still be writing to. Start a "
+                "new session if you need a fresh name."
+            )
+    return None
+
+
+def release_lane(label: str) -> None:
+    """Give up a claim. Only for undoing one whose durable half failed."""
+    with _claim_lock:
+        if label in _claimed_lanes:
+            _claimed_lanes.remove(label)
+
+
+# Which agent this process serves, when it had to be told at runtime. A Codex
+# or Hermes session cannot be inferred and may not have HARDLINE_AGENT set, so
+# `register_session(agent=...)` is where it says. Remembering only the LABEL
+# would leave every later ownership check re-deriving identity from an
+# environment that never had it: the session would register, be advertised as
+# live, receive mail, and never be able to consume it.
+_declared_agent: list[str] = []
+
+
+def declare_agent(agent: str) -> None:
+    """Remember which agent this process serves, for the rest of its life."""
+    with _claim_lock:
+        _declared_agent[:] = [agent]
+
+
 def reset_claimed_lanes() -> None:
-    """Forget every runtime claim. For tests; process-local state must not leak
-    between them the way an env var cannot."""
+    """Forget every runtime claim and declaration. For tests; process-local
+    state must not leak between them the way an env var cannot."""
     with _claim_lock:
         _claimed_lanes.clear()
+        _declared_agent.clear()
 
 
 def lane_suffix() -> str:
@@ -408,7 +453,13 @@ def self_agent() -> Optional[str]:
     rather than a default is the point: a session with no derivable identity is
     absent from the registry until it declares one, which is the truth, and
     ``register_session`` is how it does that at runtime.
+
+    A runtime declaration wins over the env var, for the same reason a runtime
+    lane claim does: it is the session speaking for itself, and it happens
+    later.
     """
+    if _declared_agent:
+        return _declared_agent[0]
     declared = os.environ.get("HARDLINE_AGENT", "").strip().lower()
     if declared in known_agents():
         return declared

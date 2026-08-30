@@ -120,6 +120,25 @@ def _prune_dead(conn: sqlite3.Connection) -> None:
         )
 
 
+def drop_lane(
+    lane: str, *, pid: Optional[int] = None, db_path: Optional[Path] = None
+) -> bool:
+    """Give up one lane this process holds. Returns whether a row was there.
+
+    The undo half of a claim whose local adoption was refused after the durable
+    write succeeded. Scoped to this pid so it can never release somebody else's
+    hold on the same name.
+    """
+    db_path = _resolve_db(db_path)
+    pid = os.getpid() if pid is None else pid
+    with closing(_connect(db_path)) as conn:
+        with conn:
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE pid = ? AND lane = ?", (pid, lane)
+            )
+        return cur.rowcount > 0
+
+
 def _upsert(conn, *, pid, lane, agent, label, key, cwd, stamp) -> None:
     """Write one (process, lane) row, creating it only if not already there.
 
@@ -139,10 +158,17 @@ def _upsert(conn, *, pid, lane, agent, label, key, cwd, stamp) -> None:
         (agent, label, key, cwd, stamp, pid, lane),
     )
     if cur.rowcount == 0:
+        # `seq`, not the timestamp, is what orders a session's names. Stored
+        # times have second precision, so two claims inside one second are
+        # indistinguishable by time and the sort would fall back to the lane
+        # TEXT - making a rapid rename advertise whichever name happens to sort
+        # last. A per-process counter cannot tie.
         conn.execute(
             "INSERT INTO sessions (pid, lane, agent, label, process_key, cwd,"
-            " started_at, last_seen, claimed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (pid, lane, agent, label, key, cwd, stamp, stamp, stamp),
+            " started_at, last_seen, claimed_at, seq)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
+            " (SELECT COALESCE(MAX(seq), 0) + 1 FROM sessions WHERE pid = ?))",
+            (pid, lane, agent, label, key, cwd, stamp, stamp, stamp, pid),
         )
 
 
@@ -218,7 +244,7 @@ def _group(rows: list[sqlite3.Row]) -> list[dict]:
     unheld.
     """
     by_pid: dict[int, dict] = {}
-    for row in sorted(rows, key=lambda r: (r["pid"], r["claimed_at"], r["lane"])):
+    for row in sorted(rows, key=lambda r: (r["pid"], r["seq"])):
         entry = by_pid.get(row["pid"])
         if entry is None:
             entry = _row_to_dict(row)

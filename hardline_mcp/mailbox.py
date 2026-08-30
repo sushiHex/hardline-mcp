@@ -120,9 +120,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     cwd         TEXT,
     started_at  TEXT NOT NULL,
     last_seen   TEXT NOT NULL,
-    -- When THIS lane was taken. The newest is the name the session is
-    -- currently addressed by; the rest are what it can still consume.
+    -- When THIS lane was taken. Human-readable only: timestamps here have
+    -- second precision, so two claims inside one second cannot be ordered by
+    -- it. `seq` is what actually orders them.
     claimed_at  TEXT NOT NULL,
+    -- Monotonic per process. The highest is the name the session is currently
+    -- addressed by; the rest are what it can still consume. Ordering on the
+    -- timestamp and tie-breaking on lane text would let a rapid rename
+    -- advertise whichever name sorted last.
+    seq         INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (pid, lane)
 );
 
@@ -135,7 +141,7 @@ CREATE INDEX IF NOT EXISTS sessions_lane_idx ON sessions (lane);
 # keep the old shape and every write naming claimed_at would fail. Dropping is
 # safe precisely because it never released, and the table holds only liveness -
 # no history is lost.
-_SESSIONS_REQUIRED_COLUMNS = {"claimed_at"}
+_SESSIONS_REQUIRED_COLUMNS = {"claimed_at", "seq"}
 
 # One-time per-db init (schema + WAL) is guarded so it happens exactly once
 # per process per path. WAL is a *persistent* DB-header property, so setting it

@@ -716,6 +716,143 @@ async def test_an_async_result_dispatched_before_a_rename_still_arrives(
 
 
 @pytest.mark.anyio
+async def test_an_explicitly_declared_agent_is_remembered_for_ownership(
+    monkeypatch, tmp_path
+):
+    """Passing ``agent=`` must make the session able to CONSUME, not just register.
+
+    This is the documented path for Codex and Hermes: they cannot be inferred,
+    so they name themselves at the call. If only the label is remembered, every
+    later ``inbox``/``ack`` re-derives identity from the environment, finds
+    nothing, and owns no lane-qualified mail - so the session registers, is
+    advertised as live, receives mail, and can never take it.
+
+    The end-to-end test misses this because its fixture sets HARDLINE_AGENT,
+    which is exactly the case where passing ``agent=`` is unnecessary.
+    """
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    assert adapters.self_agent() is None, "nothing in the env identifies this session"
+
+    ok = await server.register_session(label="construction", agent="codex")
+    assert ok["ok"] is True
+
+    mailbox.send("claude", "codex:construction", "ping", db_path=db)
+    got = await server.inbox(agent="codex")
+    assert [m["body"] for m in got["messages"]] == ["ping"]
+    assert got["messages"][0]["acked_at"], "consumable, not merely visible"
+
+    listing = await server.list_agents()
+    assert listing["you"]["addressable"] is True
+
+
+@pytest.mark.anyio
+async def test_list_agents_marks_every_held_lane_live(monkeypatch, tmp_path):
+    """A renamed session's OLD lane is still live, and must be reported so.
+
+    The registry records every held lane precisely so an older name still shows
+    a holder. Collapsing each session to its current name in the reporting
+    layer throws that away again: the previous lane is marked dead and counted
+    as stale mail, while ``holders()`` says the live process still consumes it.
+    """
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+
+    await server.register_session(label="first")
+    mailbox.send("claude", "codex:first", "for the old name", db_path=db)
+    await server.register_session(label="second")
+
+    listing = await server.list_agents()
+    marked = {
+        e["recipient"]: e.get("live")
+        for e in listing["observed_recipients"]
+        if ":" in e["recipient"]
+    }
+    assert marked.get("codex:first") is True, (
+        "the old name still has a live holder, so it is not a dead destination"
+    )
+    assert "stale_lanes_note" not in listing
+
+
+@pytest.mark.anyio
+async def test_the_local_cap_is_checked_before_anything_durable(
+    monkeypatch, codex_session
+):
+    """A claim that will be refused locally must not be attempted durably.
+
+    Tested by watching for the durable call rather than for its leftovers,
+    because a rollback would clean those up — so asserting only on the final
+    rows cannot tell "never written" from "written then removed", and neither
+    mechanism would be individually proven.
+    """
+    from hardline_mcp import server
+
+    monkeypatch.setattr(adapters, "MAX_CLAIMED_LANES", 1)
+    assert (await server.register_session(label="first"))["ok"] is True
+
+    attempts = []
+    real_claim = sessions.claim
+    monkeypatch.setattr(
+        sessions,
+        "claim",
+        lambda **kw: (attempts.append(kw), real_claim(**kw))[1],
+    )
+
+    refused = await server.register_session(label="second")
+    assert refused["ok"] is False
+    assert attempts == [], "the cap is knowable locally; do not write first and ask after"
+    assert adapters.held_lanes() == ("first",)
+
+
+@pytest.mark.anyio
+async def test_a_late_local_refusal_rolls_back_the_registry_row(
+    monkeypatch, codex_session
+):
+    """The narrow race the pre-check cannot close.
+
+    Two concurrent register_session calls can both pass the pre-check and then
+    one loses the last slot. Left alone, that leaves a registry row for a name
+    this process never adopted and does not read: senders are told it has a
+    holder, and no other session can claim it.
+    """
+    from hardline_mcp import server
+
+    monkeypatch.setattr(adapters, "claim_refusal", lambda label: None)
+    monkeypatch.setattr(adapters, "claim_lane", lambda label: "lost the last slot")
+
+    refused = await server.register_session(label="second")
+    assert refused["ok"] is False
+    assert sessions.holders("codex:second", db_path=codex_session) == [], (
+        "a name this process never adopted must not appear held"
+    )
+
+
+def test_two_claims_in_the_same_second_keep_their_order(tmp_path):
+    """Which name is CURRENT cannot depend on alphabetical order.
+
+    Stored timestamps have second precision, so two claims inside one second
+    are indistinguishable by time; falling back to the lane text would make a
+    rapid rename advertise whichever name sorts last. Here the second claim
+    sorts EARLIER alphabetically, so a text tie-break reports the old name.
+    """
+    db = tmp_path / "mb.db"
+    now_fn = _clock(_T0)  # frozen: both claims share a timestamp
+    assert sessions.claim(agent="codex", label="zebra", db_path=db, now_fn=now_fn)["ok"]
+    assert sessions.claim(
+        agent="codex", label="alpha", lanes=["codex:zebra"], db_path=db, now_fn=now_fn
+    )["ok"]
+
+    entry = sessions.live(db_path=db)[0]
+    assert entry["lanes"] == ["codex:zebra", "codex:alpha"], "claim order, not sort order"
+    assert entry["lane"] == "codex:alpha", "the most recent claim is the current name"
+
+
+@pytest.mark.anyio
 async def test_register_session_rejects_a_bad_label(codex_session):
     from hardline_mcp import server
 
