@@ -287,8 +287,20 @@ def validate_label(label: str) -> Optional[str]:
     return None
 
 
-def claim_lane(label: str) -> str:
-    """Adopt ``label`` as this process's lane from now on. Returns the lane.
+# Every lane a process has held stays owned, and every owned lane becomes a
+# bind parameter on every inbox poll. Unbounded, that is a slow denial of
+# service against SQLite's variable limit, reached by nothing more exotic than a
+# session that renames itself in a loop. Refusing past a generous ceiling fails
+# closed and says why; silently dropping the oldest would strand whatever mail
+# was still addressed to them.
+MAX_CLAIMED_LANES = 32
+
+
+def claim_lane(label: str) -> Optional[str]:
+    """Adopt ``label`` as this process's lane from now on.
+
+    Returns the reason it was refused, or None on success - so a caller cannot
+    treat a refusal as an adoption by ignoring the result.
 
     The last writer of a name wins, so a runtime claim overrides
     ``HARDLINE_AGENT_LABEL``: the env var names a session before it can speak,
@@ -298,9 +310,17 @@ def claim_lane(label: str) -> str:
     """
     label = label.strip()
     with _claim_lock:
-        if label not in _claimed_lanes:
-            _claimed_lanes.append(label)
-    return label
+        if label in _claimed_lanes:
+            return None
+        if len(_claimed_lanes) >= MAX_CLAIMED_LANES:
+            return (
+                f"this session has already claimed {MAX_CLAIMED_LANES} names and "
+                "keeps consuming mail for all of them; refusing another rather "
+                "than dropping one somebody may still be writing to. Start a "
+                "new session if you need a fresh name."
+            )
+        _claimed_lanes.append(label)
+    return None
 
 
 def reset_claimed_lanes() -> None:
@@ -350,6 +370,29 @@ def lane_for(agent: str) -> str:
     """``agent`` qualified with this process's current lane, if it has one."""
     suffix = lane_suffix()
     return f"{base_agent(agent)}:{suffix}" if suffix else agent
+
+
+def owned_recipients(agent: Optional[str] = None) -> tuple[str, ...]:
+    """The fully-qualified recipients this process may CONSUME.
+
+    Ownership is over whole recipients, not bare suffixes. Matching a suffix
+    alone let a process holding ``construction`` consume ``codex:construction``
+    AND ``claude:construction`` - one identity reaching into another agent's
+    mail. That was nearly unreachable while lanes came from session ids, which
+    never collide; once sessions can NAME themselves, two agents both called
+    ``construction`` is the obvious case rather than the exotic one.
+
+    ``agent`` names the identity to qualify with, defaulting to whatever this
+    process serves. When that cannot be determined the answer is EMPTY, not a
+    guess: a process that cannot say who it is owns no lane-qualified mail and
+    may consume only bare recipients. Failing closed here costs an anonymous
+    session nothing it previously had - it could not register either - while
+    guessing would hand it somebody else's inbox.
+    """
+    base = base_agent(agent) if agent else self_agent()
+    if not base:
+        return ()
+    return tuple(f"{base}:{suffix}" for suffix in held_lanes())
 
 
 def self_agent() -> Optional[str]:

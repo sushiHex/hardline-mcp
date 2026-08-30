@@ -114,11 +114,35 @@ Code session, or `HARDLINE_AGENT` set in the registration.
 
 Renaming never strands mail. An async result's recipient is fixed when the job
 is *dispatched*, so a session keeps every lane it has held: it is **addressed**
-by its newest name but still **consumes** mail sent to the older ones.
+by its newest name but still **consumes** mail sent to the older ones. The
+registry records all of them, so an older name still shows a live holder and
+can't be claimed out from under the session still reading it.
 
 A claim is refused if a *live* session already holds that name. A dead holder's
 claim is ignored, so a label doesn't become unusable forever because the
 session that used it crashed.
+
+Two consequences worth knowing, both deliberate:
+
+- **A label is a role, not an instance.** Mail sent to `codex:construction` is
+  consumable by whoever holds that name — including a session that claims it
+  *after* the message was sent. You can address a name before anyone answers to
+  it, and a later claimant inherits the backlog. Making each claim a distinct
+  address would mean mail to a name nobody currently holds is undeliverable by
+  construction, which is the stranding this exists to remove.
+- **A claim does not survive its process.** After a `/mcp` reconnect a Codex or
+  Hermes session is anonymous again and must call `register_session` a second
+  time. That's recoverable precisely because of the point above: re-claiming
+  the same label succeeds (the old holder is dead) and the session picks up
+  whatever arrived while it was away.
+
+For a session that should always have the same name, set both variables in its
+MCP registration instead — `HARDLINE_AGENT` (which agent this is: hardline
+cannot tell for Codex or Hermes) and `HARDLINE_AGENT_LABEL` (the name). A
+runtime `register_session` overrides them; the last writer of a name wins.
+`HARDLINE_AGENT_LABEL` without `HARDLINE_AGENT` gives the session a name it
+cannot own — ownership is checked on the full `agent:label`, so that a session
+called `construction` cannot reach into another agent's mail.
 
 ### Who is actually out there
 
@@ -127,7 +151,8 @@ write "I died", so its row is resolved on read from the pid **and** its
 creation-time token (a pid alone is not an identity; a reused one would
 otherwise inherit the previous session's lane and its mail). Nothing to clean
 up: a vanished session simply stops being live, and is pruned by the next
-reader.
+reader. On macOS that token is unavailable, so identity there degrades to the
+pid alone and a reused pid is undetectable.
 
 This matters because a dead session's lane looks exactly like a live one in the
 mailbox. `list_agents()` therefore separates them:

@@ -94,13 +94,11 @@ def _no_leaked_claims():
     identity of every test that runs afterwards, and the failures land
     somewhere else entirely.
     """
-    from hardline_mcp import adapters, server
+    from hardline_mcp import adapters
 
     adapters.reset_claimed_lanes()
-    server._reset_registry_state()
     yield
     adapters.reset_claimed_lanes()
-    server._reset_registry_state()
 
 
 @pytest.fixture

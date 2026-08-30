@@ -200,44 +200,48 @@ async def _in_thread(fn, *args, **kwargs):
 
 # ── session registry ─────────────────────────────────────────────────────────
 
-_registry_lock = threading.Lock()
-_registered_lane: list[str] = []
-
-
 def _announce_self(agent: str | None = None, label: str | None = None) -> str | None:
     """Record this process in the session registry; return the lane, or None.
 
-    Called at startup and again whenever the lane changes. Cheap and idempotent
-    in between: the row is only rewritten when this process's identity actually
-    differs from what was last written, so polling ``inbox`` does not turn into
-    a write per call.
+    Writes every time rather than caching "already registered". A row can
+    vanish while its session is very much alive - a liveness probe that fails
+    for an unrelated reason, a store rebuilt underneath the running fleet, an
+    operator clearing the table - and a process that believed it had registered
+    once would stay invisible for the rest of its life: unaddressable, and
+    reported to senders as a lane nobody holds. Re-announcing is one small
+    UPDATE, and this is called at startup and from ``list_agents``, not from
+    the polling path.
 
-    Silently does nothing when the agent cannot be determined. That is not a
-    failure - a Codex or Hermes session is genuinely anonymous until it calls
-    ``register_session``, and inventing a name for it would put a destination
-    in the registry that nobody can be sure how to reach.
+    Does nothing when the agent cannot be determined: a Codex or Hermes session
+    is genuinely anonymous until it calls ``register_session``, and inventing a
+    name would put a destination in the registry that nobody can be sure how to
+    reach.
+
+    A session holding no lane registers nothing either, but that needs no guard
+    here - it owns no recipients, so there is nothing to write, and ``register``
+    returns early. Worth knowing because it is load-bearing: a default-mode
+    ``ask_codex`` spawns Codex with the operator's real config, so a one-shot
+    review subprocess loads its own hardline. Those have no lane, so they cannot
+    appear as live sessions however many of them run.
     """
     agent = agent or adapters.self_agent()
     if not agent:
         return None
     lane = adapters.lane_for(agent)
-    with _registry_lock:
-        if _registered_lane and _registered_lane[-1] == lane:
-            return lane
-        try:
-            sessions.register(agent=agent, lane=lane, label=label)
-        except Exception:  # noqa: BLE001 - discovery is a convenience, never
-            # a reason to fail the call the caller actually made.
-            traceback.print_exc()
-            return None
-        _registered_lane.append(lane)
+    try:
+        # EVERY held lane, not just the current name. The process consumes mail
+        # for all of them, and a registry that recorded only the newest would
+        # report the older ones unheld - so they would read as dead, senders
+        # would be told nobody could receive them, and another session could
+        # claim one out from under this still-consuming process.
+        sessions.register(
+            agent=agent, lanes=adapters.owned_recipients(agent), label=label
+        )
+    except Exception:  # noqa: BLE001 - discovery is a convenience, never
+        # a reason to fail the call the caller actually made.
+        traceback.print_exc()
+        return None
     return lane
-
-
-def _reset_registry_state() -> None:
-    """Forget what this process believes it has registered. Tests only."""
-    with _registry_lock:
-        _registered_lane.clear()
 
 
 def _lane_advice(to_agent: str) -> str | None:
@@ -375,11 +379,13 @@ async def inbox(
         # EVERY lane this process holds, not just its current one. A session
         # that renamed itself is still owed the results it dispatched under its
         # previous name - their recipient was fixed at dispatch time.
-        base = adapters.base_agent(agent)
+        #
+        # Qualified with the agent being READ, so a bare name still returns
+        # broadcasts. Ownership below is qualified with what this process
+        # actually IS, so asking for another agent's mailbox widens what is
+        # shown but never what can be consumed.
         agents = [agent] + [
-            f"{base}:{suffix}"
-            for suffix in adapters.held_lanes()
-            if f"{base}:{suffix}" != agent
+            lane for lane in adapters.owned_recipients(agent) if lane != agent
         ]
     msgs, remaining = await _in_thread(
         mailbox.inbox,
@@ -387,9 +393,9 @@ async def inbox(
         unread_only=unread_only,
         limit=limit,
         auto_ack=auto_ack,
-        # Same lane identity the explicit ack tool uses, so a consuming read
-        # cannot drain a lane this session does not own.
-        lane_suffix=adapters.held_lanes(),
+        # Same identity the explicit ack tool uses, so a consuming read cannot
+        # drain a lane this session does not own.
+        owned=adapters.owned_recipients(),
     )
     msgs, truncated, _ = _fit_response(msgs, allow_drop=False)
     response = {
@@ -544,14 +550,21 @@ async def register_session(label: str, agent: str | None = None) -> dict:
         return {"ok": False, "error": problem}
 
     label = label.strip()
-    claimed = await _in_thread(sessions.claim, agent=agent, label=label)
+    claimed = await _in_thread(
+        sessions.claim,
+        agent=agent,
+        label=label,
+        lanes=adapters.owned_recipients(agent),
+    )
     if not claimed.get("ok"):
         return claimed
 
     # Only adopt the lane locally once the registry has accepted it. Claiming
     # first would rename this process to a name it lost the race for, and every
     # subsequent dispatch would address results to a lane held by someone else.
-    adapters.claim_lane(label)
+    refused = adapters.claim_lane(label)
+    if refused:
+        return {"ok": False, "error": refused, "lane": claimed["lane"]}
     await _in_thread(_announce_self, agent, label)
     return {
         "ok": True,
@@ -652,7 +665,9 @@ async def ack(message_id: int) -> dict:
     existed and was ackable by this session (idempotent — a second ack
     returns false).
     """
-    return await _in_thread(mailbox.ack, message_id, lane_suffix=adapters.held_lanes())
+    return await _in_thread(
+        mailbox.ack, message_id, owned=adapters.owned_recipients()
+    )
 
 
 @mcp.tool()

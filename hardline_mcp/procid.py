@@ -135,6 +135,15 @@ def process_key(pid: int) -> Optional[str]:
 
     ``None`` where the platform will not say; callers must decide what to do
     with an unverifiable identity rather than assume it matches.
+
+    Windows and Linux are covered. **macOS is not**: there is no ``/proc``, so
+    every key is None there and identity degrades to the pid alone - a reused
+    pid is undetectable, and a durable record can be honoured for the wrong
+    process. The package does not otherwise restrict its platform, so this is a
+    real gap rather than an impossible case; it needs ``proc_pidinfo`` via
+    ctypes to close. Recorded here rather than silently degraded because the
+    None branch in ``instance_alive`` looks deliberate at the call site and
+    gives no hint that a whole platform takes it always.
     """
     if not pid or pid <= 0:
         return None
