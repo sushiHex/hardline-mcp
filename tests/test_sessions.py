@@ -7,6 +7,7 @@ an implementation that hardcoded ``live = True``.
 """
 
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -746,6 +747,110 @@ async def test_an_explicitly_declared_agent_is_remembered_for_ownership(
 
     listing = await server.list_agents()
     assert listing["you"]["addressable"] is True
+
+
+@pytest.mark.anyio
+async def test_a_process_that_knows_what_it_is_cannot_redeclare_itself(
+    monkeypatch, tmp_path, in_session
+):
+    """A declaration may fill in an unknown identity, never contradict a known one.
+
+    Remembering the declaration is what makes ``agent=`` work for Codex and
+    Hermes — and it is also what makes getting it wrong permanent. A Claude
+    session that passes ``agent="codex"`` would otherwise become Codex for
+    every subsequent ownership check, able to claim an unheld Codex lane and
+    drain the backlog waiting there for a real Codex session.
+    """
+    from hardline_mcp import server
+
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    assert adapters.self_agent() == "claude"
+
+    result = await server.register_session(label="construction", agent="codex")
+    assert result["ok"] is False
+    assert "codex" in result["error"] and "claude" in result["error"]
+
+    assert adapters.self_agent() == "claude", "a refused declaration must not stick"
+    assert adapters.owned_recipients() == (f"claude:{in_session}",)
+
+    # Declaring what it already is remains fine — that is not a contradiction.
+    assert (await server.register_session(label="ok", agent="claude"))["ok"] is True
+
+
+@pytest.mark.anyio
+async def test_a_rolled_back_claim_leaves_the_previous_label_intact(
+    monkeypatch, codex_session
+):
+    """Rolling back the new lane must not leave the surviving one renamed.
+
+    ``claim`` rewrites every retained lane, and passed ``label=None`` for the
+    ones it was keeping — so a claim that is then rolled back deletes the new
+    row and leaves the old one stripped of the name it was claimed under.
+    ``list_agents`` would go on advertising the session with ``label: null``
+    while it still holds and answers to that name.
+    """
+    from hardline_mcp import server
+
+    assert (await server.register_session(label="first"))["ok"] is True
+
+    monkeypatch.setattr(adapters, "claim_refusal", lambda label: None)
+    monkeypatch.setattr(adapters, "claim_lane", lambda label: "lost the last slot")
+    assert (await server.register_session(label="second"))["ok"] is False
+
+    entry = sessions.live(db_path=codex_session)[0]
+    assert entry["lane"] == "codex:first"
+    assert entry["label"] == "first", "the surviving claim keeps the name it was made under"
+
+
+@pytest.mark.anyio
+async def test_concurrent_claims_keep_the_registry_and_the_process_agreed(
+    monkeypatch, codex_session
+):
+    """The registry's current name and the one this process answers to are one fact.
+
+    There is an await boundary between the durable claim and the local
+    adoption, so two concurrent calls can commit in one order and adopt in the
+    other: the registry would advertise one name while async results routed to
+    the other.
+
+    Asserted as non-interleaving rather than by racing for the symptom: the
+    divergence only appears on a scheduling order the test cannot force, so a
+    test that looked for it would pass most runs and prove nothing.
+    """
+    import anyio
+
+    from hardline_mcp import server
+
+    real_claim = sessions.claim
+    order: list[str] = []
+    lock = threading.Lock()
+
+    def tracking_claim(**kwargs):
+        with lock:
+            order.append(f"enter:{kwargs['label']}")
+        time.sleep(0.2)
+        out = real_claim(**kwargs)
+        with lock:
+            order.append(f"exit:{kwargs['label']}")
+        return out
+
+    monkeypatch.setattr(sessions, "claim", tracking_claim)
+
+    async def claim(name):
+        await server.register_session(label=name)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(claim, "alpha")
+        tg.start_soon(claim, "beta")
+
+    first = order[0].split(":", 1)[1]
+    assert order[1] == f"exit:{first}", (
+        f"claims interleaved ({order}); the durable claim and the local adoption "
+        "must be one critical section, or the registry and the process can end "
+        "up naming different lanes as current"
+    )
+    entry = sessions.live(db_path=codex_session)[0]
+    assert entry["lane"] == f"codex:{adapters.lane_suffix()}"
 
 
 @pytest.mark.anyio

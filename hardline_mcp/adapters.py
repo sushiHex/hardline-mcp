@@ -361,6 +361,27 @@ def release_lane(label: str) -> None:
 _declared_agent: list[str] = []
 
 
+def declaration_conflict(agent: str) -> Optional[str]:
+    """Why declaring ``agent`` would contradict what this process already is.
+
+    A declaration may FILL IN an unknown identity; it may never replace a known
+    one. Remembering the declaration is what makes ``agent=`` work for Codex and
+    Hermes, and it is equally what makes getting it wrong permanent: a Claude
+    session that declared itself codex would pass every later ownership check as
+    codex, and could claim an unheld Codex lane and drain the backlog waiting
+    there for a real Codex session.
+    """
+    agent = (agent or "").strip().lower()
+    known = _declared_agent[0] if _declared_agent else intrinsic_agent()
+    if known and known != agent:
+        return (
+            f"this process is {known!r}, so it cannot register as {agent!r}. "
+            "Declaring an agent fills in an identity that could not be "
+            "determined; it does not replace one that could."
+        )
+    return None
+
+
 def declare_agent(agent: str) -> None:
     """Remember which agent this process serves, for the rest of its life."""
     with _claim_lock:
@@ -454,12 +475,22 @@ def self_agent() -> Optional[str]:
     absent from the registry until it declares one, which is the truth, and
     ``register_session`` is how it does that at runtime.
 
-    A runtime declaration wins over the env var, for the same reason a runtime
-    lane claim does: it is the session speaking for itself, and it happens
-    later.
+    A runtime declaration is consulted first, but it can only ever have filled
+    in an identity the environment did not supply - see
+    ``declaration_conflict``.
     """
     if _declared_agent:
         return _declared_agent[0]
+    return intrinsic_agent()
+
+
+def intrinsic_agent() -> Optional[str]:
+    """Identity from the ENVIRONMENT alone, ignoring any runtime declaration.
+
+    What this process can be shown to be, as opposed to what it has said it
+    is. Kept separate so a declaration can be checked against it rather than
+    silently overwriting it.
+    """
     declared = os.environ.get("HARDLINE_AGENT", "").strip().lower()
     if declared in known_agents():
         return declared

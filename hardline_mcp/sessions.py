@@ -152,9 +152,16 @@ def _upsert(conn, *, pid, lane, agent, label, key, cwd, stamp) -> None:
     an upsert is how ``started_at`` ends up resetting on one path and not the
     other, and nothing about that reads as wrong at either site.
     """
+    # COALESCE, so ``label=None`` means "leave it alone" rather than "clear it".
+    # A lane's label is the name it was CLAIMED under and never changes, but
+    # both callers rewrite every retained lane on each pass and pass None for
+    # the ones they are merely keeping. Assigning directly stripped the name
+    # from every previous lane - and if the new claim was then rolled back, from
+    # the one the session was still answering to, leaving list_agents
+    # advertising it with no label at all.
     cur = conn.execute(
-        "UPDATE sessions SET agent = ?, label = ?, process_key = ?, cwd = ?,"
-        " last_seen = ? WHERE pid = ? AND lane = ?",
+        "UPDATE sessions SET agent = ?, label = COALESCE(?, label),"
+        " process_key = ?, cwd = ?, last_seen = ? WHERE pid = ? AND lane = ?",
         (agent, label, key, cwd, stamp, pid, lane),
     )
     if cur.rowcount == 0:
