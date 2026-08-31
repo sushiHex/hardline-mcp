@@ -104,7 +104,7 @@ CREATE INDEX IF NOT EXISTS jobs_requester_idx ON jobs (requester, created_at);
 -- Liveness is NOT stored: it is derived on read from the pid and its
 -- creation-time token, exactly as jobs derives `lost`. A crashed session
 -- therefore needs no cleanup - it simply stops being alive.
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE IF NOT EXISTS agent_sessions (
     pid         INTEGER NOT NULL,
     -- Fully-qualified recipient ("codex:construction"), so it compares
     -- directly against messages.recipient with no reassembly.
@@ -132,16 +132,26 @@ CREATE TABLE IF NOT EXISTS sessions (
     PRIMARY KEY (pid, lane)
 );
 
-CREATE INDEX IF NOT EXISTS sessions_lane_idx ON sessions (lane);
+CREATE INDEX IF NOT EXISTS agent_sessions_lane_idx ON agent_sessions (lane);
 """
 
-# `sessions` shipped inside one unreleased branch with a different primary key
-# (pid alone) and no claimed_at. CREATE TABLE IF NOT EXISTS cannot reshape it
-# and ALTER cannot change a primary key, so a store built by that revision would
-# keep the old shape and every write naming claimed_at would fail. Dropping is
-# safe precisely because it never released, and the table holds only liveness -
-# no history is lost.
-_SESSIONS_REQUIRED_COLUMNS = {"claimed_at", "seq"}
+# Named `agent_sessions`, not `sessions`, and that is a correctness decision
+# rather than taste. This branch gave `sessions` three different shapes, and
+# under an editable install a process runs whatever the tree said when it
+# SPAWNED - so several of those shapes are live against one store at the same
+# time, indefinitely, with no coordinated restart to end the overlap.
+#
+# Reshaping in place meant inspecting the table and then dropping it, and those
+# two steps cannot be made one without a transaction spanning both: process A
+# reads the old shape, B drops it, builds the right one and registers itself,
+# then A acts on its stale reading and destroys B's table and B's committed row.
+# `meta.schema_version` cannot arbitrate, because every one of those revisions
+# calls itself 4.
+#
+# A distinct name removes the whole class of failure instead of racing better.
+# Old revisions keep writing to `sessions`, this one owns `agent_sessions`, and
+# nothing ever has to drop anything. The orphan table is small and harmless;
+# destroying another process's registrations is neither.
 
 # One-time per-db init (schema + WAL) is guarded so it happens exactly once
 # per process per path. WAL is a *persistent* DB-header property, so setting it
@@ -185,21 +195,6 @@ def _iso(dt: datetime) -> str:
 _ADDED_COLUMNS = {
     "jobs": {"child_key": "TEXT"},
 }
-
-
-def _drop_prerelease_sessions(conn: sqlite3.Connection) -> None:
-    """Discard a `sessions` table from the unreleased pre-(pid, lane) shape.
-
-    Runs BEFORE the schema script so the CREATE that follows builds the current
-    shape. Only ever drops a table missing a column the current shape requires,
-    so a correct store is untouched and this is a no-op on every later start.
-    """
-    try:
-        present = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
-    except sqlite3.Error:
-        return
-    if present and not _SESSIONS_REQUIRED_COLUMNS.issubset(present):
-        conn.execute("DROP TABLE sessions")
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -255,7 +250,6 @@ def _ensure_initialized(db_path: Path) -> None:
             try:
                 with closing(sqlite3.connect(str(db_path), timeout=10.0)) as conn:
                     conn.execute("PRAGMA journal_mode=WAL")
-                    _drop_prerelease_sessions(conn)
                     # executescript, not execute: the schema is several
                     # statements now. Every one is IF NOT EXISTS, so this stays
                     # idempotent and an existing messages-only store gains the

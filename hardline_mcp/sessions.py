@@ -108,13 +108,13 @@ def _prune_dead(conn: sqlite3.Connection) -> None:
     a liveness decision made about its predecessor. Matching the token we
     actually probed makes the delete a compare-and-swap.
     """
-    rows = conn.execute("SELECT pid, lane, process_key FROM sessions").fetchall()
+    rows = conn.execute("SELECT pid, lane, process_key FROM agent_sessions").fetchall()
     dead = [(r["pid"], r["lane"], r["process_key"]) for r in rows if not _is_live(r)]
     if not dead:
         return
     with conn:
         conn.executemany(
-            "DELETE FROM sessions WHERE pid = ? AND lane = ?"
+            "DELETE FROM agent_sessions WHERE pid = ? AND lane = ?"
             " AND process_key IS ?",
             dead,
         )
@@ -134,7 +134,7 @@ def drop_lane(
     with closing(_connect(db_path)) as conn:
         with conn:
             cur = conn.execute(
-                "DELETE FROM sessions WHERE pid = ? AND lane = ?", (pid, lane)
+                "DELETE FROM agent_sessions WHERE pid = ? AND lane = ?", (pid, lane)
             )
         return cur.rowcount > 0
 
@@ -160,7 +160,7 @@ def _upsert(conn, *, pid, lane, agent, label, key, cwd, stamp) -> None:
     # the one the session was still answering to, leaving list_agents
     # advertising it with no label at all.
     cur = conn.execute(
-        "UPDATE sessions SET agent = ?, label = COALESCE(?, label),"
+        "UPDATE agent_sessions SET agent = ?, label = COALESCE(?, label),"
         " process_key = ?, cwd = ?, last_seen = ? WHERE pid = ? AND lane = ?",
         (agent, label, key, cwd, stamp, pid, lane),
     )
@@ -171,10 +171,10 @@ def _upsert(conn, *, pid, lane, agent, label, key, cwd, stamp) -> None:
         # TEXT - making a rapid rename advertise whichever name happens to sort
         # last. A per-process counter cannot tie.
         conn.execute(
-            "INSERT INTO sessions (pid, lane, agent, label, process_key, cwd,"
+            "INSERT INTO agent_sessions (pid, lane, agent, label, process_key, cwd,"
             " started_at, last_seen, claimed_at, seq)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
-            " (SELECT COALESCE(MAX(seq), 0) + 1 FROM sessions WHERE pid = ?))",
+            " (SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_sessions WHERE pid = ?))",
             (pid, lane, agent, label, key, cwd, stamp, stamp, stamp, pid),
         )
 
@@ -230,7 +230,7 @@ def register(
                 )
             marks = ", ".join("?" for _ in held)
             conn.execute(
-                f"DELETE FROM sessions WHERE pid = ? AND lane NOT IN ({marks})",
+                f"DELETE FROM agent_sessions WHERE pid = ? AND lane NOT IN ({marks})",
                 (pid, *held),
             )
     return {
@@ -277,7 +277,7 @@ def live(
     db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
         _prune_dead(conn)
-        sql = "SELECT * FROM sessions"
+        sql = "SELECT * FROM agent_sessions"
         params: tuple = ()
         if agent:
             sql += " WHERE agent = ?"
@@ -298,7 +298,7 @@ def holders(lane: str, *, db_path: Optional[Path] = None) -> list[dict]:
     """
     db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
-        rows = conn.execute("SELECT * FROM sessions WHERE lane = ?", (lane,)).fetchall()
+        rows = conn.execute("SELECT * FROM agent_sessions WHERE lane = ?", (lane,)).fetchall()
         return [_row_to_dict(r) for r in rows if _is_live(r)]
 
 
@@ -346,7 +346,7 @@ def claim(
         try:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                "SELECT * FROM sessions WHERE lane = ?", (lane,)
+                "SELECT * FROM agent_sessions WHERE lane = ?", (lane,)
             ).fetchall()
             existing = [
                 _row_to_dict(r) for r in rows if r["pid"] != pid and _is_live(r)
@@ -367,7 +367,7 @@ def claim(
             # Any remaining row for this lane belongs to a dead session (or to
             # us). Clear it so the takeover leaves exactly one holder.
             conn.execute(
-                "DELETE FROM sessions WHERE lane = ? AND pid != ?", (lane, pid)
+                "DELETE FROM agent_sessions WHERE lane = ? AND pid != ?", (lane, pid)
             )
             for one in held:
                 _upsert(
@@ -400,5 +400,5 @@ def unregister(
     pid = os.getpid() if pid is None else pid
     with closing(_connect(db_path)) as conn:
         with conn:
-            cur = conn.execute("DELETE FROM sessions WHERE pid = ?", (pid,))
+            cur = conn.execute("DELETE FROM agent_sessions WHERE pid = ?", (pid,))
         return cur.rowcount > 0

@@ -43,7 +43,7 @@ def test_a_registered_session_whose_process_is_gone_is_not_live(tmp_path):
     sessions.register(agent="codex", lane="codex:ghost", pid=_DEAD_PID, db_path=db)
     # The row exists...
     with mailbox._connect(db) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM agent_sessions").fetchone()[0] == 1
     # ...but nothing reports it as a destination.
     assert sessions.live(db_path=db) == []
     assert sessions.holders("codex:ghost", db_path=db) == []
@@ -54,7 +54,7 @@ def test_reading_prunes_the_dead_row(tmp_path):
     sessions.register(agent="codex", lane="codex:ghost", pid=_DEAD_PID, db_path=db)
     sessions.live(db_path=db)
     with mailbox._connect(db) as conn:
-        remaining = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        remaining = conn.execute("SELECT COUNT(*) FROM agent_sessions").fetchone()[0]
     assert remaining == 0, "a dead session must not accumulate as a stale destination"
 
 
@@ -75,7 +75,7 @@ def test_prune_only_deletes_the_instance_it_probed(tmp_path, monkeypatch):
         with mailbox._connect(db) as conn:
             with conn:
                 conn.execute(
-                    "UPDATE sessions SET process_key = ? WHERE pid = ?",
+                    "UPDATE agent_sessions SET process_key = ? WHERE pid = ?",
                     ("a-brand-new-instance", _DEAD_PID),
                 )
         return False
@@ -84,7 +84,7 @@ def test_prune_only_deletes_the_instance_it_probed(tmp_path, monkeypatch):
     sessions.live(db_path=db)
 
     with mailbox._connect(db) as conn:
-        keys = [r["process_key"] for r in conn.execute("SELECT process_key FROM sessions")]
+        keys = [r["process_key"] for r in conn.execute("SELECT process_key FROM agent_sessions")]
     assert keys == ["a-brand-new-instance"], (
         "the row now describes a different process instance and must survive"
     )
@@ -110,7 +110,7 @@ def test_a_reused_pid_does_not_inherit_the_previous_sessions_lane(tmp_path):
     with mailbox._connect(db) as conn:
         with conn:
             conn.execute(
-                "UPDATE sessions SET process_key = ? WHERE pid = ?",
+                "UPDATE agent_sessions SET process_key = ? WHERE pid = ?",
                 ("not-the-key-this-process-has", os.getpid()),
             )
     assert sessions.live(db_path=db) == []
@@ -133,7 +133,7 @@ def test_process_key_actually_identifies_this_process(tmp_path):
     db = tmp_path / "mb.db"
     sessions.register(agent="claude", lane="claude:me", db_path=db)
     with mailbox._connect(db) as conn:
-        stored = conn.execute("SELECT process_key FROM sessions").fetchone()[0]
+        stored = conn.execute("SELECT process_key FROM agent_sessions").fetchone()[0]
     assert stored == key, "the real token must be what gets recorded"
     assert [s["lane"] for s in sessions.live(db_path=db)] == ["claude:me"]
 
@@ -232,7 +232,7 @@ def test_claim_takes_over_a_name_whose_holder_died(tmp_path):
         pids = [
             r["pid"]
             for r in conn.execute(
-                "SELECT pid FROM sessions WHERE lane = ?", ("codex:construction",)
+                "SELECT pid FROM agent_sessions WHERE lane = ?", ("codex:construction",)
             )
         ]
     assert pids == [os.getpid()], "the dead holder's row must be cleared, not skipped"
@@ -799,7 +799,7 @@ async def test_a_derived_lane_is_not_labelled_by_a_later_claim(
     with mailbox._connect(db) as conn:
         labels = {
             r["lane"]: r["label"]
-            for r in conn.execute("SELECT lane, label FROM sessions")
+            for r in conn.execute("SELECT lane, label FROM agent_sessions")
         }
     assert labels[f"claude:{in_session}"] is None, "derived, so it has no chosen name"
     assert labels["claude:construction"] == "construction"
