@@ -164,6 +164,32 @@ def test_register_is_idempotent_and_keeps_started_at(tmp_path):
     assert rows[0]["last_seen"] == "2026-08-30T12:10:00Z", "last_seen must advance"
 
 
+def test_register_does_not_delete_lanes_outside_its_snapshot(tmp_path):
+    """A heartbeat carries a STALE view of what this process holds.
+
+    ``_announce_self`` reads the held set and then writes it, and it runs from
+    ``list_agents`` outside the claim serialization. So a heartbeat that
+    started before a rename can arrive after it, carrying the older set. If
+    registration treats its argument as the complete truth and deletes whatever
+    is absent, that heartbeat unregisters the lane just claimed — while this
+    process goes on consuming it locally, and while another process is now free
+    to claim it.
+
+    Removal has its own path (``drop_lane``) for the one case that needs it, so
+    registration is additive and a stale snapshot can only ever be redundant.
+    """
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lanes=["codex:a", "codex:b"], db_path=db)
+
+    # The heartbeat that was in flight before "b" was claimed.
+    sessions.register(agent="codex", lanes=["codex:a"], db_path=db)
+
+    assert sorted(sessions.live(db_path=db)[0]["lanes"]) == ["codex:a", "codex:b"]
+    assert sessions.holders("codex:b", db_path=db), (
+        "a lane this process still consumes must keep its holder"
+    )
+
+
 def test_unregister_removes_the_row(tmp_path):
     db = tmp_path / "mb.db"
     sessions.register(agent="claude", lane="claude:a", db_path=db)
@@ -380,6 +406,18 @@ def test_a_renamed_sessions_old_lane_still_reports_a_holder(monkeypatch, tmp_pat
     assert len(entries) == 1, "one session, however many names"
     assert entries[0]["lane"] == "codex:second", "addressed by the newest name"
     assert entries[0]["lanes"] == ["codex:first", "codex:second"]
+
+    # The heartbeat re-announces EVERY held lane, not just the current one.
+    # Rows go missing for reasons that have nothing to do with this process -
+    # a liveness probe that failed, a store rebuilt underneath it - and a
+    # heartbeat that only refreshed the newest name would leave the older ones
+    # gone for good, unregistered while still being consumed.
+    sessions.drop_lane("codex:first", db_path=db)
+    assert sessions.holders("codex:first", db_path=db) == []
+    server._announce_self()
+    assert sessions.holders("codex:first", db_path=db), (
+        "a lost row for a still-held lane must come back on the next heartbeat"
+    )
 
 
 def test_another_session_cannot_claim_a_lane_a_renamed_process_still_holds(tmp_path):

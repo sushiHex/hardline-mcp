@@ -345,13 +345,6 @@ def claim_refusal(label: str) -> Optional[str]:
     return None
 
 
-def release_lane(label: str) -> None:
-    """Give up a claim. Only for undoing one whose durable half failed."""
-    with _claim_lock:
-        if label in _claimed_lanes:
-            _claimed_lanes.remove(label)
-
-
 # Which agent this process serves, when it had to be told at runtime. A Codex
 # or Hermes session cannot be inferred and may not have HARDLINE_AGENT set, so
 # `register_session(agent=...)` is where it says. Remembering only the LABEL

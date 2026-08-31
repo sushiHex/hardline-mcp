@@ -192,10 +192,9 @@ def register(
 ) -> dict:
     """Record (or refresh) the lanes this process holds. Idempotent.
 
-    ``lanes`` is the COMPLETE set; anything previously recorded for this pid and
-    absent from it is removed, so the table always says exactly what the process
-    would claim to own. ``lane`` is the single-lane spelling, kept because most
-    callers hold exactly one.
+    ``lanes`` is what to RECORD, not the whole truth to enforce: rows already
+    there and absent from it are left alone. ``lane`` is the single-lane
+    spelling, kept because most callers hold exactly one.
 
     Only ever writes rows whose pid is this process, so the cross-process case
     cannot collide. A row left behind by a dead session that happened to hold
@@ -228,11 +227,15 @@ def register(
                     cwd=cwd,
                     stamp=stamp,
                 )
-            marks = ", ".join("?" for _ in held)
-            conn.execute(
-                f"DELETE FROM agent_sessions WHERE pid = ? AND lane NOT IN ({marks})",
-                (pid, *held),
-            )
+            # ADDITIVE. No "delete whatever is absent from this set", because
+            # the set is a SNAPSHOT and the caller is not always serialized
+            # against claims: `_announce_self` runs from `list_agents`, reads
+            # the held lanes, and writes them, so a heartbeat that started
+            # before a rename can arrive after it carrying the older set.
+            # Deleting on that basis unregisters the lane just claimed - while
+            # this process keeps consuming it locally, and while another
+            # process is now free to take it. Registration cannot be the thing
+            # that removes rows; `drop_lane` is, for the one case that needs it.
     return {
         "lane": held[-1],
         "lanes": list(held),
