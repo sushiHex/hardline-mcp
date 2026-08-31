@@ -40,12 +40,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
+
+from . import procid
 
 
 def _codex_bin_root() -> Path:
@@ -221,8 +225,8 @@ def base_agent(name: str) -> str:
     return name.split(":", 1)[0]
 
 
-def lane_suffix() -> str:
-    """This process's session lane, or "" when it isn't in a session.
+def derived_lane_suffix() -> str:
+    """The lane this process's ENVIRONMENT implies, or "" for none.
 
     Every Claude Code session spawns its OWN hardline process over stdio, so
     the process IS the session - no caller needs to declare anything. Claude
@@ -234,25 +238,366 @@ def lane_suffix() -> str:
     respawns this process but keeps the session, so pending results still
     land in the same lane. A per-process random id would orphan them.
 
-    Hermes and Codex set neither variable, so they fall through to "" and
-    keep their existing unqualified identities.
+    Codex sets neither variable. Its MCP child gets a deliberately minimal
+    environment - 22 variables, of which the only relevant ones are whatever
+    the registration's own env block puts there. There is no session id, no
+    thread id, nothing unique. So for a Codex session the lane cannot come from
+    the environment at all, and every one of them shared the unqualified name
+    ``codex``.
+
+    It can come from the PROCESS. Each session spawns its own hardline over
+    stdio, so the thing that spawned this one IS the session: its pid paired
+    with its creation time is unique, stable for as long as the session lives,
+    and needs no cooperation from the agent whatsoever. That is
+    ``parent_lane_suffix``.
+
+    Order: an explicit ``HARDLINE_AGENT_LABEL`` pin, then a session id the host
+    supplied, then the parent. Earlier entries are better only because they
+    survive more: a Claude session id outlives a ``/mcp`` reconnect, where the
+    parent-derived lane does not change either - the parent is the same process
+    - but a full restart is a new session under both.
     """
     label = os.environ.get("HARDLINE_AGENT_LABEL", "").strip()
     if label:
         return label
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
-    if not session_id:
+    if session_id:
+        project = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+        name = Path(project).name if project else Path.cwd().name
+        short = session_id[:8]
+        return f"{name}.{short}" if name else short
+    return parent_lane_suffix()
+
+
+# A hardline running underneath another hardline was spawned by ask_codex or
+# ask_claude: a one-shot subprocess doing a single piece of work, not a session
+# anybody can address. Giving those lanes would fill the live list with things
+# that are not sessions, which is the exact misreport the registry exists to
+# end.
+_NESTED_MARKERS = ("hardline-mcp",)
+
+
+# Computed once. The parent of a process never changes, so neither can this -
+# and the work is not trivial: identifying an ancestor enumerates every process
+# on the machine. derived_lane_suffix() is called on nearly every mailbox
+# operation, so recomputing would put a full process scan on the hot path.
+_parent_lane_cache: list[str] = []
+
+
+def parent_lane_suffix() -> str:
+    """A lane derived from the process that spawned this one, or "".
+
+    For the agents that identify themselves, this never runs. For Codex - which
+    identifies itself not at all - it is the only source of a per-session
+    identity that does not require the session to remember to ask for one.
+
+    Returns "" for a nested agent spawn, and "" wherever the platform will not
+    say who the parent is: a guessed identity is worse than none, because the
+    registry treats a lane as a destination somebody can be sent mail at.
+    """
+    if _parent_lane_cache:
+        return _parent_lane_cache[0]
+    _parent_lane_cache.append(_compute_parent_lane())
+    return _parent_lane_cache[0]
+
+
+def _compute_parent_lane() -> str:
+    parent = os.getppid()
+    if not parent:
         return ""
-    project = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
-    name = Path(project).name if project else Path.cwd().name
-    short = session_id[:8]
-    return f"{name}.{short}" if name else short
+    if any(
+        marker in name.lower()
+        for name in procid.ancestry(parent, depth=3)
+        for marker in _NESTED_MARKERS
+    ):
+        return ""
+    token = procid.session_token(parent)
+    if not token:
+        return ""
+    name = Path.cwd().name
+    return f"{name}.{token}" if name else token
+
+
+# A label becomes part of a recipient string, so it must not contain the ':'
+# that separates agent from lane, must not be empty, and must not be so long
+# that it crowds out the message in every listing that prints it.
+LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+LABEL_RULE = (
+    "1-64 chars, starting alphanumeric, then letters/digits/dot/dash/underscore"
+    " (no ':' - it separates the agent from the lane)"
+)
+
+# Names claimed at runtime, oldest first. Process-local by design: this is the
+# identity of THIS process, and a hardline server is spawned per session.
+_claimed_lanes: list[str] = []
+_claim_lock = threading.Lock()
+
+
+def validate_label(label: str) -> Optional[str]:
+    """Why ``label`` is unusable as a lane, or None if it is fine."""
+    label = (label or "").strip()
+    if not label:
+        return f"label must not be empty; {LABEL_RULE}"
+    if not LABEL_PATTERN.match(label):
+        return f"invalid label {label!r}; {LABEL_RULE}"
+    if label in known_agents():
+        # "codex:codex" reads as a typo and, worse, invites confusion with the
+        # bare roster name that means "any codex".
+        return f"label {label!r} is a roster agent name; pick something distinct"
+    return None
+
+
+# Every lane a process has held stays owned, and every owned lane becomes a
+# bind parameter on every inbox poll. Unbounded, that is a slow denial of
+# service against SQLite's variable limit, reached by nothing more exotic than a
+# session that renames itself in a loop. Refusing past a generous ceiling fails
+# closed and says why; silently dropping the oldest would strand whatever mail
+# was still addressed to them.
+MAX_CLAIMED_LANES = 32
+
+
+def claim_lane(label: str) -> Optional[str]:
+    """Adopt ``label`` as this process's lane from now on.
+
+    Returns the reason it was refused, or None on success - so a caller cannot
+    treat a refusal as an adoption by ignoring the result.
+
+    The last writer of a name wins, so a runtime claim overrides
+    ``HARDLINE_AGENT_LABEL``: the env var names a session before it can speak,
+    this is the session naming itself, and it happens later.
+
+    The previous lane is NOT surrendered - see ``held_lanes``.
+    """
+    label = label.strip()
+    with _claim_lock:
+        if label in _claimed_lanes:
+            return None
+        if len(_claimed_lanes) >= MAX_CLAIMED_LANES:
+            return (
+                f"this session has already claimed {MAX_CLAIMED_LANES} names and "
+                "keeps consuming mail for all of them; refusing another rather "
+                "than dropping one somebody may still be writing to. Start a "
+                "new session if you need a fresh name."
+            )
+        _claimed_lanes.append(label)
+    return None
+
+
+def release_lane(label: str) -> None:
+    """Give up a claimed name. The correction path for one made by mistake.
+
+    Only touches runtime claims. A lane derived from the environment is not a
+    claim and cannot be surrendered - it is what this process is.
+    """
+    with _claim_lock:
+        if label in _claimed_lanes:
+            _claimed_lanes.remove(label)
+
+
+def claim_refusal(label: str) -> Optional[str]:
+    """Why ``claim_lane`` would refuse, without claiming. None if it would not.
+
+    Exists so a caller can find out BEFORE taking a durable action on the
+    strength of a claim that is about to be rejected locally - which would
+    leave a registry row for a name this process never adopted and does not
+    read, advertised to senders as held and unclaimable by anyone else.
+    """
+    label = (label or "").strip()
+    with _claim_lock:
+        if label in _claimed_lanes:
+            return None
+        if len(_claimed_lanes) >= MAX_CLAIMED_LANES:
+            return (
+                f"this session has already claimed {MAX_CLAIMED_LANES} names and "
+                "keeps consuming mail for all of them; refusing another rather "
+                "than dropping one somebody may still be writing to. Start a "
+                "new session if you need a fresh name."
+            )
+    return None
+
+
+# Which agent this process serves, when it had to be told at runtime. A Codex
+# or Hermes session cannot be inferred and may not have HARDLINE_AGENT set, so
+# `register_session(agent=...)` is where it says. Remembering only the LABEL
+# would leave every later ownership check re-deriving identity from an
+# environment that never had it: the session would register, be advertised as
+# live, receive mail, and never be able to consume it.
+_declared_agent: list[str] = []
+
+
+def declaration_conflict(agent: str) -> Optional[str]:
+    """Why declaring ``agent`` would contradict what this process already is.
+
+    A declaration may FILL IN an unknown identity; it may never replace a known
+    one. Remembering the declaration is what makes ``agent=`` work for Codex and
+    Hermes, and it is equally what makes getting it wrong permanent: a Claude
+    session that declared itself codex would pass every later ownership check as
+    codex, and could claim an unheld Codex lane and drain the backlog waiting
+    there for a real Codex session.
+    """
+    agent = (agent or "").strip().lower()
+    known = _declared_agent[0] if _declared_agent else intrinsic_agent()
+    if known and known != agent:
+        return (
+            f"this process is {known!r}, so it cannot register as {agent!r}. "
+            "Declaring an agent fills in an identity that could not be "
+            "determined; it does not replace one that could."
+        )
+    return None
+
+
+def declare_agent(agent: str) -> None:
+    """Remember which agent this process serves, for the rest of its life."""
+    with _claim_lock:
+        _declared_agent[:] = [agent]
+
+
+def reset_claimed_lanes() -> None:
+    """Forget every runtime claim and declaration. For tests; process-local
+    state must not leak between them the way an env var cannot."""
+    with _claim_lock:
+        _claimed_lanes.clear()
+        _declared_agent.clear()
+
+
+def lane_suffix() -> str:
+    """This process's CURRENT lane, or "" when it has none.
+
+    What this process is addressed AS: the most recent claim if it has made
+    one, else whatever its environment implies.
+    """
+    if _claimed_lanes:
+        return _claimed_lanes[-1]
+    return derived_lane_suffix()
+
+
+def held_lanes() -> tuple[str, ...]:
+    """Every lane this process owns - what it may CONSUME, not what it is called.
+
+    Addressing narrows to one name; ownership must not. An async result's
+    recipient is fixed when the job is dispatched (``lane_for`` at that
+    moment), so a session that renames between dispatch and delivery would
+    otherwise find its own result addressed to a lane it no longer holds -
+    unconsumable, since only the holder may ack it. That is precisely the
+    stranding that lanes exist to prevent, so a rename adds a name rather than
+    replacing one.
+
+    Ordered oldest first: derived lane, then each claim in the order made.
+    """
+    lanes: list[str] = []
+    derived = derived_lane_suffix()
+    if derived:
+        lanes.append(derived)
+    with _claim_lock:
+        claims = list(_claimed_lanes)
+    for claim in claims:
+        if claim not in lanes:
+            lanes.append(claim)
+    return tuple(lanes)
 
 
 def lane_for(agent: str) -> str:
-    """``agent`` qualified with this process's lane, if it has one."""
+    """``agent`` qualified with this process's current lane, if it has one."""
     suffix = lane_suffix()
     return f"{base_agent(agent)}:{suffix}" if suffix else agent
+
+
+def owned_recipients(agent: Optional[str] = None) -> tuple[str, ...]:
+    """The fully-qualified recipients this process may CONSUME.
+
+    Ownership is over whole recipients, not bare suffixes. Matching a suffix
+    alone let a process holding ``construction`` consume ``codex:construction``
+    AND ``claude:construction`` - one identity reaching into another agent's
+    mail. That was nearly unreachable while lanes came from session ids, which
+    never collide; once sessions can NAME themselves, two agents both called
+    ``construction`` is the obvious case rather than the exotic one.
+
+    ``agent`` names the identity to qualify with, defaulting to whatever this
+    process serves. When that cannot be determined the answer is EMPTY, not a
+    guess: a process that cannot say who it is owns no lane-qualified mail and
+    may consume only bare recipients. Failing closed here costs an anonymous
+    session nothing it previously had - it could not register either - while
+    guessing would hand it somebody else's inbox.
+    """
+    base = base_agent(agent) if agent else self_agent()
+    if not base:
+        return ()
+    return tuple(f"{base}:{suffix}" for suffix in held_lanes())
+
+
+def self_agent() -> Optional[str]:
+    """Which roster agent is this hardline serving, or None if it cannot be known.
+
+    A hardline server does not inherently know who spawned it. Claude Code
+    identifies itself by handing the child ``CLAUDE_CODE_SESSION_ID``, so that
+    case is inferable; Codex and Hermes hand over nothing, and guessing on
+    their behalf would register confident nonsense.
+
+    ``HARDLINE_AGENT`` is the explicit declaration for the two that cannot be
+    inferred - one line in an MCP registration's env block. Returning None
+    rather than a default is the point: a session with no derivable identity is
+    absent from the registry until it declares one, which is the truth, and
+    ``register_session`` is how it does that at runtime.
+
+    A runtime declaration is consulted first, but it can only ever have filled
+    in an identity the environment did not supply - see
+    ``declaration_conflict``.
+    """
+    if _declared_agent:
+        return _declared_agent[0]
+    return intrinsic_agent() or parent_agent()
+
+
+# The executable that spawns a hardline names the agent it serves. Checked as a
+# substring because the launcher is `codex.exe` on Windows and `codex` on
+# POSIX, and neither is going to be mistaken for the other.
+_AGENT_BY_LAUNCHER = ("codex", "claude", "hermes")
+
+_parent_agent_cache: list[str] = []
+
+
+def parent_agent() -> Optional[str]:
+    """Which agent spawned this hardline, judged by its executable name.
+
+    A lane is useless without an agent: ownership is over fully-qualified
+    recipients, so a session that knows it is ``construction`` but not WHICH
+    ``construction`` owns nothing. Codex supplies neither, and requiring an
+    operator to hand-write ``HARDLINE_AGENT`` into a config file to make
+    automatic registration work is not automatic.
+
+    The process that spawned this one is called ``codex.exe``. That is not a
+    guess about identity, it is a reading of it - the same source the lane
+    itself now comes from.
+
+    Cached: naming an ancestor enumerates every process, and this is consulted
+    on ownership checks.
+    """
+    if _parent_agent_cache:
+        return _parent_agent_cache[0] or None
+    found = ""
+    for name in procid.ancestry(os.getppid(), depth=3):
+        lowered = name.lower()
+        match = next((a for a in _AGENT_BY_LAUNCHER if a in lowered), None)
+        if match:
+            found = match
+            break
+    _parent_agent_cache.append(found)
+    return found or None
+
+
+def intrinsic_agent() -> Optional[str]:
+    """Identity from the ENVIRONMENT alone, ignoring any runtime declaration.
+
+    What this process can be shown to be, as opposed to what it has said it
+    is. Kept separate so a declaration can be checked against it rather than
+    silently overwriting it.
+    """
+    declared = os.environ.get("HARDLINE_AGENT", "").strip().lower()
+    if declared in known_agents():
+        return declared
+    if os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip():
+        return "claude"
+    return None
 
 
 def positive_int_env(key: str, default: int, *, unit: str = "") -> int:

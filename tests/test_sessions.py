@@ -1,0 +1,1768 @@
+"""Tests for the session registry — real temp-dir SQLite, real process probes.
+
+The registry's whole claim is that liveness is DERIVED, not stored, so the
+tests that matter here are the ones where a recorded process is gone or is no
+longer itself. A test that only ever registers live sessions would pass against
+an implementation that hardcoded ``live = True``.
+"""
+
+import os
+import sqlite3
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from hardline_mcp import adapters, mailbox, procid, sessions
+
+_T0 = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
+
+# A pid that is real enough to be well-formed and reliably absent. The existing
+# jobs tests use the same value for the same reason.
+_DEAD_PID = 0x7FFFFFFE
+
+
+def _clock(start):
+    state = {"now": start}
+
+    def now_fn():
+        return state["now"]
+
+    def tick(seconds):
+        state["now"] = state["now"] + timedelta(seconds=seconds)
+
+    now_fn.tick = tick
+    return now_fn
+
+
+# ── liveness is derived, never stored ────────────────────────────────────────
+
+
+def test_a_registered_session_whose_process_is_gone_is_not_live(tmp_path):
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lane="codex:ghost", pid=_DEAD_PID, db_path=db)
+    # The row exists...
+    with mailbox._connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM agent_sessions").fetchone()[0] == 1
+    # ...but nothing reports it as a destination.
+    assert sessions.live(db_path=db) == []
+    assert sessions.holders("codex:ghost", db_path=db) == []
+
+
+def test_reading_prunes_the_dead_row(tmp_path):
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lane="codex:ghost", pid=_DEAD_PID, db_path=db)
+    sessions.live(db_path=db)
+    with mailbox._connect(db) as conn:
+        remaining = conn.execute("SELECT COUNT(*) FROM agent_sessions").fetchone()[0]
+    assert remaining == 0, "a dead session must not accumulate as a stale destination"
+
+
+def test_prune_only_deletes_the_instance_it_probed(tmp_path, monkeypatch):
+    """The prune must be a compare-and-delete, not a delete by pid.
+
+    Between deciding a pid is dead and issuing the DELETE, the OS can hand that
+    pid to a new process which registers itself. Deleting on pid alone would
+    remove the live newcomer on the strength of a liveness decision made about
+    its predecessor — silently unregistering a session that just arrived.
+    """
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lane="codex:a", pid=_DEAD_PID, db_path=db)
+
+    def probe_then_race(row):
+        # The pid is reused and re-registered while the pruner holds its
+        # (now stale) view of the row.
+        with mailbox._connect(db) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE agent_sessions SET process_key = ? WHERE pid = ?",
+                    ("a-brand-new-instance", _DEAD_PID),
+                )
+        return procid.DEAD
+
+    monkeypatch.setattr(sessions, "_state", probe_then_race)
+    sessions.live(db_path=db)
+
+    with mailbox._connect(db) as conn:
+        keys = [r["process_key"] for r in conn.execute("SELECT process_key FROM agent_sessions")]
+    assert keys == ["a-brand-new-instance"], (
+        "the row now describes a different process instance and must survive"
+    )
+
+
+def test_this_process_is_live(tmp_path):
+    db = tmp_path / "mb.db"
+    sessions.register(agent="claude", lane="claude:me", db_path=db)
+    lanes = [s["lane"] for s in sessions.live(db_path=db)]
+    assert lanes == ["claude:me"]
+
+
+def test_a_reused_pid_does_not_inherit_the_previous_sessions_lane(tmp_path):
+    """The identity check, not just the liveness check.
+
+    Registering OUR pid with somebody else's creation-time token is exactly
+    what a reused pid looks like: the process is alive, but it is not the one
+    the row describes. Without the process_key comparison this reads as live
+    and the new process silently inherits the old session's name and mail.
+    """
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lane="codex:old", db_path=db)
+    with mailbox._connect(db) as conn:
+        with conn:
+            conn.execute(
+                "UPDATE agent_sessions SET process_key = ? WHERE pid = ?",
+                ("not-the-key-this-process-has", os.getpid()),
+            )
+    assert sessions.live(db_path=db) == []
+
+
+def test_process_key_actually_identifies_this_process(tmp_path):
+    """A real round-trip, not just a mismatch.
+
+    The reuse test above writes a deliberately wrong token, so it also passes
+    when ``process_key`` always returns None — the comparison rejects the fake
+    either way. Registering with the token the platform really produces is what
+    proves the mechanism works rather than merely refusing everything.
+    """
+    key = procid.process_key(os.getpid())
+    if key is None:
+        pytest.skip("this platform does not expose a process creation token")
+    assert procid.process_key(os.getpid()) == key, "stable across calls"
+    assert procid.instance_alive(os.getpid(), key) is True
+
+    db = tmp_path / "mb.db"
+    sessions.register(agent="claude", lane="claude:me", db_path=db)
+    with mailbox._connect(db) as conn:
+        stored = conn.execute("SELECT process_key FROM agent_sessions").fetchone()[0]
+    assert stored == key, "the real token must be what gets recorded"
+    assert [s["lane"] for s in sessions.live(db_path=db)] == ["claude:me"]
+
+
+def test_a_probe_that_cannot_answer_is_not_a_death(tmp_path, monkeypatch):
+    """UNKNOWN is a third answer, and collapsing it into DEAD destroys things.
+
+    A probe fails for reasons that have nothing to do with the process — on
+    Windows, opening one at a higher integrity level returns ACCESS_DENIED,
+    which without the error code looks exactly like "no such process". Treating
+    that as death unregisters a live session, deletes the evidence it was ever
+    there, and frees its name for somebody else to claim.
+    """
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lane="codex:a", db_path=db)
+
+    monkeypatch.setattr(sessions, "_state", lambda row: procid.UNKNOWN)
+
+    assert [s["lane"] for s in sessions.live(db_path=db)] == ["codex:a"], (
+        "an unanswerable probe must not hide a session"
+    )
+    with mailbox._connect(db) as conn:
+        rows = conn.execute("SELECT COUNT(*) FROM agent_sessions").fetchone()[0]
+    assert rows == 1, "and must not delete its row"
+    assert sessions.holders("codex:a", db_path=db), "so its name is still held"
+
+
+def test_instance_state_distinguishes_the_three_answers(monkeypatch):
+    """All THREE, not just the two a live test process can demonstrate.
+
+    ALIVE and DEAD are easy: this process, and a pid that does not exist.
+    UNKNOWN is the one that matters and the one no real process here will
+    produce on demand, so it is reached the two ways the code can reach it —
+    an identity that will not read, and an open that failed for a reason other
+    than the process being gone.
+    """
+    key = procid.process_key(os.getpid())
+    assert procid.instance_state(os.getpid(), None) == procid.ALIVE
+    assert procid.instance_state(_DEAD_PID, None) == procid.DEAD
+    if key is not None:
+        assert procid.instance_state(os.getpid(), key) == procid.ALIVE
+        assert procid.instance_state(os.getpid(), "not-my-key") == procid.DEAD
+
+    # A live process whose identity token will not read. Saying DEAD here is
+    # what let a transient permission failure unregister a live session.
+    monkeypatch.setattr(procid, "process_key", lambda pid: None)
+    assert procid.instance_state(os.getpid(), "a-recorded-key") == procid.UNKNOWN
+    assert procid.instance_alive(os.getpid(), "a-recorded-key") is True
+
+
+def test_only_no_such_process_reads_as_death():
+    """The error-code judgement, which is the whole point of reading one.
+
+    Without it, "there is no such pid" and "that pid is not yours to open" are
+    one indistinguishable falsy handle — and treating the second as death is
+    how a session running at a different integrity level gets unregistered.
+    """
+    assert procid.open_failure_state(procid._ERROR_INVALID_PARAMETER) == procid.DEAD
+    assert procid.open_failure_state(procid._ERROR_ACCESS_DENIED) == procid.UNKNOWN
+    assert procid.open_failure_state(0) == procid.UNKNOWN, "unrecognised is not dead"
+
+
+def test_instance_alive_allows_an_unrecorded_identity(tmp_path):
+    """A row written where the platform would not say must not read as dead.
+
+    Mirrors kill_process_tree: an unverifiable identity is allowed through,
+    because refusing there would mean the feature never works at all.
+    """
+    assert procid.instance_alive(os.getpid(), None) is True
+    assert procid.instance_alive(_DEAD_PID, None) is False
+
+
+# ── registration ─────────────────────────────────────────────────────────────
+
+
+def test_register_is_idempotent_and_keeps_started_at(tmp_path):
+    db = tmp_path / "mb.db"
+    now_fn = _clock(_T0)
+    sessions.register(agent="claude", lane="claude:a", db_path=db, now_fn=now_fn)
+    now_fn.tick(600)
+    sessions.register(agent="claude", lane="claude:a", db_path=db, now_fn=now_fn)
+
+    rows = sessions.live(db_path=db)
+    assert len(rows) == 1, "one row per process, not one per heartbeat"
+    assert rows[0]["started_at"] == "2026-08-30T12:00:00Z", "started_at must not reset"
+    assert rows[0]["last_seen"] == "2026-08-30T12:10:00Z", "last_seen must advance"
+
+
+def test_register_does_not_delete_lanes_outside_its_snapshot(tmp_path):
+    """A heartbeat carries a STALE view of what this process holds.
+
+    ``_announce_self`` reads the held set and then writes it, and it runs from
+    ``list_agents`` outside the claim serialization. So a heartbeat that
+    started before a rename can arrive after it, carrying the older set. If
+    registration treats its argument as the complete truth and deletes whatever
+    is absent, that heartbeat unregisters the lane just claimed — while this
+    process goes on consuming it locally, and while another process is now free
+    to claim it.
+
+    Removal has its own path (``drop_lane``) for the one case that needs it, so
+    registration is additive and a stale snapshot can only ever be redundant.
+    """
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lanes=["codex:a", "codex:b"], db_path=db)
+
+    # The heartbeat that was in flight before "b" was claimed.
+    sessions.register(agent="codex", lanes=["codex:a"], db_path=db)
+
+    assert sorted(sessions.live(db_path=db)[0]["lanes"]) == ["codex:a", "codex:b"]
+    assert sessions.holders("codex:b", db_path=db), (
+        "a lane this process still consumes must keep its holder"
+    )
+
+
+def test_unregister_removes_the_row(tmp_path):
+    db = tmp_path / "mb.db"
+    sessions.register(agent="claude", lane="claude:a", db_path=db)
+    assert sessions.unregister(db_path=db) is True
+    assert sessions.live(db_path=db) == []
+    assert sessions.unregister(db_path=db) is False
+
+
+def test_live_filters_by_agent(tmp_path):
+    db = tmp_path / "mb.db"
+    sessions.register(agent="claude", lane="claude:a", pid=os.getpid(), db_path=db)
+    # A second live row needs a second live pid; the parent of this process is
+    # a real, running process that is not us.
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available to register")
+    sessions.register(agent="codex", lane="codex:b", pid=other, db_path=db)
+
+    assert [s["lane"] for s in sessions.live(agent="claude", db_path=db)] == ["claude:a"]
+    assert [s["lane"] for s in sessions.live(agent="codex", db_path=db)] == ["codex:b"]
+
+
+# ── claiming a name ──────────────────────────────────────────────────────────
+
+
+def test_claim_registers_the_qualified_lane(tmp_path):
+    db = tmp_path / "mb.db"
+    result = sessions.claim(agent="codex", label="construction", db_path=db)
+    assert result["ok"] is True
+    assert result["lane"] == "codex:construction"
+    assert [s["lane"] for s in sessions.live(db_path=db)] == ["codex:construction"]
+
+
+def test_claim_is_refused_when_a_live_session_holds_the_name(tmp_path):
+    db = tmp_path / "mb.db"
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available to hold the lane")
+    sessions.register(
+        agent="codex", lane="codex:construction", pid=other, db_path=db
+    )
+    result = sessions.claim(agent="codex", label="construction", db_path=db)
+    assert result["ok"] is False
+    assert "already held" in result["error"]
+    assert str(other) in result["error"], "the refusal must name who holds it"
+
+
+def test_claim_takes_over_a_name_whose_holder_died(tmp_path):
+    """A dead holder's claim means nothing.
+
+    Refusing on its behalf would make a label unusable forever after the
+    session that used it crashed - which, in a system whose defining failure is
+    mail stranded on dead lanes, is the wrong direction to fail in.
+    """
+    db = tmp_path / "mb.db"
+    sessions.register(
+        agent="codex", lane="codex:construction", pid=_DEAD_PID, db_path=db
+    )
+    result = sessions.claim(agent="codex", label="construction", db_path=db)
+    assert result["ok"] is True
+
+    # Against the RAW table, not through live()/holders(): both filter the dead
+    # row out anyway, so either would report success whether the takeover
+    # cleared it or merely ignored it - leaving two rows for one lane.
+    with mailbox._connect(db) as conn:
+        pids = [
+            r["pid"]
+            for r in conn.execute(
+                "SELECT pid FROM agent_sessions WHERE lane = ?", ("codex:construction",)
+            )
+        ]
+    assert pids == [os.getpid()], "the dead holder's row must be cleared, not skipped"
+
+
+def test_two_live_sessions_cannot_both_claim_one_name(tmp_path, monkeypatch):
+    """The race the BEGIN IMMEDIATE in ``claim`` exists for.
+
+    Two sessions claiming the same label at once each read "nobody holds it"
+    and each insert their OWN pid row, which collides with nothing — pid is the
+    primary key and lane is not unique. Both would then hold the lane and
+    consume each other's mail. Exactly one must win.
+    """
+    import threading
+
+    db = tmp_path / "mb.db"
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available to race with")
+
+    results: list[dict] = []
+    lock = threading.Lock()
+    start = threading.Barrier(2)
+
+    # Force the interleaving instead of hoping for it. A bare barrier is not
+    # enough: the winner usually finishes the whole claim before the loser's
+    # SELECT runs, so the race never happens and the test passes against an
+    # implementation with no transaction at all (verified - it did). Holding
+    # the first writer between its check and its write is what makes the
+    # unguarded version fail every time.
+    real_upsert = sessions._upsert
+    held = threading.Event()
+
+    def slow_upsert(*args, **kwargs):
+        if not held.is_set():
+            held.set()
+            time.sleep(0.5)
+        return real_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(sessions, "_upsert", slow_upsert)
+
+    def claim_as(pid):
+        start.wait(timeout=5)
+        outcome = sessions.claim(
+            agent="codex", label="construction", pid=pid, db_path=db
+        )
+        with lock:
+            results.append(outcome)
+
+    threads = [
+        threading.Thread(target=claim_as, args=(os.getpid(),)),
+        threading.Thread(target=claim_as, args=(other,)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    won = [r for r in results if r.get("ok")]
+    assert len(won) == 1, f"exactly one claim must win, got {results!r}"
+    assert len(sessions.holders("codex:construction", db_path=db)) == 1
+
+
+def test_a_lane_with_live_unfinished_work_is_not_claimable(tmp_path):
+    """Absence from the registry must stop granting ownership.
+
+    The registry cannot see every consumer: a process on older code never
+    registers, one whose announcement failed is absent, one behind an
+    unanswerable probe looks gone. An unfinished job whose owner is alive is
+    the hard evidence that somebody is still coming back for this name — and
+    its recipient was fixed at DISPATCH, before any message exists, so checking
+    the mailbox alone would approve the takeover moments before the result
+    lands.
+    """
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available to own the work")
+
+    job_id = jobs.create(
+        agent="codex",
+        requester="codex:construction",
+        label=None,
+        request={"prompt_chars": 1},
+        db_path=db,
+    )
+    # Owned by a DIFFERENT live process. A claimant's own outstanding work is
+    # no reason to refuse it its own name.
+    with mailbox._connect(db) as conn:
+        with conn:
+            conn.execute(
+                "UPDATE jobs SET owner_pid = ? WHERE job_id = ?", (other, job_id)
+            )
+
+    refused = sessions.claim(agent="codex", label="construction", db_path=db)
+    assert refused["ok"] is False
+    assert "unfinished work" in refused["error"]
+    assert refused["outstanding_jobs"], "the refusal must name what it is protecting"
+
+
+def test_a_lane_whose_outstanding_work_died_with_its_owner_is_claimable(tmp_path):
+    """A dead owner's unfinished job is not evidence of a live consumer.
+
+    Otherwise a crash would make a name permanently unclaimable — the same
+    fail-forever direction that refusing on a dead HOLDER would have had.
+    """
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    job_id = jobs.create(
+        agent="codex",
+        requester="codex:construction",
+        label=None,
+        request={"prompt_chars": 1},
+        db_path=db,
+    )
+    with mailbox._connect(db) as conn:
+        with conn:
+            conn.execute(
+                "UPDATE jobs SET owner_pid = ? WHERE job_id = ?", (_DEAD_PID, job_id)
+            )
+
+    assert sessions.claim(agent="codex", label="construction", db_path=db)["ok"] is True
+
+
+def test_a_claim_reports_the_backlog_it_inherits(tmp_path):
+    """A label is a role, so a claimant takes on whatever waited at that name.
+
+    Intended, and exactly what an operator would want to see afterwards if the
+    name turns out to have been the wrong one — so the claim says how much it
+    took on rather than only that it worked.
+    """
+    db = tmp_path / "mb.db"
+    for i in range(3):
+        mailbox.send("claude", "codex:construction", f"m{i}", db_path=db)
+
+    claimed = sessions.claim(agent="codex", label="construction", db_path=db)
+    assert claimed["ok"] is True
+    assert claimed["inherited_unread"] == 3
+
+
+def test_reclaiming_after_a_reconnect_still_works(tmp_path):
+    """The guard must not break the documented recovery path.
+
+    A /mcp reconnect returns a session to anonymity; re-claiming the same label
+    is how it gets its name and its waiting mail back. Finished work and a dead
+    former holder are not evidence against that.
+    """
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    sessions.register(
+        agent="codex", lane="codex:construction", pid=_DEAD_PID, db_path=db
+    )
+    job_id = jobs.create(
+        agent="codex",
+        requester="codex:construction",
+        label=None,
+        request={"prompt_chars": 1},
+        db_path=db,
+    )
+    jobs.finish(job_id, result={"ok": True}, db_path=db)
+    mailbox.send("claude", "codex:construction", "waiting for you", db_path=db)
+
+    claimed = sessions.claim(agent="codex", label="construction", db_path=db)
+    assert claimed["ok"] is True, claimed.get("error")
+    assert claimed["inherited_unread"] == 1
+
+
+def test_reclaiming_your_own_name_is_not_a_conflict(tmp_path):
+    db = tmp_path / "mb.db"
+    assert sessions.claim(agent="codex", label="c", db_path=db)["ok"] is True
+    assert sessions.claim(agent="codex", label="c", db_path=db)["ok"] is True
+
+
+# ── label validation ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "",
+        "   ",
+        "has space",
+        "has:colon",  # ':' separates agent from lane
+        ".leading-dot",
+        "a" * 65,
+        "codex",  # a roster name, so "codex:codex"
+        "claude",
+    ],
+)
+def test_bad_labels_are_rejected(label):
+    assert adapters.validate_label(label) is not None
+
+
+@pytest.mark.parametrize("label", ["construction", "a", "web-2", "main.1", "A_b"])
+def test_good_labels_are_accepted(label):
+    assert adapters.validate_label(label) is None
+
+
+# ── held lanes: a rename must never strand mail ──────────────────────────────
+
+
+def test_a_renamed_session_still_owns_its_previous_lane(monkeypatch, in_session):
+    """The stranding regression, stated directly.
+
+    An async result's recipient is fixed when the job is DISPATCHED, so mail
+    can already be in flight to the old lane when a rename lands. If ownership
+    moved instead of growing, that result would arrive addressed to a lane this
+    session no longer holds - unconsumable, because only the holder may ack it.
+    """
+    assert adapters.held_lanes() == (in_session,)
+    adapters.claim_lane("construction")
+
+    assert adapters.lane_suffix() == "construction", "addressed by the new name"
+    assert adapters.held_lanes() == (in_session, "construction"), (
+        "but still owns the old one"
+    )
+    assert adapters.lane_for("claude") == "claude:construction"
+
+
+def test_a_renamed_sessions_old_lane_still_reports_a_holder(monkeypatch, tmp_path):
+    """The registry must record every lane a session holds, not just its name.
+
+    This is the defect that made renaming dangerous. The process consumes mail
+    for the old lane, but if the registry only stored the current name, the old
+    one showed no holder — so it read as dead, ``send`` warned nobody could
+    receive it, and another session could CLAIM it. Both would then hold the
+    lane and drain each other's mail, nondeterministically, which is the exact
+    failure lanes exist to prevent.
+    """
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+
+    assert sessions.claim(agent="codex", label="first", db_path=db)["ok"] is True
+    adapters.claim_lane("first")
+    server._announce_self()
+
+    adapters.claim_lane("second")
+    server._announce_self()
+
+    assert sessions.holders("codex:first", db_path=db), (
+        "the old lane is still consumed by this process, so it still has a holder"
+    )
+    assert sessions.holders("codex:second", db_path=db)
+
+    entries = sessions.live(db_path=db)
+    assert len(entries) == 1, "one session, however many names"
+    assert entries[0]["lane"] == "codex:second", "addressed by the newest name"
+    assert entries[0]["lanes"] == ["codex:first", "codex:second"]
+
+    # The heartbeat re-announces EVERY held lane, not just the current one.
+    # Rows go missing for reasons that have nothing to do with this process -
+    # a liveness probe that failed, a store rebuilt underneath it - and a
+    # heartbeat that only refreshed the newest name would leave the older ones
+    # gone for good, unregistered while still being consumed.
+    sessions.drop_lane("codex:first", db_path=db)
+    assert sessions.holders("codex:first", db_path=db) == []
+    server._announce_self()
+    assert sessions.holders("codex:first", db_path=db), (
+        "a lost row for a still-held lane must come back on the next heartbeat"
+    )
+
+
+def test_another_session_cannot_claim_a_lane_a_renamed_process_still_holds(tmp_path):
+    """The consequence of the above, stated as the attack it prevents."""
+    db = tmp_path / "mb.db"
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available")
+
+    sessions.register(
+        agent="codex",
+        lanes=["codex:first", "codex:second"],
+        pid=other,
+        db_path=db,
+    )
+    stolen = sessions.claim(agent="codex", label="first", db_path=db)
+    assert stolen["ok"] is False
+    assert "already held" in stolen["error"]
+
+
+def test_a_claim_overrides_the_env_label(monkeypatch):
+    monkeypatch.setenv("HARDLINE_AGENT_LABEL", "from-env")
+    assert adapters.lane_suffix() == "from-env"
+    adapters.claim_lane("from-runtime")
+    assert adapters.lane_suffix() == "from-runtime", "last writer of a name wins"
+    assert adapters.held_lanes() == ("from-env", "from-runtime")
+
+
+def test_mail_sent_to_the_old_lane_is_still_consumable_after_a_rename(
+    tmp_path, in_session
+):
+    db = tmp_path / "mb.db"
+    # Addressed while the session was still called `in_session`.
+    mailbox.send("codex", f"claude:{in_session}", "your result", db_path=db)
+    adapters.claim_lane("construction")
+
+    msgs, remaining = mailbox.inbox(
+        [f"claude:{in_session}"],
+        owned=adapters.owned_recipients("claude"),
+        db_path=db,
+    )
+    assert [m["body"] for m in msgs] == ["your result"]
+    assert msgs[0]["acked_at"] is not None, "must be CONSUMED, not merely shown"
+    assert remaining == 0
+
+
+def test_ack_honours_every_held_lane(tmp_path, in_session):
+    db = tmp_path / "mb.db"
+    sent = mailbox.send("codex", f"claude:{in_session}", "old lane", db_path=db)
+    adapters.claim_lane("construction")
+    result = mailbox.ack(
+        sent["message_id"], owned=adapters.owned_recipients("claude"), db_path=db
+    )
+    assert result["ok"] is True
+
+
+def test_holding_several_lanes_still_excludes_other_sessions(tmp_path):
+    """Widening ownership must not widen it to everyone.
+
+    The failure mode being guarded is an implementation that, given several
+    lanes, drops the condition entirely - which reads as "all my lanes work"
+    on every happy-path test while quietly draining other sessions' mail.
+    """
+    db = tmp_path / "mb.db"
+    sent = mailbox.send("codex", "claude:someone-else", "not yours", db_path=db)
+    mine = ("claude:mine", "claude:also-mine")
+    assert mailbox.ack(sent["message_id"], owned=mine, db_path=db) == {"ok": False}
+
+    msgs, remaining = mailbox.inbox(
+        ["claude:someone-else"], owned=mine, db_path=db
+    )
+    assert [m["body"] for m in msgs] == ["not yours"], "shown"
+    assert msgs[0]["acked_at"] is None, "but never consumed"
+    assert remaining == 0, "and not counted as work this caller can drain"
+
+
+def test_a_process_with_no_lane_still_owns_no_lane(tmp_path):
+    """Both halves of the rule, because they are enforced separately.
+
+    Checking only ``ack`` exercises the SQL clause and leaves ``inbox``'s
+    Python predicate and remaining-count untested — so a version that let a
+    laneless caller consume through a reading poll would still pass.
+    """
+    db = tmp_path / "mb.db"
+    sent = mailbox.send("codex", "claude:somebody", "lane mail", db_path=db)
+    assert mailbox.ack(sent["message_id"], owned=(), db_path=db) == {"ok": False}
+    assert mailbox.ack(sent["message_id"], owned=None, db_path=db) == {"ok": False}
+
+    msgs, remaining = mailbox.inbox(["claude:somebody"], owned=(), db_path=db)
+    assert [m["body"] for m in msgs] == ["lane mail"], "shown"
+    assert msgs[0]["acked_at"] is None, "but never consumed"
+    assert remaining == 0
+
+
+@pytest.mark.parametrize(
+    "lane",
+    [
+        "a:b",  # HARDLINE_AGENT_LABEL is operator-set and NOT validated, so a
+        # recipient can carry more than one ':'
+        "o'brien",  # a quote, to prove the clause is parameterized not interpolated
+        "100%",  # not a LIKE pattern
+        "_underscore",
+    ],
+)
+def test_the_sql_clause_and_the_python_predicate_agree(tmp_path, lane):
+    """The two halves of one rule, checked against each other on awkward input.
+
+    ``_lane_ackable`` splits on the FIRST ':' in Python while the SQL uses
+    ``substr(recipient, instr(recipient, ':') + 1)``. They have to agree for
+    every lane, or a consuming read and an explicit ack disagree about who owns
+    a message - which is the drift that keeping one rule in two forms is meant
+    to prevent.
+    """
+    db = tmp_path / "mb.db"
+    recipient = f"claude:{lane}"
+    assert mailbox._lane_ackable(recipient, (recipient,)) is True
+    assert mailbox._lane_ackable(recipient, ("claude:other",)) is False
+
+    mine = mailbox.send("codex", recipient, "mine", db_path=db)
+    assert mailbox.ack(mine["message_id"], owned=(recipient,), db_path=db)["ok"] is True
+
+    theirs = mailbox.send("codex", recipient, "theirs", db_path=db)
+    assert (
+        mailbox.ack(theirs["message_id"], owned=("claude:other",), db_path=db)["ok"]
+        is False
+    )
+
+
+def test_lane_ackable_accepts_a_bare_string_and_a_collection():
+    """The normalizer's shape promise: one recipient or several, never a suffix."""
+    assert mailbox._lane_ackable("claude:a", "claude:a") is True
+    assert mailbox._lane_ackable("claude:a", ("claude:b", "claude:a")) is True
+    assert mailbox._lane_ackable("claude:a", "claude:b") is False
+    assert mailbox._lane_ackable("claude:a", ("claude:b", "claude:c")) is False
+    assert mailbox._lane_ackable("claude", ()) is True
+
+
+def test_owning_a_suffix_does_not_reach_into_another_agents_mail():
+    """The cross-agent hole that human labels made reachable.
+
+    Ownership used to compare the SUFFIX, so a session called ``construction``
+    owned ``codex:construction`` and ``claude:construction`` alike. That was
+    nearly unreachable while lanes were derived from session ids, which never
+    collide — but two agents both named ``construction`` is the obvious case
+    the moment sessions can name themselves.
+    """
+    assert mailbox._lane_ackable("claude:construction", ("codex:construction",)) is False
+    assert mailbox._lane_ackable("codex:construction", ("codex:construction",)) is True
+
+
+def test_ownership_survives_a_one_shot_iterator(tmp_path):
+    """``inbox`` consults ownership once per message and again for ``remaining``.
+
+    A generator would be exhausted after the first consultation: later messages
+    would silently stop being ackable while ``remaining`` read zero, which is
+    the "poll while non-zero" loop terminating with mail still undelivered.
+    """
+    db = tmp_path / "mb.db"
+    for i in range(3):
+        mailbox.send("codex", "claude:mine", f"m{i}", db_path=db)
+
+    msgs, remaining = mailbox.inbox(
+        ["claude:mine"], owned=iter(["claude:mine"]), db_path=db
+    )
+    assert [m["body"] for m in msgs] == ["m0", "m1", "m2"]
+    assert all(m["acked_at"] for m in msgs), "every message must be consumed, not just the first"
+    assert remaining == 0
+
+
+# ── self_agent inference ─────────────────────────────────────────────────────
+
+
+def test_an_anonymous_process_owns_no_qualified_recipients(monkeypatch):
+    """Fail closed when the process cannot say which agent it serves.
+
+    It still has a lane suffix — HARDLINE_AGENT_LABEL is set — but nothing says
+    whether that names a codex session or a claude one. Qualifying it with a
+    guess would hand this process whichever agent's mailbox the guess picked.
+    """
+    monkeypatch.setenv("HARDLINE_AGENT_LABEL", "construction")
+    assert adapters.self_agent() is None
+    assert adapters.held_lanes() == ("construction",)
+    assert adapters.owned_recipients() == ()
+
+    # Naming the agent explicitly is what makes it ownable — that is what
+    # register_session and HARDLINE_AGENT are for.
+    assert adapters.owned_recipients("codex") == ("codex:construction",)
+
+
+# ── identity from the process, for agents that supply none ───────────────────
+
+
+@pytest.mark.anyio
+async def test_a_codex_session_is_addressable_without_being_asked(
+    monkeypatch, tmp_path, spawned_by_codex
+):
+    """The whole point: no manual call, no config edit, no restart ritual.
+
+    Codex hands its MCP child 22 environment variables and not one of them
+    identifies the session. So both halves of the identity come from the
+    process that spawned it — the lane from its instance, the agent from its
+    executable name — and registration happens at startup like Claude's.
+    """
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+
+    assert adapters.self_agent() == "codex"
+    assert adapters.lane_for("codex") == f"codex:{spawned_by_codex}"
+
+    server._announce_self()  # what main() does before serving
+    assert [s["lane"] for s in sessions.live(db_path=db)] == [
+        f"codex:{spawned_by_codex}"
+    ]
+
+    # And it can actually take the mail, which needs the agent as well as the
+    # lane: ownership is over whole recipients.
+    mailbox.send("claude", f"codex:{spawned_by_codex}", "ping", db_path=db)
+    got = await server.inbox(agent="codex")
+    assert [m["body"] for m in got["messages"]] == ["ping"]
+    assert got["messages"][0]["acked_at"], "consumable, not merely visible"
+
+
+def test_a_nested_agent_spawn_gets_no_lane(monkeypatch):
+    """A hardline running under another hardline is a one-shot, not a session.
+
+    ask_codex and ask_claude spawn agents that load their own hardline. Giving
+    those lanes would fill the live list with subprocesses nobody can address —
+    the same misreport the registry exists to end.
+    """
+    monkeypatch.setattr(adapters, "_parent_lane_cache", [])
+    monkeypatch.setattr(procid, "session_token", lambda pid: "a1b2c3d4")
+    monkeypatch.setattr(
+        procid, "ancestry", lambda pid, depth=4: ["codex.exe", "hardline-mcp.exe"]
+    )
+    assert adapters.derived_lane_suffix() == ""
+
+    # The same session, launched from a shell instead, is a real one.
+    monkeypatch.setattr(adapters, "_parent_lane_cache", [])
+    monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4: ["codex.exe", "pwsh.exe"])
+    assert adapters.derived_lane_suffix().endswith(".a1b2c3d4")
+
+
+def test_naming_an_ancestor_stays_off_the_hot_path(monkeypatch):
+    """Identifying a parent enumerates every process on the machine.
+
+    ``derived_lane_suffix`` is consulted on nearly every mailbox operation, so
+    doing that work per call put a full process scan on the hot path — which is
+    exactly what it did, until measured.
+    """
+    scans = []
+    monkeypatch.setattr(adapters, "_parent_lane_cache", [])
+    monkeypatch.setattr(adapters, "_parent_agent_cache", [])
+    monkeypatch.setattr(procid, "session_token", lambda pid: "a1b2c3d4")
+    monkeypatch.setattr(
+        procid,
+        "ancestry",
+        lambda pid, depth=4: (scans.append(pid), ["codex.exe", "pwsh.exe"])[1],
+    )
+
+    for _ in range(5):
+        adapters.parent_lane_suffix()
+        adapters.parent_agent()
+    assert len(scans) == 2, f"one scan per question, not per call (got {len(scans)})"
+
+
+def test_the_parent_walk_agrees_with_the_os_on_this_platform():
+    """The real reads, unpatched, on whatever platform is running them.
+
+    Every other test here patches ``ancestry``, which proves the logic above it
+    and nothing about the two OS-specific implementations underneath: a
+    toolhelp snapshot on Windows, ``/proc`` on Linux. Neither had been
+    exercised for real, and the Linux one runs nowhere in this project — only
+    in CI.
+
+    ``os.getppid()`` is an independent answer to the same question, so making
+    the two agree tests the implementation rather than restating it.
+    """
+    me = os.getpid()
+    assert procid.image_name(me), "this process must at least be able to name itself"
+
+    parent = os.getppid()
+    if not parent or parent == me:
+        pytest.skip("no distinct parent to check against")
+
+    assert procid.parent_pid_of(me) == parent, (
+        "the parent walk must agree with os.getppid()"
+    )
+    assert procid.image_name(parent), "the parent must be nameable"
+    assert procid.ancestry(parent, depth=2)[0] == procid.image_name(parent)
+
+
+def test_the_parent_names_the_agent(monkeypatch):
+    for launcher, expected in [
+        ("codex.exe", "codex"),
+        ("claude.exe", "claude"),
+        ("hermes.exe", "hermes"),
+    ]:
+        monkeypatch.setattr(adapters, "_parent_agent_cache", [])
+        monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4, _l=launcher: [_l])
+        assert adapters.parent_agent() == expected
+
+    monkeypatch.setattr(adapters, "_parent_agent_cache", [])
+    monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4: ["pwsh.exe", "explorer.exe"])
+    assert adapters.parent_agent() is None, "an unrecognised launcher is not a guess"
+
+
+def test_session_token_identifies_an_instance_not_a_slot():
+    """Eight hex characters, stable, and never inherited by a reused pid."""
+    mine = procid.session_token(os.getpid())
+    if mine is None:
+        pytest.skip("this platform does not expose a process creation token")
+    assert len(mine) == 8
+    assert procid.session_token(os.getpid()) == mine, "stable across calls"
+    assert procid.session_token(_DEAD_PID) is None
+
+    other = os.getppid()
+    if other not in (0, os.getpid()) and procid.pid_alive(other):
+        assert procid.session_token(other) != mine
+
+
+def test_session_token_changes_when_a_pid_is_reused(monkeypatch):
+    """The creation time must be IN the hash, not merely consulted.
+
+    Everything above passes against a token hashed from the pid alone — same
+    length, stable, different between different pids. What it would not
+    survive is the case the token exists for: the OS handing that pid to a new
+    process, whose session would otherwise inherit the old one's lane and mail.
+    """
+    monkeypatch.setattr(procid, "process_key", lambda pid: "first-instance")
+    first = procid.session_token(4242)
+    monkeypatch.setattr(procid, "process_key", lambda pid: "second-instance")
+    second = procid.session_token(4242)
+    assert first and second and first != second, (
+        "same pid, different process, so it must be a different session"
+    )
+
+
+def test_an_explicit_pin_and_a_supplied_id_both_beat_the_parent(monkeypatch):
+    """Order matters: a host that names its session knows better than we do."""
+    monkeypatch.setattr(adapters, "_parent_lane_cache", ["from-parent.a1b2c3d4"])
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "1a2b3c4d-dead-beef-0000-000000000000")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "C:/Users/x/repos/fonts")
+    assert adapters.derived_lane_suffix() == "fonts.1a2b3c4d"
+
+    monkeypatch.setenv("HARDLINE_AGENT_LABEL", "pinned")
+    assert adapters.derived_lane_suffix() == "pinned"
+
+
+def test_self_agent_is_none_when_nothing_identifies_the_session(monkeypatch):
+    """Codex and Hermes hand over nothing, and a guess would be a lie."""
+    assert adapters.self_agent() is None
+
+
+def test_self_agent_infers_a_claude_session(monkeypatch, in_session):
+    assert adapters.self_agent() == "claude"
+
+
+def test_hardline_agent_declares_identity_explicitly(monkeypatch):
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+    assert adapters.self_agent() == "codex"
+
+
+def test_an_unknown_hardline_agent_is_ignored_rather_than_trusted(monkeypatch):
+    monkeypatch.setenv("HARDLINE_AGENT", "clod")
+    assert adapters.self_agent() is None
+
+
+# ── the store underneath ─────────────────────────────────────────────────────
+
+
+def test_the_store_is_rebuilt_after_it_is_deleted(tmp_path):
+    """Initialization is cached by PATH, and a deleted store must not be fatal.
+
+    Without re-checking, every process that had already initialized would go on
+    believing a file that is gone was ready, and every call would fail with
+    "no such table" for the rest of that process's life.
+    """
+    db = tmp_path / "mb.db"
+    mailbox.send("claude", "hermes", "before", db_path=db)
+    db.unlink()
+    for stray in tmp_path.glob("mb.db-*"):  # WAL and shm go with it
+        stray.unlink()
+
+    sent = mailbox.send("claude", "hermes", "after", db_path=db)
+    assert isinstance(sent["message_id"], int)
+    msgs, _ = mailbox.inbox("hermes", db_path=db)
+    assert [m["body"] for m in msgs] == ["after"]
+
+
+def test_an_empty_poll_does_not_reserve_the_writer(tmp_path, monkeypatch):
+    """A consuming read takes BEGIN IMMEDIATE, and idle polls are most polls.
+
+    Taking the single writer lock only to discover there is nothing to do
+    serializes every idle session against every real writer. Asserted by
+    watching for the statement rather than by timing, which would be a race
+    dressed up as a test.
+    """
+    db = tmp_path / "mb.db"
+    mailbox.send("claude", "hermes", "for hermes", db_path=db)
+
+    started: list[str] = []
+    real_connect = mailbox._connect
+
+    def watching_connect(path):
+        conn = real_connect(path)
+        # SQLite's own statement trace, rather than wrapping the connection:
+        # execute() is read-only on a Connection, and a proxy object would be
+        # testing the proxy as much as the code.
+        conn.set_trace_callback(
+            lambda sql: started.append(sql.strip())
+            if sql.strip().upper().startswith("BEGIN")
+            else None
+        )
+        return conn
+
+    monkeypatch.setattr(mailbox, "_connect", watching_connect)
+
+    mailbox.inbox("codex", db_path=db)  # nothing addressed to codex
+    assert started == [], "an empty consuming read must not reserve the writer"
+
+    mailbox.inbox("hermes", db_path=db)  # something to consume
+    assert started == ["BEGIN IMMEDIATE"], "a real one still must"
+
+
+# ── the server tools ─────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.fixture
+def codex_session(monkeypatch, tmp_path):
+    """A Codex session: knows which agent it is, holds no lane of its own."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+    return db
+
+
+@pytest.mark.anyio
+async def test_register_session_makes_this_session_addressable(codex_session):
+    """The end-to-end answer to 'send a message to the codex construction session'.
+
+    Before the claim there is no such destination; after it, mail aimed at the
+    lane reaches this session and only this session.
+    """
+    from hardline_mcp import server
+
+    before = await server.send(
+        from_agent="claude", to_agent="codex:construction", message="ping"
+    )
+    assert before["ok"] is True
+    assert "no REGISTERED holder" in before["warning"]
+
+    claimed = await server.register_session(label="construction")
+    assert claimed["ok"] is True
+    assert claimed["lane"] == "codex:construction"
+
+    after = await server.send(
+        from_agent="claude", to_agent="codex:construction", message="ping again"
+    )
+    assert "warning" not in after, "a live holder means no warning"
+
+    got = await server.inbox(agent="codex")
+    assert [m["body"] for m in got["messages"]] == ["ping", "ping again"]
+
+
+@pytest.mark.anyio
+async def test_inbox_still_collects_mail_addressed_before_a_rename(
+    monkeypatch, tmp_path, in_session
+):
+    """Through the SERVER tool, not just the mailbox function.
+
+    inbox() builds the list of recipients to read from, and reading only the
+    CURRENT lane looks correct in every test where the session never had
+    another one. A Claude session does: it starts with a lane derived from its
+    session id, and an async result dispatched before a rename is addressed to
+    that one. Found by mutation - the codex end-to-end test passed against an
+    implementation that dropped every previous lane.
+    """
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+
+    mailbox.send("codex", f"claude:{in_session}", "dispatched earlier", db_path=db)
+    claimed = await server.register_session(label="construction")
+    assert claimed["ok"] is True
+    mailbox.send("codex", "claude:construction", "dispatched after", db_path=db)
+
+    got = await server.inbox(agent="claude")
+    assert [m["body"] for m in got["messages"]] == [
+        "dispatched earlier",
+        "dispatched after",
+    ]
+    assert all(m["acked_at"] for m in got["messages"]), "both must be consumed"
+
+
+@pytest.mark.anyio
+async def test_an_async_result_dispatched_before_a_rename_still_arrives(
+    monkeypatch, tmp_path, in_session
+):
+    """The motivating scenario, end to end, with a real deferred worker.
+
+    The previous test writes the old recipient by hand, which proves the
+    mailbox rule but not the thing that makes it necessary. Here the worker is
+    captured at dispatch and run only AFTER the rename, so the recipient really
+    is fixed at dispatch time — an implementation that recomputed the lane at
+    delivery would pass the hand-written test and fail this one.
+    """
+    from concurrent.futures import TimeoutError as FuturesTimeout
+
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+
+    deferred = []
+
+    class _NotYet:
+        """A future whose work has not run: the dispatch reports it running."""
+
+        def result(self, timeout=None):
+            raise FuturesTimeout()
+
+    def defer(fn, *args, **kwargs):
+        deferred.append(lambda: fn(*args, **kwargs))
+        return _NotYet()
+
+    monkeypatch.setattr(server._async_executor, "submit", defer)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+
+    dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
+    assert dispatched["lane"] == f"claude:{in_session}"
+
+    claimed = await server.register_session(label="construction")
+    assert claimed["ok"] is True
+
+    for run in deferred:  # the worker finally delivers, under the OLD name
+        run()
+
+    got = await server.inbox(agent="claude")
+    assert len(got["messages"]) == 1, (
+        "a result dispatched before the rename must still reach the session"
+    )
+    assert got["messages"][0]["acked_at"], "and be consumable, not merely visible"
+
+
+@pytest.mark.anyio
+async def test_an_explicitly_declared_agent_is_remembered_for_ownership(
+    monkeypatch, tmp_path
+):
+    """Passing ``agent=`` must make the session able to CONSUME, not just register.
+
+    This is the documented path for Codex and Hermes: they cannot be inferred,
+    so they name themselves at the call. If only the label is remembered, every
+    later ``inbox``/``ack`` re-derives identity from the environment, finds
+    nothing, and owns no lane-qualified mail - so the session registers, is
+    advertised as live, receives mail, and can never take it.
+
+    The end-to-end test misses this because its fixture sets HARDLINE_AGENT,
+    which is exactly the case where passing ``agent=`` is unnecessary.
+    """
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    assert adapters.self_agent() is None, "nothing in the env identifies this session"
+
+    ok = await server.register_session(label="construction", agent="codex")
+    assert ok["ok"] is True
+
+    mailbox.send("claude", "codex:construction", "ping", db_path=db)
+    got = await server.inbox(agent="codex")
+    assert [m["body"] for m in got["messages"]] == ["ping"]
+    assert got["messages"][0]["acked_at"], "consumable, not merely visible"
+
+    listing = await server.list_agents()
+    assert listing["you"]["addressable"] is True
+
+
+@pytest.mark.anyio
+async def test_a_process_that_knows_what_it_is_cannot_redeclare_itself(
+    monkeypatch, tmp_path, in_session
+):
+    """A declaration may fill in an unknown identity, never contradict a known one.
+
+    Remembering the declaration is what makes ``agent=`` work for Codex and
+    Hermes — and it is also what makes getting it wrong permanent. A Claude
+    session that passes ``agent="codex"`` would otherwise become Codex for
+    every subsequent ownership check, able to claim an unheld Codex lane and
+    drain the backlog waiting there for a real Codex session.
+    """
+    from hardline_mcp import server
+
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    assert adapters.self_agent() == "claude"
+
+    result = await server.register_session(label="construction", agent="codex")
+    assert result["ok"] is False
+    assert "codex" in result["error"] and "claude" in result["error"]
+
+    assert adapters.self_agent() == "claude", "a refused declaration must not stick"
+    assert adapters.owned_recipients() == (f"claude:{in_session}",)
+
+    # Declaring what it already is remains fine — that is not a contradiction.
+    assert (await server.register_session(label="ok", agent="claude"))["ok"] is True
+
+
+@pytest.mark.anyio
+async def test_a_derived_lane_is_not_labelled_by_a_later_claim(
+    monkeypatch, tmp_path, in_session
+):
+    """``label`` says a lane was CHOSEN, and a derived one never was.
+
+    ``claim`` sets the label only for the lane being claimed, precisely so the
+    others keep their own. Re-announcing afterwards with a single label for the
+    whole held set undoes that: the lane this session got from its environment,
+    which nobody ever claimed under a name, ends up recorded as though someone
+    had.
+    """
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+
+    assert (await server.register_session(label="construction"))["ok"] is True
+
+    with mailbox._connect(db) as conn:
+        labels = {
+            r["lane"]: r["label"]
+            for r in conn.execute("SELECT lane, label FROM agent_sessions")
+        }
+    assert labels[f"claude:{in_session}"] is None, "derived, so it has no chosen name"
+    assert labels["claude:construction"] == "construction"
+
+
+@pytest.mark.anyio
+async def test_a_second_rename_leaves_the_first_lanes_label_alone(codex_session):
+    """Each lane keeps the name IT was claimed under, across repeated renames."""
+    from hardline_mcp import server
+
+    assert (await server.register_session(label="first"))["ok"] is True
+    assert (await server.register_session(label="second"))["ok"] is True
+
+    held = {
+        h["lane"]: h["label"]
+        for lane in ("codex:first", "codex:second")
+        for h in sessions.holders(lane, db_path=codex_session)
+    }
+    assert held == {"codex:first": "first", "codex:second": "second"}
+
+
+@pytest.mark.anyio
+async def test_register_session_does_not_hold_a_shared_worker_slot(
+    monkeypatch, codex_session
+):
+    """Serializing claims must not serialize everything ELSE too.
+
+    A lock taken INSIDE the worker serializes in the wrong place: the call is
+    offloaded first, so every waiter pins a slot in the shared pool while the
+    winner sits in BEGIN IMMEDIATE — for up to the SQLite busy timeout — and
+    unrelated tools that touch none of this are starved of workers. Acquiring a
+    capacity limiter happens before the offload, so waiters hold nothing.
+
+    Pinned with a pool of exactly one worker, which makes a single slow claim
+    enough to demonstrate it.
+    """
+    import anyio
+
+    from hardline_mcp import server
+
+    default = anyio.to_thread.current_default_thread_limiter()
+    original = default.total_tokens
+    default.total_tokens = 1
+
+    inside = threading.Event()
+    real_claim = sessions.claim
+
+    def slow_claim(**kwargs):
+        inside.set()
+        time.sleep(1.0)
+        return real_claim(**kwargs)
+
+    monkeypatch.setattr(sessions, "claim", slow_claim)
+    try:
+        async with anyio.create_task_group() as tg:
+
+            async def register():
+                await server.register_session(label="construction")
+
+            tg.start_soon(register)
+            while not inside.is_set():
+                await anyio.sleep(0.01)
+
+            with anyio.fail_after(0.8):
+                await server.list_agents()
+    finally:
+        default.total_tokens = original
+
+
+@pytest.mark.anyio
+async def test_a_rolled_back_claim_leaves_the_previous_label_intact(
+    monkeypatch, codex_session
+):
+    """Rolling back the new lane must not leave the surviving one renamed.
+
+    ``claim`` rewrites every retained lane, and passed ``label=None`` for the
+    ones it was keeping — so a claim that is then rolled back deletes the new
+    row and leaves the old one stripped of the name it was claimed under.
+    ``list_agents`` would go on advertising the session with ``label: null``
+    while it still holds and answers to that name.
+    """
+    from hardline_mcp import server
+
+    assert (await server.register_session(label="first"))["ok"] is True
+
+    monkeypatch.setattr(adapters, "claim_refusal", lambda label: None)
+    monkeypatch.setattr(adapters, "claim_lane", lambda label: "lost the last slot")
+    assert (await server.register_session(label="second"))["ok"] is False
+
+    entry = sessions.live(db_path=codex_session)[0]
+    assert entry["lane"] == "codex:first"
+    assert entry["label"] == "first", "the surviving claim keeps the name it was made under"
+
+
+@pytest.mark.anyio
+async def test_concurrent_claims_keep_the_registry_and_the_process_agreed(
+    monkeypatch, codex_session
+):
+    """The registry's current name and the one this process answers to are one fact.
+
+    There is an await boundary between the durable claim and the local
+    adoption, so two concurrent calls can commit in one order and adopt in the
+    other: the registry would advertise one name while async results routed to
+    the other.
+
+    Asserted as non-interleaving rather than by racing for the symptom: the
+    divergence only appears on a scheduling order the test cannot force, so a
+    test that looked for it would pass most runs and prove nothing.
+    """
+    import anyio
+
+    from hardline_mcp import server
+
+    real_claim = sessions.claim
+    order: list[str] = []
+    lock = threading.Lock()
+
+    def tracking_claim(**kwargs):
+        with lock:
+            order.append(f"enter:{kwargs['label']}")
+        time.sleep(0.2)
+        out = real_claim(**kwargs)
+        with lock:
+            order.append(f"exit:{kwargs['label']}")
+        return out
+
+    monkeypatch.setattr(sessions, "claim", tracking_claim)
+
+    async def claim(name):
+        await server.register_session(label=name)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(claim, "alpha")
+        tg.start_soon(claim, "beta")
+
+    first = order[0].split(":", 1)[1]
+    assert order[1] == f"exit:{first}", (
+        f"claims interleaved ({order}); the durable claim and the local adoption "
+        "must be one critical section, or the registry and the process can end "
+        "up naming different lanes as current"
+    )
+    entry = sessions.live(db_path=codex_session)[0]
+    assert entry["lane"] == f"codex:{adapters.lane_suffix()}"
+
+
+@pytest.mark.anyio
+async def test_list_agents_marks_every_held_lane_live(monkeypatch, tmp_path):
+    """A renamed session's OLD lane is still live, and must be reported so.
+
+    The registry records every held lane precisely so an older name still shows
+    a holder. Collapsing each session to its current name in the reporting
+    layer throws that away again: the previous lane is marked dead and counted
+    as stale mail, while ``holders()`` says the live process still consumes it.
+    """
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+
+    await server.register_session(label="first")
+    mailbox.send("claude", "codex:first", "for the old name", db_path=db)
+    await server.register_session(label="second")
+
+    listing = await server.list_agents()
+    marked = {
+        e["recipient"]: e.get("registered_holder")
+        for e in listing["observed_recipients"]
+        if ":" in e["recipient"]
+    }
+    assert marked.get("codex:first") is True, (
+        "the old name still has a live holder, so it is not a dead destination"
+    )
+    assert "unheld_lanes_note" not in listing
+
+
+@pytest.mark.anyio
+async def test_the_local_cap_is_checked_before_anything_durable(
+    monkeypatch, codex_session
+):
+    """A claim that will be refused locally must not be attempted durably.
+
+    Tested by watching for the durable call rather than for its leftovers,
+    because a rollback would clean those up — so asserting only on the final
+    rows cannot tell "never written" from "written then removed", and neither
+    mechanism would be individually proven.
+    """
+    from hardline_mcp import server
+
+    monkeypatch.setattr(adapters, "MAX_CLAIMED_LANES", 1)
+    assert (await server.register_session(label="first"))["ok"] is True
+
+    attempts = []
+    real_claim = sessions.claim
+    monkeypatch.setattr(
+        sessions,
+        "claim",
+        lambda **kw: (attempts.append(kw), real_claim(**kw))[1],
+    )
+
+    refused = await server.register_session(label="second")
+    assert refused["ok"] is False
+    assert attempts == [], "the cap is knowable locally; do not write first and ask after"
+    assert adapters.held_lanes() == ("first",)
+
+
+@pytest.mark.anyio
+async def test_a_late_local_refusal_rolls_back_the_registry_row(
+    monkeypatch, codex_session
+):
+    """The narrow race the pre-check cannot close.
+
+    Two concurrent register_session calls can both pass the pre-check and then
+    one loses the last slot. Left alone, that leaves a registry row for a name
+    this process never adopted and does not read: senders are told it has a
+    holder, and no other session can claim it.
+    """
+    from hardline_mcp import server
+
+    monkeypatch.setattr(adapters, "claim_refusal", lambda label: None)
+    monkeypatch.setattr(adapters, "claim_lane", lambda label: "lost the last slot")
+
+    refused = await server.register_session(label="second")
+    assert refused["ok"] is False
+    assert sessions.holders("codex:second", db_path=codex_session) == [], (
+        "a name this process never adopted must not appear held"
+    )
+
+
+def test_two_claims_in_the_same_second_keep_their_order(tmp_path):
+    """Which name is CURRENT cannot depend on alphabetical order.
+
+    Stored timestamps have second precision, so two claims inside one second
+    are indistinguishable by time; falling back to the lane text would make a
+    rapid rename advertise whichever name sorts last. Here the second claim
+    sorts EARLIER alphabetically, so a text tie-break reports the old name.
+    """
+    db = tmp_path / "mb.db"
+    now_fn = _clock(_T0)  # frozen: both claims share a timestamp
+    assert sessions.claim(agent="codex", label="zebra", db_path=db, now_fn=now_fn)["ok"]
+    assert sessions.claim(
+        agent="codex", label="alpha", lanes=["codex:zebra"], db_path=db, now_fn=now_fn
+    )["ok"]
+
+    entry = sessions.live(db_path=db)[0]
+    assert entry["lanes"] == ["codex:zebra", "codex:alpha"], "claim order, not sort order"
+    assert entry["lane"] == "codex:alpha", "the most recent claim is the current name"
+
+
+@pytest.mark.anyio
+async def test_release_session_gives_a_name_back(codex_session):
+    """The correction path a mistaken claim previously had no way to undo.
+
+    Without it a name taken by typo stays owned and consumed until the process
+    exits, and nobody else can have it in the meantime.
+    """
+    from hardline_mcp import server
+
+    assert (await server.register_session(label="constrcution"))["ok"] is True
+    assert adapters.lane_suffix() == "constrcution"
+
+    released = await server.release_session(label="constrcution")
+    assert released["ok"] is True
+    assert released["released"] == "codex:constrcution"
+    assert adapters.held_lanes() == ()
+    assert sessions.holders("codex:constrcution", db_path=codex_session) == []
+
+    # And the name is genuinely free again.
+    assert (await server.register_session(label="construction"))["ok"] is True
+
+
+@pytest.mark.anyio
+async def test_release_session_cannot_evict_a_name_this_session_lacks(codex_session):
+    from hardline_mcp import server
+
+    await server.register_session(label="mine")
+    refused = await server.release_session(label="somebody-elses")
+    assert refused["ok"] is False
+    assert "does not hold" in refused["error"]
+    assert adapters.held_lanes() == ("mine",)
+
+
+@pytest.mark.anyio
+async def test_a_derived_lane_cannot_be_released(monkeypatch, tmp_path, in_session):
+    """It is not a claim; it is what this process IS."""
+    from hardline_mcp import server
+
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    refused = await server.release_session(label=in_session)
+    assert refused["ok"] is False
+    assert "derived lane" in refused["error"]
+    assert adapters.held_lanes() == (in_session,)
+
+
+@pytest.mark.anyio
+async def test_list_agents_reports_a_lane_two_sessions_both_hold(codex_session):
+    """Two live holders drain each other's mail nondeterministically.
+
+    ``claim`` refuses to create that, but a hand-set HARDLINE_AGENT_LABEL on
+    two sessions still can — so it has to be reported rather than collapsed
+    into a set where the second holder simply disappears.
+    """
+    from hardline_mcp import server
+
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available")
+
+    await server.register_session(label="construction")
+    sessions.register(
+        agent="codex",
+        lanes=["codex:construction"],
+        pid=other,
+        db_path=codex_session,
+    )
+
+    listing = await server.list_agents()
+    assert listing["contested_lanes"] == ["codex:construction"]
+    assert "drain each other" in listing["contested_lanes_note"]
+
+
+@pytest.mark.anyio
+async def test_a_failed_registration_is_reported_not_just_printed(
+    monkeypatch, codex_session
+):
+    """An unregistered session keeps consuming while everyone reads it as unheld.
+
+    Sending that only to stderr on a stdio server sends it nowhere anybody
+    looks, so the session that knows about it has to say so.
+    """
+    from hardline_mcp import server
+
+    await server.register_session(label="construction")
+
+    def explode(**kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(sessions, "register", explode)
+    listing = await server.list_agents()
+    assert "could not register itself" in listing["registration_warning"]
+    assert "database is locked" in listing["registration_warning"]
+
+
+@pytest.mark.anyio
+async def test_register_session_rejects_a_bad_label(codex_session):
+    from hardline_mcp import server
+
+    result = await server.register_session(label="has:colon")
+    assert result["ok"] is False
+    assert "invalid label" in result["error"]
+    assert adapters.lane_suffix() == "", "a rejected label must not be adopted"
+
+
+@pytest.mark.anyio
+async def test_register_session_needs_an_agent_it_cannot_infer(monkeypatch, tmp_path):
+    from hardline_mcp import server
+
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    result = await server.register_session(label="construction")
+    assert result["ok"] is False
+    assert "cannot tell which agent" in result["error"]
+
+    ok = await server.register_session(label="construction", agent="codex")
+    assert ok["ok"] is True
+    # ...and it actually took effect. Asserting only `ok` passes against an
+    # implementation that returns success without registering or adopting.
+    assert ok["lane"] == "codex:construction"
+    assert adapters.lane_suffix() == "construction"
+    assert sessions.holders("codex:construction", db_path=tmp_path / "mb.db")
+
+
+@pytest.mark.anyio
+async def test_a_refused_claim_does_not_rename_this_process(codex_session):
+    """Ordering, not just outcome.
+
+    Adopting the lane before the registry accepted it would rename this process
+    to a name it LOST the race for, and every result it dispatched afterwards
+    would be addressed to a lane somebody else holds.
+    """
+    from hardline_mcp import server
+
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available to hold the lane")
+    sessions.register(
+        agent="codex", lane="codex:construction", pid=other, db_path=codex_session
+    )
+
+    result = await server.register_session(label="construction")
+    assert result["ok"] is False
+    assert adapters.lane_suffix() == "", "must not have adopted the contested name"
+    assert adapters.held_lanes() == ()
+
+
+@pytest.mark.anyio
+async def test_send_does_not_warn_about_a_bare_recipient(codex_session):
+    """Bare names are shared by design; warning about them would cry wolf on
+    every ordinary cross-agent message."""
+    from hardline_mcp import server
+
+    result = await server.send(from_agent="claude", to_agent="codex", message="hi")
+    assert result["ok"] is True
+    assert "warning" not in result
+
+
+@pytest.mark.anyio
+async def test_send_still_persists_the_message_it_warns_about(codex_session):
+    """A warning, not a rejection.
+
+    A Claude lane is keyed on the session id and survives a /mcp reconnect, so
+    a session briefly between hardline processes will come back to the same
+    lane and collect its mail. Refusing would break that; the caller is simply
+    told what it did.
+    """
+    from hardline_mcp import server
+
+    result = await server.send(
+        from_agent="claude", to_agent="claude:gone.deadbeef", message="held"
+    )
+    assert result["ok"] is True
+    assert isinstance(result["message_id"], int)
+    # Assert the warning too. Without this the test passes against an
+    # implementation that warns for no lane at all, or only for some agents.
+    assert "no REGISTERED holder" in result["warning"]
+    assert "claude:gone.deadbeef" in result["warning"]
+    kept, _ = mailbox.inbox(
+        "claude:gone.deadbeef", auto_ack=False, db_path=codex_session
+    )
+    assert [m["body"] for m in kept] == ["held"]
+
+
+@pytest.mark.anyio
+async def test_list_agents_separates_live_sessions_from_mailbox_history(
+    codex_session,
+):
+    """The misreport this feature exists to end.
+
+    A dead session's lane is indistinguishable from a live one in the mailbox,
+    so `observed_recipients` presented 11 dead lanes as destinations. Liveness
+    has to come from the registry, and the two must not be conflated.
+    """
+    from hardline_mcp import server
+
+    mailbox.send("claude", "codex:long-gone", "stranded", db_path=codex_session)
+    await server.register_session(label="construction")
+    mailbox.send("claude", "codex:construction", "reachable", db_path=codex_session)
+
+    listing = await server.list_agents()
+
+    assert [s["lane"] for s in listing["live_sessions"]] == ["codex:construction"]
+    marked = {
+        e["recipient"]: e.get("registered_holder")
+        for e in listing["observed_recipients"]
+        if ":" in e["recipient"]
+    }
+    assert marked == {"codex:long-gone": False, "codex:construction": True}
+    assert "1 lane(s)" in listing["unheld_lanes_note"]
+
+
+@pytest.mark.anyio
+async def test_registration_recovers_if_the_row_goes_missing(codex_session):
+    """Registration must be self-healing, not once-per-process.
+
+    A row can vanish while its session is very much alive: a liveness probe
+    that fails for an unrelated reason (an unopenable process), a store rebuilt
+    underneath the running fleet, an operator clearing the table. If the
+    process caches "I already registered" and never writes again, that session
+    is invisible for the rest of its life — unaddressable, and reported to
+    senders as a lane nobody holds.
+    """
+    from hardline_mcp import server
+
+    await server.register_session(label="construction")
+    sessions.unregister(db_path=codex_session)
+
+    listing = await server.list_agents()
+    assert [s["lane"] for s in listing["live_sessions"]] == ["codex:construction"]
+
+
+def test_register_is_idempotent_under_concurrency(tmp_path):
+    """Two threads registering the same pid must not raise.
+
+    UPDATE-then-INSERT *looks* like an unguarded check-then-act - both threads
+    find no row, both INSERT, and the loser hits the pid PRIMARY KEY. It is
+    safe, and the reason is worth pinning: the UPDATE takes SQLite's single
+    write lock even when it matches nothing, so the second thread blocks until
+    the first commits and then sees the row its UPDATE was looking for.
+
+    Pinned as a test because the safety comes from a lock this code never
+    mentions. Anyone splitting these two statements across connections, or
+    switching the UPDATE to a SELECT, removes it without touching a line that
+    looks load-bearing — which is exactly what ``claim`` does one level up.
+    """
+    import threading
+
+    db = tmp_path / "mb.db"
+    errors: list[BaseException] = []
+    start = threading.Barrier(8)
+
+    def register_once():
+        try:
+            start.wait(timeout=5)
+            sessions.register(agent="codex", lane="codex:c", db_path=db)
+        except BaseException as exc:  # noqa: BLE001 - the point is to catch it
+            errors.append(exc)
+
+    threads = [threading.Thread(target=register_once) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"concurrent registration raised: {errors!r}"
+    assert len(sessions.live(db_path=db)) == 1
+
+
+@pytest.mark.anyio
+async def test_list_agents_tells_an_unaddressable_session_how_to_register(
+    codex_session,
+):
+    from hardline_mcp import server
+
+    listing = await server.list_agents()
+    assert listing["you"]["addressable"] is False
+    assert "register_session" in listing["you"]["how_to_register"]
+    # And it must not be IN the registry either. `addressable` is derived from
+    # process-local state, so checking it alone passes even when every bare
+    # session registers — which is how a one-shot `ask_codex` subprocess ends
+    # up listed as a live session somebody could try to address.
+    assert listing["live_sessions"] == [], (
+        "a session with no lane is not a destination and must not be listed"
+    )
+
+    await server.register_session(label="construction")
+    listing = await server.list_agents()
+    assert listing["you"]["addressable"] is True
+    assert listing["you"]["held_lanes"] == ["construction"]
+    # Against the REGISTRY, not just process-local state. `addressable` is
+    # computed from the same in-process anchor as `held_lanes`, so checking
+    # only those two passes even when nothing was ever recorded and no other
+    # session could actually reach this one.
+    assert "codex:construction" in {s["lane"] for s in listing["live_sessions"]}

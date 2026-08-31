@@ -85,6 +85,53 @@ def _no_ambient_lane(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_leaked_claims():
+    """Forget runtime lane claims between tests.
+
+    A claim is process-local state, not an env var, so monkeypatch cannot undo
+    it: without this a test that renames its session silently changes the
+    identity of every test that runs afterwards, and the failures land
+    somewhere else entirely.
+    """
+    from hardline_mcp import adapters
+
+    adapters.reset_claimed_lanes()
+    yield
+    adapters.reset_claimed_lanes()
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_parent_lane(monkeypatch):
+    """Default every test to a process with NO session identity.
+
+    A lane now falls back to the process that spawned this one, which in
+    production is the agent session and under pytest is whatever ran the tests.
+    That makes the "no lane at all" case unreachable by accident, and it is the
+    case most of these tests are about — so the same reasoning that clears the
+    lane environment applies here: pin the baseline, and let the tests that
+    care about parent derivation opt in.
+    """
+    from hardline_mcp import adapters
+
+    monkeypatch.setattr(adapters, "_parent_lane_cache", [""])
+    monkeypatch.setattr(adapters, "_parent_agent_cache", [""])
+
+
+@pytest.fixture
+def spawned_by_codex(monkeypatch):
+    """Act as a hardline a Codex terminal session spawned, telling us nothing.
+
+    The real case: no environment identifies the session, so both the lane and
+    the agent come from the process that started it.
+    """
+    from hardline_mcp import adapters
+
+    monkeypatch.setattr(adapters, "_parent_lane_cache", ["construction.a1b2c3d4"])
+    monkeypatch.setattr(adapters, "_parent_agent_cache", ["codex"])
+    return "construction.a1b2c3d4"
+
+
 @pytest.fixture
 def in_session(monkeypatch):
     """Act as a Claude Code session: returns the lane suffix it produces."""

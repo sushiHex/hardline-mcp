@@ -43,7 +43,9 @@ splits the problem:
 | `peek(message_id)` | One message with its body in full, never truncated and never acked. |
 | `ack(message_id)` | Mark read (idempotent). |
 | `history(limit=50, agent=None, before_id=None)` | Recent messages newest-first; `agent` matches sender or recipient. Never acks and never hides acked messages, so it is the recovery path for anything `inbox` consumed. Row count, each body, and the aggregate response are all capped; page with the returned `next_before_id` while `has_more`. |
-| `list_agents()` | The addressable roster, every recipient/sender name the mailbox has actually seen (including lanes, with unread counts), and **your own identity** — the answer to "what do I pass as `from_agent`". |
+| `list_agents()` | The addressable roster, the sessions **live right now** (`live_sessions`), every recipient/sender name the mailbox has ever seen — a history, with each lane marked `live` — and **your own identity**, including whether this session can be addressed individually. |
+| `register_session(label, agent=None)` | Claim `label` as this session's name, so mail can be aimed at it: `codex:construction`. The runtime answer to a static MCP env block that can't name two sessions differently. Keeps previously-held lanes, so renaming never strands in-flight results. |
+| `release_session(label)` | Give a claimed name back, so a mistaken claim doesn't stay owned until the process exits. Only releases a name this session holds. |
 | `server_info()` | Version, schema version, module path, db path, pid, effective limits, per-agent timeout budgets, job counts, and whether write is enabled — for answering "is the fix live?" in one call. |
 | `job_status(job_id)` | State and timings of one dispatch: `queued` / `running` / `completed` / `failed` / `cancelled` / `lost`. Answers "is it still running?", which polling an inbox cannot. |
 | `job_result(job_id)` | The terminal result in full. Recorded against the job *before* delivery is attempted, so it survives the message being consumed, lost, or never sent. |
@@ -90,9 +92,104 @@ unqualified `claude` (so broadcasts still arrive), and `ack` refuses messages
 belonging to another session's lane. Keying on the session id rather than the
 process means a `/mcp` reconnect doesn't orphan in-flight results.
 
-Hermes and Codex set neither variable, so they keep their plain identities and
-cross-agent messaging is unchanged. `HARDLINE_AGENT_LABEL` overrides the
-derived lane if you want to name one explicitly.
+Codex sets neither variable. Its MCP child gets a deliberately minimal
+environment — 22 variables, none of them a session id — so for Codex the lane
+cannot come from the environment at all.
+
+It comes from the **process** instead. Each session spawns its own hardline over
+stdio, so the thing that spawned it *is* the session: its pid paired with its
+creation time is unique, stable for the session's life, and needs no
+cooperation from the agent. The agent name comes from the same place — the
+launcher is called `codex.exe`. A Codex terminal session therefore registers
+itself at startup exactly as a Claude one does, with no call and no config.
+
+Two cases deliberately get no lane. A hardline running underneath **another**
+hardline was spawned by `ask_codex`/`ask_claude` — a one-shot doing a single
+piece of work, not a session anybody can address. And a launcher whose name
+matches no known agent is left alone rather than guessed at.
+
+Order of precedence: `HARDLINE_AGENT_LABEL` if pinned, then a session id the
+host supplied, then the parent process.
+
+### Naming a session yourself
+
+`register_session` overrides the derived name when you want a human one:
+
+```python
+register_session(label="construction", agent="codex")
+# -> {"ok": true, "lane": "codex:construction"}
+```
+
+From then on `send(to_agent="codex:construction", ...)` reaches **that**
+session and only that session, and it shows up in `list_agents()` under
+`live_sessions`. `agent` may be omitted where it can be inferred — a Claude
+Code session, or `HARDLINE_AGENT` set in the registration.
+
+Renaming never strands mail. An async result's recipient is fixed when the job
+is *dispatched*, so a session keeps every lane it has held: it is **addressed**
+by its newest name but still **consumes** mail sent to the older ones. The
+registry records all of them, so an older name still shows a live holder and
+can't be claimed out from under the session still reading it.
+
+A claim is refused if a *live* session already holds that name. A dead holder's
+claim is ignored, so a label doesn't become unusable forever because the
+session that used it crashed.
+
+Two consequences worth knowing, both deliberate:
+
+- **A label is a role, not an instance.** Mail sent to `codex:construction` is
+  consumable by whoever holds that name — including a session that claims it
+  *after* the message was sent. You can address a name before anyone answers to
+  it, and a later claimant inherits the backlog. Making each claim a distinct
+  address would mean mail to a name nobody currently holds is undeliverable by
+  construction, which is the stranding this exists to remove.
+- **A claim does not survive its process.** After a `/mcp` reconnect a Codex or
+  Hermes session is anonymous again and must call `register_session` a second
+  time. That's recoverable precisely because of the point above: re-claiming
+  the same label succeeds (the old holder is dead) and the session picks up
+  whatever arrived while it was away.
+
+For a session that should always have the same name, set both variables in its
+MCP registration instead — `HARDLINE_AGENT` (which agent this is: hardline
+cannot tell for Codex or Hermes) and `HARDLINE_AGENT_LABEL` (the name). A
+runtime `register_session` overrides them; the last writer of a name wins.
+`HARDLINE_AGENT_LABEL` without `HARDLINE_AGENT` gives the session a name it
+cannot own — ownership is checked on the full `agent:label`, so that a session
+called `construction` cannot reach into another agent's mail.
+
+### Who is actually out there
+
+Liveness is derived from the OS, never stored — a session that crashes can't
+write "I died", so its row is resolved on read from the pid **and** its
+creation-time token (a pid alone is not an identity; a reused one would
+otherwise inherit the previous session's lane and its mail). Nothing to clean
+up: a vanished session simply stops being live, and is pruned by the next
+reader. On macOS that token is unavailable, so identity there degrades to the
+pid alone and a reused pid is undetectable.
+
+This matters because a dead session's lane looks exactly like a live one in the
+mailbox. `list_agents()` therefore separates them:
+
+- `live_sessions` — who is running **now**, and can receive lane-qualified mail
+- `observed_recipients` — every name the mailbox has ever seen, a *history*,
+  with each lane-qualified entry marked `live: true/false`
+
+Sending to a lane with no registered holder still persists, and the response
+says so. The wording is careful, because the registry cannot see everything: a
+session running older code never registers, one whose announcement failed is
+absent, and a probe that can't answer looks like an exit. So `send` reports
+that **no registered holder was found** — not that the message is unreadable.
+
+For the same reason, absence does not grant ownership. A claim on an unheld
+lane is refused when unfinished work is still addressed to it and that work's
+owner is alive: an unregistered consumer is invisible here, but its outstanding
+job is not. A successful claim reports the backlog it inherited, since a label
+is a role and a claimant takes on whatever was waiting at that name.
+
+`list_agents` marks each observed lane with `registered_holder`, flags any lane
+two live sessions both hold (`contested_lanes` — they will drain each other's
+mail), and reports a `registration_warning` if this session failed to register
+itself.
 
 ## Requirements
 

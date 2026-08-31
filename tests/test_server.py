@@ -122,7 +122,7 @@ async def test_history_survives_an_ack_by_another_session(
     # The OTHER session acks it, using ITS suffix, not ours. (Previously this
     # test passed in_session here - its own lane - so it never exercised
     # another session at all, despite the name.)
-    server.mailbox.ack(msg["message_id"], lane_suffix="other.9999zzzz", db_path=db)
+    server.mailbox.ack(msg["message_id"], owned="claude:other.9999zzzz", db_path=db)
 
     assert (await server.inbox(agent="claude"))["count"] == 0  # acked, hidden
     hist = await server.history(agent="claude")
@@ -248,11 +248,11 @@ def test_unlaned_process_cannot_ack_a_lane(monkeypatch, tmp_path):
     bare = server.mailbox.send("codex", "claude", "shared", db_path=db)
 
     assert (
-        server.mailbox.ack(laned["message_id"], lane_suffix="", db_path=db)["ok"]
+        server.mailbox.ack(laned["message_id"], owned="", db_path=db)["ok"]
         is False
     )
     assert (
-        server.mailbox.ack(bare["message_id"], lane_suffix="", db_path=db)["ok"] is True
+        server.mailbox.ack(bare["message_id"], owned="", db_path=db)["ok"] is True
     )
     unacked, _ = server.mailbox.inbox(
         "claude:fonts.1a2b3c4d", auto_ack=False, db_path=db
@@ -347,6 +347,8 @@ async def test_tool_roster_is_exactly_this():
         "ack",
         "history",
         "list_agents",
+        "register_session",
+        "release_session",
         "server_info",
         "job_status",
         "job_result",

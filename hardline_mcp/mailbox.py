@@ -20,7 +20,11 @@ import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional, Union
+
+# "Which lanes does this caller own": none, one, or several. Several arises
+# once a session can be renamed - see _lanes.
+LaneSpec = Union[str, Iterable[str], None]
 
 _DEFAULT_PATH = Path.home() / ".cache" / "hardline-mcp" / "mailbox.db"
 
@@ -39,7 +43,7 @@ def _resolve_db(db_path: Optional[Path]) -> Path:
 # Bumped when a table is added or a column's meaning changes. Recorded in
 # `meta` so a running server can report what store it is talking to rather
 # than leaving "is this the new schema?" to be inferred from behaviour.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -50,6 +54,12 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL,
     acked_at   TEXT
 );
+
+-- Every read of this table filters on recipient and unread-ness, and without
+-- an index each one scans the whole table. That is survivable for a poll that
+-- finds work and wasteful for the far more common one that finds none: with
+-- ~26 sessions polling a shared mailbox, the empty reads dominate.
+CREATE INDEX IF NOT EXISTS messages_recipient_idx ON messages (recipient, acked_at);
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -81,7 +91,73 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs (state, created_at);
 CREATE INDEX IF NOT EXISTS jobs_requester_idx ON jobs (requester, created_at);
+
+-- Identity was the one thing here with no durable record. Jobs and messages
+-- both survive a restart; the SESSION that owns a lane existed only as a
+-- function of one process's environment, so nothing could answer "who can I
+-- address?" or "is that lane still held?". Callers guessed, and lane-qualified
+-- mail sent to a session that had exited became permanently unconsumable -
+-- only the lane's holder may ack it, and the holder was gone.
+--
+-- One row per (process, LANE). A session owns every lane it has held, because
+-- renaming ADDS a name rather than replacing one - an async result's recipient
+-- is fixed at dispatch, so results owed to the old name must stay consumable.
+-- Recording only the current name would contradict that: the old lane would
+-- show no holder, so it would read as dead, senders would be warned nobody
+-- could receive it, and another session could CLAIM it while the original was
+-- still consuming it. Both would then drain each other's mail.
+--
+-- Liveness is NOT stored: it is derived on read from the pid and its
+-- creation-time token, exactly as jobs derives `lost`. A crashed session
+-- therefore needs no cleanup - it simply stops being alive.
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    pid         INTEGER NOT NULL,
+    -- Fully-qualified recipient ("codex:construction"), so it compares
+    -- directly against messages.recipient with no reassembly.
+    lane        TEXT NOT NULL,
+    agent       TEXT NOT NULL,
+    -- The human name claimed via register_session, NULL when the lane was
+    -- derived from the environment. Distinguishes "chose to be called this"
+    -- from "this is what the env implied".
+    label       TEXT,
+    -- Creation-time token for pid. A pid is not an identity: without this, a
+    -- reused pid would inherit the previous session's lane and its mail.
+    process_key TEXT,
+    cwd         TEXT,
+    started_at  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL,
+    -- When THIS lane was taken. Human-readable only: timestamps here have
+    -- second precision, so two claims inside one second cannot be ordered by
+    -- it. `seq` is what actually orders them.
+    claimed_at  TEXT NOT NULL,
+    -- Monotonic per process. The highest is the name the session is currently
+    -- addressed by; the rest are what it can still consume. Ordering on the
+    -- timestamp and tie-breaking on lane text would let a rapid rename
+    -- advertise whichever name sorted last.
+    seq         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (pid, lane)
+);
+
+CREATE INDEX IF NOT EXISTS agent_sessions_lane_idx ON agent_sessions (lane);
 """
+
+# Named `agent_sessions`, not `sessions`, and that is a correctness decision
+# rather than taste. This branch gave `sessions` three different shapes, and
+# under an editable install a process runs whatever the tree said when it
+# SPAWNED - so several of those shapes are live against one store at the same
+# time, indefinitely, with no coordinated restart to end the overlap.
+#
+# Reshaping in place meant inspecting the table and then dropping it, and those
+# two steps cannot be made one without a transaction spanning both: process A
+# reads the old shape, B drops it, builds the right one and registers itself,
+# then A acts on its stale reading and destroys B's table and B's committed row.
+# `meta.schema_version` cannot arbitrate, because every one of those revisions
+# calls itself 4.
+#
+# A distinct name removes the whole class of failure instead of racing better.
+# Old revisions keep writing to `sessions`, this one owns `agent_sessions`, and
+# nothing ever has to drop anything. The orphan table is small and harmless;
+# destroying another process's registrations is neither.
 
 # One-time per-db init (schema + WAL) is guarded so it happens exactly once
 # per process per path. WAL is a *persistent* DB-header property, so setting it
@@ -170,7 +246,19 @@ def _ensure_initialized(db_path: Path) -> None:
     """
     key = str(db_path)
     if key in _initialized_paths:
-        return
+        # Cached by PATH, so a store that is deleted underneath a running fleet
+        # would otherwise never be rebuilt: every process would go on believing
+        # it had initialized a file that is no longer there, and every call
+        # would fail with "no such table" for the life of the process. One stat
+        # is cheap beside opening SQLite.
+        #
+        # This catches deletion, which is the case that happens. A file
+        # SWAPPED for a different one still exists, so it is not caught here -
+        # verifying the schema on every connection would cost a query per
+        # operation to defend against something nobody does by accident.
+        if db_path.exists():
+            return
+        _initialized_paths.discard(key)
     with _init_lock:
         if key in _initialized_paths:
             return
@@ -224,23 +312,71 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _lane_ackable(recipient: str, lane_suffix: Optional[str]) -> bool:
-    """May a process holding ``lane_suffix`` consume a message sent to
-    ``recipient``?
+def _lanes(owned: LaneSpec) -> tuple[str, ...]:
+    """Normalize "which recipients does this caller own" to a tuple, once.
 
-    The Python mirror of the SQL guard in ``ack``: unqualified recipients stay
-    shared and consumable by anyone, a lane-qualified one only by the process
-    holding that lane, and a process with no lane owns no lane so it may
-    consume only bare recipients. Kept as one predicate because ``inbox``'s
+    Entries are FULLY-QUALIFIED recipients (``claude:fonts.1a2b3c4d``), not
+    bare suffixes. Matching on the suffix alone let a process holding
+    ``construction`` consume ``codex:construction`` AND ``claude:construction``
+    - one identity reaching into another agent's mail. That hole predates
+    runtime labels but was nearly unreachable while lanes were derived from
+    session ids, which never collide; the moment sessions can NAME themselves,
+    two agents both called ``construction`` is the obvious case, not the exotic
+    one.
+
+    A process owns SEVERAL recipients as soon as it can be renamed: the lane it
+    derived from its environment, plus every name it has since claimed. Mail
+    addressed to the old one is still owed to it - a rename that stranded
+    in-flight results would recreate the exact defect lanes exist to prevent
+    (an async result's recipient is captured at dispatch, so a rename between
+    dispatch and delivery lands mail on the previous lane).
+
+    Materializes to a tuple deliberately. ``inbox`` consults ownership once per
+    message and again for ``remaining``, so a one-shot iterator would be
+    exhausted after the first message: later messages would silently stop being
+    ackable while ``remaining`` read zero.
+    """
+    if not owned:
+        return ()
+    if isinstance(owned, str):
+        return (owned,)
+    return tuple(dict.fromkeys(r for r in owned if r))
+
+
+def _lane_clause(owned: tuple[str, ...]) -> tuple[str, tuple]:
+    """SQL for "this caller may consume this recipient", plus its params.
+
+    The rule lives in exactly two forms - this and ``_lane_ackable`` - because
+    it is enforced in both SQL and Python. It used to live in three, the same
+    predicate hand-written into ``ack`` and into ``inbox``'s remaining count,
+    which is one copy more than can be kept in step.
+    """
+    if not owned:
+        # A process with no lane owns no lane, so it may consume only bare
+        # recipients. Guarded explicitly rather than skipped: an unconditional
+        # branch here let any process without a lane ack every session's mail.
+        return " AND instr(recipient, ':') = 0", ()
+    marks = ", ".join("?" for _ in owned)
+    return (
+        f" AND (instr(recipient, ':') = 0 OR recipient IN ({marks}))",
+        owned,
+    )
+
+
+def _lane_ackable(recipient: str, owned: LaneSpec) -> bool:
+    """May a caller owning ``owned`` consume a message sent to ``recipient``?
+
+    The Python mirror of ``_lane_clause``: unqualified recipients stay shared
+    and consumable by anyone, a lane-qualified one only by a process holding
+    that exact recipient, and a process with no lane owns no lane so it may
+    consume only bare recipients. Kept beside its SQL twin because ``inbox``'s
     consuming read must not be able to drift from ``ack``'s rule - a read that
     consumed what an ack would have refused is the same defect with a
     different entry point.
     """
     if ":" not in recipient:
         return True
-    if not lane_suffix:
-        return False
-    return recipient.split(":", 1)[1] == lane_suffix
+    return recipient in _lanes(owned)
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -285,7 +421,7 @@ def inbox(
     unread_only: bool = True,
     limit: int = DEFAULT_INBOX_LIMIT,
     auto_ack: bool = True,
-    lane_suffix: Optional[str] = None,
+    owned: LaneSpec = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> tuple[list[dict], int]:
@@ -324,6 +460,11 @@ def inbox(
     agents = [agent] if isinstance(agent, str) else list(agent)
     if not agents:
         return [], 0
+    # ONCE, here. Ownership is consulted per message and again for the
+    # remaining count, so normalizing at each use would exhaust a one-shot
+    # iterator after the first message - and a bare string would be iterated
+    # character by character, producing a placeholder per letter.
+    owned = _lanes(owned)
     try:
         limit = int(limit)
     except (TypeError, ValueError):
@@ -343,6 +484,23 @@ def inbox(
     sql += " ORDER BY id ASC LIMIT ?"
 
     with closing(_connect(db_path)) as conn:
+        if consuming:
+            # Look before reserving the single writer. A consuming read takes
+            # BEGIN IMMEDIATE, and taking it to discover there is nothing to do
+            # serializes every idle poll against every real writer - which, with
+            # a fleet of sessions polling a shared mailbox, is almost all of
+            # them. This probe is a plain indexed read that blocks nobody.
+            #
+            # Racy by nature, and harmlessly so: a message arriving between the
+            # probe and the return is found by the next poll, which is exactly
+            # what would have happened had it arrived a moment later.
+            probe = conn.execute(
+                f"SELECT 1 FROM messages WHERE recipient IN ({placeholders})"
+                " AND acked_at IS NULL LIMIT 1",
+                tuple(agents),
+            ).fetchone()
+            if probe is None:
+                return [], 0
         # BEGIN IMMEDIATE for a CONSUMING read only. Python's legacy
         # transaction mode opens a transaction only on DML, so a bare
         # `with conn:` leaves the SELECT outside it entirely: two pollers both
@@ -373,7 +531,7 @@ def inbox(
                 ackable = [
                     m["message_id"]
                     for m in messages
-                    if _lane_ackable(m["recipient"], lane_suffix)
+                    if _lane_ackable(m["recipient"], owned)
                 ]
                 if ackable:
                     stamp = _iso(now_fn())
@@ -399,20 +557,14 @@ def inbox(
             # ``remaining`` permanently positive, and the documented "poll
             # while remaining" loop would never terminate - head-of-line
             # blocking behind mail that is not yours to take.
+            lane_clause, lane_params = _lane_clause(owned)
             remaining_sql = (
                 f"SELECT COUNT(*) FROM messages WHERE recipient IN ({placeholders})"
-                " AND acked_at IS NULL"
+                " AND acked_at IS NULL" + lane_clause
             )
-            remaining_params: tuple = tuple(agents)
-            if lane_suffix:
-                remaining_sql += (
-                    " AND (instr(recipient, ':') = 0"
-                    " OR substr(recipient, instr(recipient, ':') + 1) = ?)"
-                )
-                remaining_params = remaining_params + (lane_suffix,)
-            else:
-                remaining_sql += " AND instr(recipient, ':') = 0"
-            remaining = conn.execute(remaining_sql, remaining_params).fetchone()[0]
+            remaining = conn.execute(
+                remaining_sql, tuple(agents) + lane_params
+            ).fetchone()[0]
             if consuming:
                 conn.commit()
         except BaseException:
@@ -475,7 +627,7 @@ def peek(message_id: int, *, db_path: Optional[Path] = None) -> Optional[dict]:
 def ack(
     message_id: int,
     *,
-    lane_suffix: Optional[str] = None,
+    owned: LaneSpec = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> dict:
@@ -494,18 +646,15 @@ def ack(
     could ack every other session's mail - the exact defect lanes exist to
     prevent, reachable by the callers most likely to poll a shared mailbox.
     A process with no lane owns no lane, so it may ack only bare recipients.
+
+    ``lane_suffix`` may name SEVERAL lanes (see ``_lanes``): a session that has
+    been renamed still owns the lane it was addressed by beforehand, and mail
+    already in flight to it must stay consumable.
     """
     db_path = _resolve_db(db_path)
-    sql = "UPDATE messages SET acked_at = ? WHERE id = ? AND acked_at IS NULL"
-    params: tuple = (_iso(now_fn()), message_id)
-    if lane_suffix:
-        sql += (
-            " AND (instr(recipient, ':') = 0"
-            " OR substr(recipient, instr(recipient, ':') + 1) = ?)"
-        )
-        params = params + (lane_suffix,)
-    else:
-        sql += " AND instr(recipient, ':') = 0"
+    clause, lane_params = _lane_clause(_lanes(owned))
+    sql = "UPDATE messages SET acked_at = ? WHERE id = ? AND acked_at IS NULL" + clause
+    params: tuple = (_iso(now_fn()), message_id) + lane_params
     with closing(_connect(db_path)) as conn:
         with conn:  # transaction: commit on success, rollback on error
             cur = conn.execute(sql, params)
