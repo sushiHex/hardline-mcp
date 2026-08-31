@@ -200,7 +200,7 @@ async def _in_thread(fn, *args, **kwargs):
 
 # ── session registry ─────────────────────────────────────────────────────────
 
-def _announce_self(agent: str | None = None, label: str | None = None) -> str | None:
+def _announce_self(agent: str | None = None) -> str | None:
     """Record this process in the session registry; return the lane, or None.
 
     Writes every time rather than caching "already registered". A row can
@@ -234,9 +234,12 @@ def _announce_self(agent: str | None = None, label: str | None = None) -> str | 
         # report the older ones unheld - so they would read as dead, senders
         # would be told nobody could receive them, and another session could
         # claim one out from under this still-consuming process.
-        sessions.register(
-            agent=agent, lanes=adapters.owned_recipients(agent), label=label
-        )
+        # No label. This is a heartbeat over the whole held set, and a label
+        # belongs to ONE lane - the one it was claimed for, which ``claim``
+        # has already recorded. Passing one here applied it to every lane in
+        # the set, so a lane derived from the environment - which nobody ever
+        # chose a name for - came out recorded as though somebody had.
+        sessions.register(agent=agent, lanes=adapters.owned_recipients(agent))
     except Exception:  # noqa: BLE001 - discovery is a convenience, never
         # a reason to fail the call the caller actually made.
         traceback.print_exc()
@@ -310,7 +313,7 @@ def _register_session_impl(label: str, agent: str | None) -> dict:
         # check re-derives it, and for the sessions that must pass `agent`
         # explicitly there is nothing in the environment to re-derive it FROM.
         adapters.declare_agent(agent)
-        _announce_self(agent, label)
+        _announce_self(agent)
         return {
             "ok": True,
             "lane": claimed["lane"],

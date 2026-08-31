@@ -778,6 +778,34 @@ async def test_a_process_that_knows_what_it_is_cannot_redeclare_itself(
 
 
 @pytest.mark.anyio
+async def test_a_derived_lane_is_not_labelled_by_a_later_claim(
+    monkeypatch, tmp_path, in_session
+):
+    """``label`` says a lane was CHOSEN, and a derived one never was.
+
+    ``claim`` sets the label only for the lane being claimed, precisely so the
+    others keep their own. Re-announcing afterwards with a single label for the
+    whole held set undoes that: the lane this session got from its environment,
+    which nobody ever claimed under a name, ends up recorded as though someone
+    had.
+    """
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+
+    assert (await server.register_session(label="construction"))["ok"] is True
+
+    with mailbox._connect(db) as conn:
+        labels = {
+            r["lane"]: r["label"]
+            for r in conn.execute("SELECT lane, label FROM sessions")
+        }
+    assert labels[f"claude:{in_session}"] is None, "derived, so it has no chosen name"
+    assert labels["claude:construction"] == "construction"
+
+
+@pytest.mark.anyio
 async def test_a_rolled_back_claim_leaves_the_previous_label_intact(
     monkeypatch, codex_session
 ):
