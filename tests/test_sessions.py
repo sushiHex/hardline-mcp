@@ -806,6 +806,70 @@ async def test_a_derived_lane_is_not_labelled_by_a_later_claim(
 
 
 @pytest.mark.anyio
+async def test_a_second_rename_leaves_the_first_lanes_label_alone(codex_session):
+    """Each lane keeps the name IT was claimed under, across repeated renames."""
+    from hardline_mcp import server
+
+    assert (await server.register_session(label="first"))["ok"] is True
+    assert (await server.register_session(label="second"))["ok"] is True
+
+    held = {
+        h["lane"]: h["label"]
+        for lane in ("codex:first", "codex:second")
+        for h in sessions.holders(lane, db_path=codex_session)
+    }
+    assert held == {"codex:first": "first", "codex:second": "second"}
+
+
+@pytest.mark.anyio
+async def test_register_session_does_not_hold_a_shared_worker_slot(
+    monkeypatch, codex_session
+):
+    """Serializing claims must not serialize everything ELSE too.
+
+    A lock taken INSIDE the worker serializes in the wrong place: the call is
+    offloaded first, so every waiter pins a slot in the shared pool while the
+    winner sits in BEGIN IMMEDIATE — for up to the SQLite busy timeout — and
+    unrelated tools that touch none of this are starved of workers. Acquiring a
+    capacity limiter happens before the offload, so waiters hold nothing.
+
+    Pinned with a pool of exactly one worker, which makes a single slow claim
+    enough to demonstrate it.
+    """
+    import anyio
+
+    from hardline_mcp import server
+
+    default = anyio.to_thread.current_default_thread_limiter()
+    original = default.total_tokens
+    default.total_tokens = 1
+
+    inside = threading.Event()
+    real_claim = sessions.claim
+
+    def slow_claim(**kwargs):
+        inside.set()
+        time.sleep(1.0)
+        return real_claim(**kwargs)
+
+    monkeypatch.setattr(sessions, "claim", slow_claim)
+    try:
+        async with anyio.create_task_group() as tg:
+
+            async def register():
+                await server.register_session(label="construction")
+
+            tg.start_soon(register)
+            while not inside.is_set():
+                await anyio.sleep(0.01)
+
+            with anyio.fail_after(0.8):
+                await server.list_agents()
+    finally:
+        default.total_tokens = original
+
+
+@pytest.mark.anyio
 async def test_a_rolled_back_claim_leaves_the_previous_label_intact(
     monkeypatch, codex_session
 ):

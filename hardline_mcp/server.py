@@ -193,9 +193,17 @@ else:  # pragma: no cover - only on a Python that dropped the private hook
     atexit.register(_drain_async_executor_at_exit)
 
 
-async def _in_thread(fn, *args, **kwargs):
-    """Run a blocking tool body off the event loop."""
-    return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+async def _in_thread(fn, *args, limiter=None, **kwargs):
+    """Run a blocking tool body off the event loop.
+
+    ``limiter`` replaces the shared worker pool for this call. Use it for work
+    that must be serialized: a caller waiting on a ``limiter`` waits on the
+    EVENT LOOP and holds no worker, whereas one offloaded first and blocked on a
+    lock inside the worker holds a pool slot the whole time it waits.
+    """
+    return await anyio.to_thread.run_sync(
+        functools.partial(fn, *args, **kwargs), limiter=limiter
+    )
 
 
 # ── session registry ─────────────────────────────────────────────────────────
@@ -251,80 +259,87 @@ def _announce_self(agent: str | None = None) -> str | None:
 # process's own identity. Split across awaits it is not one: two concurrent
 # calls could commit in one order and adopt in the other, leaving the registry
 # advertising one name while async results routed to the name this process
-# actually answers to. Whole thing in one thread under one lock instead.
-_claim_lock = threading.Lock()
+# actually answers to.
+#
+# A capacity limiter of one rather than a lock inside the worker. Both
+# serialize, but a lock does it in the WRONG PLACE: every loser has already
+# been offloaded into a worker before it blocks, so each waiter pins a slot in
+# the shared pool while the winner sits in BEGIN IMMEDIATE - for up to the
+# SQLite busy timeout - and unrelated send/inbox/list_agents calls, which touch
+# none of this, are starved of workers. A limiter is acquired BEFORE the
+# offload, so waiters wait on the event loop and hold nothing.
+_REGISTER_LIMITER = anyio.CapacityLimiter(1)
 
 
 def _register_session_impl(label: str, agent: str | None) -> dict:
-    """The body of ``register_session``, serialized. See ``_claim_lock``."""
-    with _claim_lock:
-        agent = (agent or adapters.self_agent() or "").strip().lower()
-        if not agent:
-            return {
-                "ok": False,
-                "error": (
-                    "cannot tell which agent this session serves; pass agent="
-                    f"{sorted(adapters.known_agents())}"
-                ),
-            }
-        if agent not in adapters.known_agents():
-            return {
-                "ok": False,
-                "error": (
-                    f"unknown agent {agent!r}; known: "
-                    f"{sorted(adapters.known_agents())}"
-                ),
-            }
-        # A declaration may fill in an unknown identity, never contradict a
-        # known one - otherwise a Claude session could re-identify as codex and
-        # consume a real Codex session's backlog.
-        conflict = adapters.declaration_conflict(agent)
-        if conflict:
-            return {"ok": False, "error": conflict}
-        problem = adapters.validate_label(label)
-        if problem:
-            return {"ok": False, "error": problem}
-
-        label = label.strip()
-        # Ask BEFORE writing anything durable. A local refusal after the
-        # registry row exists leaves a lane this process never adopted and does
-        # not read, advertised to senders as held and unclaimable by anyone
-        # else.
-        refused = adapters.claim_refusal(label)
-        if refused:
-            return {"ok": False, "error": refused}
-
-        claimed = sessions.claim(
-            agent=agent, label=label, lanes=adapters.owned_recipients(agent)
-        )
-        if not claimed.get("ok"):
-            return claimed
-
-        # Only adopt the lane locally once the registry has accepted it.
-        # Claiming first would rename this process to a name it lost the race
-        # for, and every subsequent dispatch would address results to a lane
-        # held by someone else.
-        refused = adapters.claim_lane(label)
-        if refused:
-            sessions.drop_lane(claimed["lane"])
-            return {"ok": False, "error": refused, "lane": claimed["lane"]}
-
-        # Remember the identity too, not just the name. Every later ownership
-        # check re-derives it, and for the sessions that must pass `agent`
-        # explicitly there is nothing in the environment to re-derive it FROM.
-        adapters.declare_agent(agent)
-        _announce_self(agent)
+    """The body of ``register_session``. Serialized by ``_REGISTER_LIMITER``."""
+    agent = (agent or adapters.self_agent() or "").strip().lower()
+    if not agent:
         return {
-            "ok": True,
-            "lane": claimed["lane"],
-            "agent": agent,
-            "label": label,
-            "held_lanes": list(adapters.held_lanes()),
-            "note": (
-                f"Others can now reach this session as {claimed['lane']!r}. "
-                "inbox() continues to read every lane you have held."
+            "ok": False,
+            "error": (
+                "cannot tell which agent this session serves; pass agent="
+                f"{sorted(adapters.known_agents())}"
             ),
         }
+    if agent not in adapters.known_agents():
+        return {
+            "ok": False,
+            "error": (
+                f"unknown agent {agent!r}; known: "
+                f"{sorted(adapters.known_agents())}"
+            ),
+        }
+    # A declaration may fill in an unknown identity, never contradict a
+    # known one - otherwise a Claude session could re-identify as codex and
+    # consume a real Codex session's backlog.
+    conflict = adapters.declaration_conflict(agent)
+    if conflict:
+        return {"ok": False, "error": conflict}
+    problem = adapters.validate_label(label)
+    if problem:
+        return {"ok": False, "error": problem}
+
+    label = label.strip()
+    # Ask BEFORE writing anything durable. A local refusal after the
+    # registry row exists leaves a lane this process never adopted and does
+    # not read, advertised to senders as held and unclaimable by anyone
+    # else.
+    refused = adapters.claim_refusal(label)
+    if refused:
+        return {"ok": False, "error": refused}
+
+    claimed = sessions.claim(
+        agent=agent, label=label, lanes=adapters.owned_recipients(agent)
+    )
+    if not claimed.get("ok"):
+        return claimed
+
+    # Only adopt the lane locally once the registry has accepted it.
+    # Claiming first would rename this process to a name it lost the race
+    # for, and every subsequent dispatch would address results to a lane
+    # held by someone else.
+    refused = adapters.claim_lane(label)
+    if refused:
+        sessions.drop_lane(claimed["lane"])
+        return {"ok": False, "error": refused, "lane": claimed["lane"]}
+
+    # Remember the identity too, not just the name. Every later ownership
+    # check re-derives it, and for the sessions that must pass `agent`
+    # explicitly there is nothing in the environment to re-derive it FROM.
+    adapters.declare_agent(agent)
+    _announce_self(agent)
+    return {
+        "ok": True,
+        "lane": claimed["lane"],
+        "agent": agent,
+        "label": label,
+        "held_lanes": list(adapters.held_lanes()),
+        "note": (
+            f"Others can now reach this session as {claimed['lane']!r}. "
+            "inbox() continues to read every lane you have held."
+        ),
+    }
 
 
 def _lane_advice(to_agent: str) -> str | None:
@@ -617,7 +632,9 @@ async def register_session(label: str, agent: str | None = None) -> dict:
     holds the name — a dead holder's claim is ignored, so a label does not
     become unusable forever because the session that used it crashed.
     """
-    return await _in_thread(_register_session_impl, label, agent)
+    return await _in_thread(
+        _register_session_impl, label, agent, limiter=_REGISTER_LIMITER
+    )
 
 
 @mcp.tool()
