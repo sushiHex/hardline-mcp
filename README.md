@@ -45,6 +45,7 @@ splits the problem:
 | `history(limit=50, agent=None, before_id=None)` | Recent messages newest-first; `agent` matches sender or recipient. Never acks and never hides acked messages, so it is the recovery path for anything `inbox` consumed. Row count, each body, and the aggregate response are all capped; page with the returned `next_before_id` while `has_more`. |
 | `list_agents()` | The addressable roster, the sessions **live right now** (`live_sessions`), every recipient/sender name the mailbox has ever seen — a history, with each lane marked `live` — and **your own identity**, including whether this session can be addressed individually. |
 | `register_session(label, agent=None)` | Claim `label` as this session's name, so mail can be aimed at it: `codex:construction`. The runtime answer to a static MCP env block that can't name two sessions differently. Keeps previously-held lanes, so renaming never strands in-flight results. |
+| `release_session(label)` | Give a claimed name back, so a mistaken claim doesn't stay owned until the process exits. Only releases a name this session holds. |
 | `server_info()` | Version, schema version, module path, db path, pid, effective limits, per-agent timeout budgets, job counts, and whether write is enabled — for answering "is the fix live?" in one call. |
 | `job_status(job_id)` | State and timings of one dispatch: `queued` / `running` / `completed` / `failed` / `cancelled` / `lost`. Answers "is it still running?", which polling an inbox cannot. |
 | `job_result(job_id)` | The terminal result in full. Recorded against the job *before* delivery is attempted, so it survives the message being consumed, lost, or never sent. |
@@ -161,12 +162,22 @@ mailbox. `list_agents()` therefore separates them:
 - `observed_recipients` — every name the mailbox has ever seen, a *history*,
   with each lane-qualified entry marked `live: true/false`
 
-Sending to a lane nobody holds still persists (a Claude lane survives a `/mcp`
-reconnect, so a session between processes will come back for its mail) but the
-response carries a `warning` saying so, and lists the lanes that *are* live.
-Only a lane's holder may consume its messages, so without that warning mail
-aimed at an exited session is unreadable by anyone, forever — which is how 51
-messages accumulated across 11 dead lanes before this existed.
+Sending to a lane with no registered holder still persists, and the response
+says so. The wording is careful, because the registry cannot see everything: a
+session running older code never registers, one whose announcement failed is
+absent, and a probe that can't answer looks like an exit. So `send` reports
+that **no registered holder was found** — not that the message is unreadable.
+
+For the same reason, absence does not grant ownership. A claim on an unheld
+lane is refused when unfinished work is still addressed to it and that work's
+owner is alive: an unregistered consumer is invisible here, but its outstanding
+job is not. A successful claim reports the backlog it inherited, since a label
+is a role and a claimant takes on whatever was waiting at that name.
+
+`list_agents` marks each observed lane with `registered_holder`, flags any lane
+two live sessions both hold (`contested_lanes` — they will drain each other's
+mail), and reports a `registration_warning` if this session failed to register
+itself.
 
 ## Requirements
 

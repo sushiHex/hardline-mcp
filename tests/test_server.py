@@ -348,6 +348,7 @@ async def test_tool_roster_is_exactly_this():
         "history",
         "list_agents",
         "register_session",
+        "release_session",
         "server_info",
         "job_status",
         "job_result",

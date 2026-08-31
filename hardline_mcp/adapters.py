@@ -323,6 +323,17 @@ def claim_lane(label: str) -> Optional[str]:
     return None
 
 
+def release_lane(label: str) -> None:
+    """Give up a claimed name. The correction path for one made by mistake.
+
+    Only touches runtime claims. A lane derived from the environment is not a
+    claim and cannot be surrendered - it is what this process is.
+    """
+    with _claim_lock:
+        if label in _claimed_lanes:
+            _claimed_lanes.remove(label)
+
+
 def claim_refusal(label: str) -> Optional[str]:
     """Why ``claim_lane`` would refuse, without claiming. None if it would not.
 

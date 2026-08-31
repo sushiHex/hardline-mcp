@@ -24,6 +24,11 @@ from typing import Optional
 _SYNCHRONIZE = 0x00100000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _WAIT_TIMEOUT = 0x00000102
+# Why an OpenProcess failed. Without these the two cases that matter - "no such
+# process" and "exists, but not yours to open" - are one indistinguishable
+# falsy handle.
+_ERROR_INVALID_PARAMETER = 87
+_ERROR_ACCESS_DENIED = 5
 _kernel32_cache: list = []
 
 
@@ -190,22 +195,96 @@ def process_key(pid: int) -> Optional[str]:
         return None
 
 
-def instance_alive(pid: Optional[int], expect_key: Optional[str]) -> bool:
-    """Is the process at ``pid`` alive AND still the instance ``expect_key`` named?
+ALIVE = "alive"
+DEAD = "dead"
+UNKNOWN = "unknown"
 
-    The strict form of ``pid_alive``, for a durable record that will be trusted
-    rather than merely reported. It exists because the two-step check has a
-    subtlety worth writing down once instead of at each call site: an identity
-    that WAS recorded and can no longer be read means gone, not "unverifiable".
-    The only process whose key reads as None while it is genuinely alive is one
-    we cannot open at all, and a record we cannot verify must not be honoured.
 
-    A record with no key at all is a different case - it was written by a
-    platform that would not say - and is allowed through on ``pid_alive``
-    alone, matching how ``kill_process_tree`` treats an unverifiable identity.
+def instance_state(pid: Optional[int], expect_key: Optional[str]) -> str:
+    """``ALIVE``, ``DEAD``, or ``UNKNOWN`` for a recorded (pid, identity) pair.
+
+    Three answers, not two, because "I could not tell" is a fact and collapsing
+    it into "dead" is how a live session gets its name given away. A probe can
+    fail for reasons that have nothing to do with the process: on Windows,
+    ``OpenProcess`` returns ACCESS_DENIED for a process running at a higher
+    integrity level, which is indistinguishable from "no such process" unless
+    the error code is read.
+
+    Callers must decide what UNKNOWN means for THEM. Reporting a destination
+    and deleting its record are not the same decision: the first can afford to
+    be optimistic, the second cannot.
+
+    A record with no key at all is not unknown - it was written by a platform
+    that would not say, and is honoured on liveness alone, matching how
+    ``kill_process_tree`` treats an unverifiable identity.
     """
-    if not pid_alive(pid):
-        return False
+    presence = _pid_state(pid)
+    if presence != ALIVE:
+        return presence
     if expect_key is None:
-        return True
-    return process_key(int(pid)) == expect_key
+        return ALIVE
+    actual = process_key(int(pid))
+    if actual is None:
+        # The pid is real but its identity will not read. Saying DEAD here is
+        # what let a transient permission failure unregister a live session.
+        return UNKNOWN
+    return ALIVE if actual == expect_key else DEAD
+
+
+def _pid_state(pid: Optional[int]) -> str:
+    """Does this process exist? ``UNKNOWN`` when the OS declines to say.
+
+    ``pid_alive`` answers the same question as a boolean and folds the
+    declined case into False, which is right for a caller that only reports
+    and wrong for one that deletes.
+    """
+    if not pid or pid <= 0:
+        return DEAD
+    if os.name != "nt":
+        return ALIVE if pid_alive(pid) else DEAD
+
+    import ctypes
+
+    kernel32 = _kernel32()
+    if kernel32 is None:
+        return UNKNOWN
+    handle = kernel32.OpenProcess(
+        _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+    )
+    if handle:
+        try:
+            return (
+                ALIVE
+                if kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
+                else DEAD
+            )
+        finally:
+            kernel32.CloseHandle(handle)
+    # The open failed. WHY it failed is the whole point: a pid that does not
+    # exist and a pid we are not allowed to touch look identical without it.
+    return open_failure_state(ctypes.get_last_error())
+
+
+def open_failure_state(err: int) -> str:
+    """What a failed ``OpenProcess`` says about the process, by error code.
+
+    A separate function because it is the whole judgement and the only part
+    that can be tested without a process that refuses to be opened: everything
+    around it is a Win32 call. ``ERROR_INVALID_PARAMETER`` is how Windows says
+    there is no such pid. Anything else - denied, or unrecognised - means the
+    question went unanswered, and an unanswered question is not a death.
+    """
+    if err == _ERROR_INVALID_PARAMETER:
+        return DEAD
+    return UNKNOWN
+
+
+def instance_alive(pid: Optional[int], expect_key: Optional[str]) -> bool:
+    """Boolean form of ``instance_state``: anything but DEAD counts as alive.
+
+    Optimistic by design, and the direction matters. A live process wrongly
+    called dead loses its lane to somebody else; a dead one wrongly called
+    live is reported as a destination until the next read. Only the first
+    destroys anything.
+    """
+    return instance_state(pid, expect_key) != DEAD

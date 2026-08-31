@@ -75,7 +75,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from .mailbox import _connect, _default_now, _iso, _resolve_db
-from .procid import instance_alive, process_key
+from .procid import DEAD, instance_state, process_key
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -90,9 +90,20 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     }
 
 
+def _state(row: sqlite3.Row) -> str:
+    """``ALIVE`` / ``DEAD`` / ``UNKNOWN`` for the process behind this row."""
+    return instance_state(row["pid"], row["process_key"])
+
+
 def _is_live(row: sqlite3.Row) -> bool:
-    """Is the process behind this row still running, and still itself?"""
-    return instance_alive(row["pid"], row["process_key"])
+    """May this row still be treated as a destination?
+
+    UNKNOWN counts as live. A probe that could not answer is not evidence of
+    death, and this predicate gates who may TAKE a lane - so being wrong
+    optimistically means reporting a destination that has gone, while being
+    wrong pessimistically means handing a live session's name to somebody else.
+    """
+    return _state(row) != DEAD
 
 
 def _prune_dead(conn: sqlite3.Connection) -> None:
@@ -109,7 +120,11 @@ def _prune_dead(conn: sqlite3.Connection) -> None:
     actually probed makes the delete a compare-and-swap.
     """
     rows = conn.execute("SELECT pid, lane, process_key FROM agent_sessions").fetchall()
-    dead = [(r["pid"], r["lane"], r["process_key"]) for r in rows if not _is_live(r)]
+    # DEAD only, never merely not-ALIVE. Deleting on an inconclusive probe is
+    # how a live session gets unregistered and then has its name claimed by
+    # someone else - and the deletion also destroys the evidence that it was
+    # ever there.
+    dead = [(r["pid"], r["lane"], r["process_key"]) for r in rows if _state(r) == DEAD]
     if not dead:
         return
     with conn:
@@ -118,6 +133,46 @@ def _prune_dead(conn: sqlite3.Connection) -> None:
             " AND process_key IS ?",
             dead,
         )
+
+
+def _live_work(conn: sqlite3.Connection, lane: str) -> list[dict]:
+    """Unfinished jobs whose results are owed to ``lane``, held by a LIVE owner.
+
+    The registry cannot see every consumer. A process running older code never
+    registers at all; one whose announcement failed is absent; one behind an
+    unanswerable probe looks gone. Taking a lane on the strength of "no row
+    here" is therefore taking it on the strength of not having looked.
+
+    An unfinished job is the one piece of hard evidence available. Its
+    ``requester`` is the lane, fixed when the job was DISPATCHED - before any
+    message exists, so a mailbox-only check would approve a takeover moments
+    before the result lands - and its owner's liveness is checkable. A live
+    owner with unfinished work means somebody is still coming back for this
+    name.
+    """
+    rows = conn.execute(
+        "SELECT job_id, owner_pid, state, label FROM jobs"
+        " WHERE requester = ? AND state IN ('queued', 'running')",
+        (lane,),
+    ).fetchall()
+    return [
+        {
+            "job_id": r["job_id"],
+            "owner_pid": r["owner_pid"],
+            "state": r["state"],
+            "label": r["label"],
+        }
+        for r in rows
+        if instance_state(r["owner_pid"], None) != DEAD
+    ]
+
+
+def _unread_for(conn: sqlite3.Connection, lane: str) -> int:
+    """Messages waiting at ``lane`` that a claimant would inherit."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE recipient = ? AND acked_at IS NULL",
+        (lane,),
+    ).fetchone()[0]
 
 
 def drop_lane(
@@ -367,6 +422,29 @@ def claim(
                     "lane": lane,
                     "held_by": existing,
                 }
+            # No REGISTERED holder is not the same as no holder. Before taking
+            # a name on the strength of an empty table, look for work that is
+            # still owed to it and still owned by something alive.
+            outstanding = [j for j in _live_work(conn, lane) if j["owner_pid"] != pid]
+            if outstanding:
+                conn.rollback()
+                which = ", ".join(
+                    f"{j['job_id']} ({j['state']}, owner pid {j['owner_pid']})"
+                    for j in outstanding
+                )
+                return {
+                    "ok": False,
+                    "error": (
+                        f"lane {lane!r} has no registered holder, but unfinished "
+                        f"work is still addressed to it: {which}. Something is "
+                        "consuming this name without being registered - an older "
+                        "hardline, or one whose registration failed. Refusing "
+                        "rather than splitting its mail."
+                    ),
+                    "lane": lane,
+                    "outstanding_jobs": outstanding,
+                }
+            inherited = _unread_for(conn, lane)
             # Any remaining row for this lane belongs to a dead session (or to
             # us). Clear it so the takeover leaves exactly one holder.
             conn.execute(
@@ -387,7 +465,18 @@ def claim(
         except BaseException:
             conn.rollback()
             raise
-    return {"ok": True, "lane": lane, "label": label, "pid": pid, "lanes": list(held)}
+    return {
+        "ok": True,
+        "lane": lane,
+        "label": label,
+        "pid": pid,
+        "lanes": list(held),
+        # Say what was taken on, not just that it worked. A label is a role, so
+        # a claimant inherits whatever was already waiting at that name - which
+        # is the intended behaviour and also the thing an operator would most
+        # want to see afterwards if it turns out to have been the wrong name.
+        "inherited_unread": inherited,
+    }
 
 
 def unregister(

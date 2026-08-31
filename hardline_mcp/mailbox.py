@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS messages (
     acked_at   TEXT
 );
 
+-- Every read of this table filters on recipient and unread-ness, and without
+-- an index each one scans the whole table. That is survivable for a poll that
+-- finds work and wasteful for the far more common one that finds none: with
+-- ~26 sessions polling a shared mailbox, the empty reads dominate.
+CREATE INDEX IF NOT EXISTS messages_recipient_idx ON messages (recipient, acked_at);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -240,7 +246,19 @@ def _ensure_initialized(db_path: Path) -> None:
     """
     key = str(db_path)
     if key in _initialized_paths:
-        return
+        # Cached by PATH, so a store that is deleted underneath a running fleet
+        # would otherwise never be rebuilt: every process would go on believing
+        # it had initialized a file that is no longer there, and every call
+        # would fail with "no such table" for the life of the process. One stat
+        # is cheap beside opening SQLite.
+        #
+        # This catches deletion, which is the case that happens. A file
+        # SWAPPED for a different one still exists, so it is not caught here -
+        # verifying the schema on every connection would cost a query per
+        # operation to defend against something nobody does by accident.
+        if db_path.exists():
+            return
+        _initialized_paths.discard(key)
     with _init_lock:
         if key in _initialized_paths:
             return
@@ -466,6 +484,23 @@ def inbox(
     sql += " ORDER BY id ASC LIMIT ?"
 
     with closing(_connect(db_path)) as conn:
+        if consuming:
+            # Look before reserving the single writer. A consuming read takes
+            # BEGIN IMMEDIATE, and taking it to discover there is nothing to do
+            # serializes every idle poll against every real writer - which, with
+            # a fleet of sessions polling a shared mailbox, is almost all of
+            # them. This probe is a plain indexed read that blocks nobody.
+            #
+            # Racy by nature, and harmlessly so: a message arriving between the
+            # probe and the return is found by the next poll, which is exactly
+            # what would have happened had it arrived a moment later.
+            probe = conn.execute(
+                f"SELECT 1 FROM messages WHERE recipient IN ({placeholders})"
+                " AND acked_at IS NULL LIMIT 1",
+                tuple(agents),
+            ).fetchone()
+            if probe is None:
+                return [], 0
         # BEGIN IMMEDIATE for a CONSUMING read only. Python's legacy
         # transaction mode opens a transaction only on DML, so a bare
         # `with conn:` leaves the SELECT outside it entirely: two pollers both

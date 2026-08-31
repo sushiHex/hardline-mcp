@@ -248,11 +248,31 @@ def _announce_self(agent: str | None = None) -> str | None:
         # the set, so a lane derived from the environment - which nobody ever
         # chose a name for - came out recorded as though somebody had.
         sessions.register(agent=agent, lanes=adapters.owned_recipients(agent))
-    except Exception:  # noqa: BLE001 - discovery is a convenience, never
-        # a reason to fail the call the caller actually made.
+    except Exception as exc:  # noqa: BLE001 - discovery is a convenience,
+        # never a reason to fail the call the caller actually made. But it must
+        # not be SILENT either: an unregistered session keeps consuming its
+        # lanes locally while everything else reads it as unheld, and stderr on
+        # a stdio server goes nowhere anybody looks.
         traceback.print_exc()
+        _registration_failure[:] = [f"{type(exc).__name__}: {exc}"]
         return None
+    _registration_failure.clear()
     return lane
+
+
+# Last registration error, surfaced by list_agents and server_info. One slot:
+# the current state is what matters, not a log.
+_registration_failure: list[str] = []
+
+
+def _last_registration_failure() -> str | None:
+    """Why this session is missing from the registry, if it is."""
+    if not _registration_failure:
+        return None
+    return (
+        f"this session could not register itself ({_registration_failure[0]}), "
+        "so others see its lanes as unheld while it goes on consuming them"
+    )
 
 
 # Claiming a name is a read-modify-write spanning the registry AND this
@@ -365,11 +385,15 @@ def _lane_advice(to_agent: str) -> str | None:
         return None
     known = ", ".join(sorted(live)) if live else "none"
     return (
-        f"no live session holds {to_agent!r}, so nothing can consume this "
-        f"message unless that exact lane comes back (a Claude lane survives a "
-        f"/mcp reconnect; a claimed one does not outlive its process). "
-        f"Live lanes for {adapters.base_agent(to_agent)!r}: {known}. "
-        "Call list_agents() to see every live session."
+        f"no REGISTERED holder was found for {to_agent!r}. That is not proof "
+        "nobody is reading it: a session running older code never registers, "
+        "one whose announcement failed is absent, and a liveness probe that "
+        "cannot answer looks the same as a process that exited. The message is "
+        "stored either way. If the lane really is gone, only that exact name "
+        "coming back can consume it (a Claude lane survives a /mcp reconnect; "
+        f"a claimed one does not outlive its process). Registered lanes for "
+        f"{adapters.base_agent(to_agent)!r}: {known}. Call list_agents() to see "
+        "every registered session."
     )
 
 
@@ -546,16 +570,29 @@ async def list_agents() -> dict:
     # collapsing to the current name here would mark them dead and count their
     # mail as stranded - undoing, in the reporting layer, the whole reason the
     # registry records more than one lane per session.
-    live_lanes = {lane for s in live for lane in s["lanes"]}
+    live_lanes: dict[str, int] = {}
+    for session in live:
+        for lane in session["lanes"]:
+            live_lanes[lane] = live_lanes.get(lane, 0) + 1
 
-    stale = 0
+    unheld = 0
     for entry in observed:
         recipient = entry["recipient"]
         if ":" not in recipient:
             continue
-        entry["live"] = recipient in live_lanes
-        if not entry["live"] and entry.get("unread"):
-            stale += 1
+        # `registered_holder`, not `live`. What this can actually establish is
+        # whether a session is REGISTERED as holding the lane, and a session
+        # running older code, or one whose announcement failed, holds its lane
+        # just as firmly while being absent here.
+        entry["registered_holder"] = recipient in live_lanes
+        if not entry["registered_holder"] and entry.get("unread"):
+            unheld += 1
+
+    # Two live sessions answering to one name drain each other's mail
+    # nondeterministically. `claim` refuses to create that, but a hand-set
+    # HARDLINE_AGENT_LABEL on two sessions still can, so say so rather than
+    # collapsing them into a set and losing the count.
+    contested = sorted(lane for lane, n in live_lanes.items() if n > 1)
 
     suffix = adapters.lane_suffix()
     held = adapters.held_lanes()
@@ -602,12 +639,69 @@ async def list_agents() -> dict:
             "message nobody can ever read."
         ),
     }
-    if stale:
-        result["stale_lanes_note"] = (
-            f"{stale} lane(s) below hold unread mail but have no live session. "
-            "Those messages are unconsumable unless that exact lane returns."
+    if unheld:
+        result["unheld_lanes_note"] = (
+            f"{unheld} lane(s) below hold unread mail and have no REGISTERED "
+            "holder. That is not the same as nobody reading them - an older "
+            "hardline never registers, and a probe that cannot answer looks "
+            "like an exit. Only that exact name can consume them."
         )
+    if contested:
+        result["contested_lanes"] = contested
+        result["contested_lanes_note"] = (
+            "More than one live session is registered as holding each of these. "
+            "They will drain each other's mail nondeterministically. Usually a "
+            "hand-set HARDLINE_AGENT_LABEL shared by two sessions."
+        )
+    if failure := _last_registration_failure():
+        result["registration_warning"] = failure
     return result
+
+
+@mcp.tool()
+async def release_session(label: str) -> dict:
+    """Give up a name this session claimed, so somebody else can have it.
+
+    The correction path. Without one, a name claimed by mistake - a typo, or a
+    session that declared the wrong agent - stays owned and consumed until that
+    process exits, and no other session can take it in the meantime.
+
+    Only ever releases a name THIS session holds, so it cannot be used to evict
+    anybody else. The lane stops being consumed here and its registry row goes,
+    which is the whole point; anything still addressed to it waits for the next
+    holder, exactly as it would have before the claim.
+
+    A session's environment-derived lane is not releasable - it is not a claim,
+    it is what this process IS.
+    """
+    label = (label or "").strip()
+    if label not in adapters.held_lanes():
+        return {
+            "ok": False,
+            "error": (
+                f"this session does not hold {label!r}; it holds "
+                f"{list(adapters.held_lanes())}"
+            ),
+        }
+    if label == adapters.derived_lane_suffix():
+        return {
+            "ok": False,
+            "error": (
+                f"{label!r} is this session's derived lane, not a claim, so "
+                "there is nothing to give back"
+            ),
+        }
+    agent = adapters.self_agent()
+    lane = f"{agent}:{label}" if agent else None
+    adapters.release_lane(label)
+    if lane:
+        await _in_thread(sessions.drop_lane, lane)
+    return {
+        "ok": True,
+        "released": lane or label,
+        "held_lanes": list(adapters.held_lanes()),
+        "note": "This session no longer answers to that name or consumes its mail.",
+    }
 
 
 @mcp.tool()
@@ -637,6 +731,48 @@ async def register_session(label: str, agent: str | None = None) -> dict:
     )
 
 
+_revision_cache: list[str] = []
+
+
+def _code_revision() -> str | None:
+    """Git revision of the tree this process was spawned from, if readable.
+
+    The package version cannot tell two of these processes apart. It is an
+    editable install, so a process runs whatever the tree said at spawn, and
+    several incompatible revisions run against one store at the same time -
+    every one of them reporting the same version and the same schema constant.
+    That is precisely the confusion an operator hits when a lane misbehaves and
+    they try to work out which code is actually running.
+
+    Read straight from .git rather than by shelling out: this is a diagnostic
+    on a stdio server, and it must not cost a subprocess or ever raise.
+    """
+    if _revision_cache:
+        return _revision_cache[0] or None
+    revision = ""
+    try:
+        git = Path(__file__).resolve().parent.parent / ".git"
+        head = (git / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref:"):
+            ref = head.split(" ", 1)[1].strip()
+            target = git / ref
+            if target.exists():
+                revision = target.read_text(encoding="utf-8").strip()[:12]
+            else:  # packed-refs, or a ref with no loose file
+                for line in (git / "packed-refs").read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines():
+                    if line.endswith(f" {ref}"):
+                        revision = line.split(" ", 1)[0][:12]
+                        break
+        else:
+            revision = head[:12]
+    except Exception:  # noqa: BLE001 - a diagnostic must never be the failure
+        revision = ""
+    _revision_cache.append(revision)
+    return revision or None
+
+
 @mcp.tool()
 async def server_info() -> dict:
     """Version, limits, and timeout budgets of THIS running hardline-mcp.
@@ -652,6 +788,7 @@ async def server_info() -> dict:
         pkg_version = _pkg_version("hardline-mcp")
     except Exception:  # noqa: BLE001 - version is diagnostic, never fatal
         pkg_version = "unknown"
+    revision = _code_revision()
 
     timeouts: dict[str, object] = {}
     for agent in adapters.known_agents():
@@ -663,6 +800,9 @@ async def server_info() -> dict:
     write_ok, write_err = adapters._write_enabled()
     return {
         "version": pkg_version,
+        # The version cannot tell two of these processes apart; the revision
+        # can. Several incompatible ones run against one store at a time.
+        "code_revision": revision,
         "schema_version": mailbox.SCHEMA_VERSION,
         "module_path": str(Path(mailbox.__file__).resolve()),
         "db_path": str(mailbox._resolve_db(None)),

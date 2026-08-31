@@ -7,6 +7,7 @@ an implementation that hardcoded ``live = True``.
 """
 
 import os
+import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -78,9 +79,9 @@ def test_prune_only_deletes_the_instance_it_probed(tmp_path, monkeypatch):
                     "UPDATE agent_sessions SET process_key = ? WHERE pid = ?",
                     ("a-brand-new-instance", _DEAD_PID),
                 )
-        return False
+        return procid.DEAD
 
-    monkeypatch.setattr(sessions, "_is_live", probe_then_race)
+    monkeypatch.setattr(sessions, "_state", probe_then_race)
     sessions.live(db_path=db)
 
     with mailbox._connect(db) as conn:
@@ -136,6 +137,64 @@ def test_process_key_actually_identifies_this_process(tmp_path):
         stored = conn.execute("SELECT process_key FROM agent_sessions").fetchone()[0]
     assert stored == key, "the real token must be what gets recorded"
     assert [s["lane"] for s in sessions.live(db_path=db)] == ["claude:me"]
+
+
+def test_a_probe_that_cannot_answer_is_not_a_death(tmp_path, monkeypatch):
+    """UNKNOWN is a third answer, and collapsing it into DEAD destroys things.
+
+    A probe fails for reasons that have nothing to do with the process — on
+    Windows, opening one at a higher integrity level returns ACCESS_DENIED,
+    which without the error code looks exactly like "no such process". Treating
+    that as death unregisters a live session, deletes the evidence it was ever
+    there, and frees its name for somebody else to claim.
+    """
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lane="codex:a", db_path=db)
+
+    monkeypatch.setattr(sessions, "_state", lambda row: procid.UNKNOWN)
+
+    assert [s["lane"] for s in sessions.live(db_path=db)] == ["codex:a"], (
+        "an unanswerable probe must not hide a session"
+    )
+    with mailbox._connect(db) as conn:
+        rows = conn.execute("SELECT COUNT(*) FROM agent_sessions").fetchone()[0]
+    assert rows == 1, "and must not delete its row"
+    assert sessions.holders("codex:a", db_path=db), "so its name is still held"
+
+
+def test_instance_state_distinguishes_the_three_answers(monkeypatch):
+    """All THREE, not just the two a live test process can demonstrate.
+
+    ALIVE and DEAD are easy: this process, and a pid that does not exist.
+    UNKNOWN is the one that matters and the one no real process here will
+    produce on demand, so it is reached the two ways the code can reach it —
+    an identity that will not read, and an open that failed for a reason other
+    than the process being gone.
+    """
+    key = procid.process_key(os.getpid())
+    assert procid.instance_state(os.getpid(), None) == procid.ALIVE
+    assert procid.instance_state(_DEAD_PID, None) == procid.DEAD
+    if key is not None:
+        assert procid.instance_state(os.getpid(), key) == procid.ALIVE
+        assert procid.instance_state(os.getpid(), "not-my-key") == procid.DEAD
+
+    # A live process whose identity token will not read. Saying DEAD here is
+    # what let a transient permission failure unregister a live session.
+    monkeypatch.setattr(procid, "process_key", lambda pid: None)
+    assert procid.instance_state(os.getpid(), "a-recorded-key") == procid.UNKNOWN
+    assert procid.instance_alive(os.getpid(), "a-recorded-key") is True
+
+
+def test_only_no_such_process_reads_as_death():
+    """The error-code judgement, which is the whole point of reading one.
+
+    Without it, "there is no such pid" and "that pid is not yours to open" are
+    one indistinguishable falsy handle — and treating the second as death is
+    how a session running at a different integrity level gets unregistered.
+    """
+    assert procid.open_failure_state(procid._ERROR_INVALID_PARAMETER) == procid.DEAD
+    assert procid.open_failure_state(procid._ERROR_ACCESS_DENIED) == procid.UNKNOWN
+    assert procid.open_failure_state(0) == procid.UNKNOWN, "unrecognised is not dead"
 
 
 def test_instance_alive_allows_an_unrecorded_identity(tmp_path):
@@ -320,6 +379,114 @@ def test_two_live_sessions_cannot_both_claim_one_name(tmp_path, monkeypatch):
     won = [r for r in results if r.get("ok")]
     assert len(won) == 1, f"exactly one claim must win, got {results!r}"
     assert len(sessions.holders("codex:construction", db_path=db)) == 1
+
+
+def test_a_lane_with_live_unfinished_work_is_not_claimable(tmp_path):
+    """Absence from the registry must stop granting ownership.
+
+    The registry cannot see every consumer: a process on older code never
+    registers, one whose announcement failed is absent, one behind an
+    unanswerable probe looks gone. An unfinished job whose owner is alive is
+    the hard evidence that somebody is still coming back for this name — and
+    its recipient was fixed at DISPATCH, before any message exists, so checking
+    the mailbox alone would approve the takeover moments before the result
+    lands.
+    """
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available to own the work")
+
+    job_id = jobs.create(
+        agent="codex",
+        requester="codex:construction",
+        label=None,
+        request={"prompt_chars": 1},
+        db_path=db,
+    )
+    # Owned by a DIFFERENT live process. A claimant's own outstanding work is
+    # no reason to refuse it its own name.
+    with mailbox._connect(db) as conn:
+        with conn:
+            conn.execute(
+                "UPDATE jobs SET owner_pid = ? WHERE job_id = ?", (other, job_id)
+            )
+
+    refused = sessions.claim(agent="codex", label="construction", db_path=db)
+    assert refused["ok"] is False
+    assert "unfinished work" in refused["error"]
+    assert refused["outstanding_jobs"], "the refusal must name what it is protecting"
+
+
+def test_a_lane_whose_outstanding_work_died_with_its_owner_is_claimable(tmp_path):
+    """A dead owner's unfinished job is not evidence of a live consumer.
+
+    Otherwise a crash would make a name permanently unclaimable — the same
+    fail-forever direction that refusing on a dead HOLDER would have had.
+    """
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    job_id = jobs.create(
+        agent="codex",
+        requester="codex:construction",
+        label=None,
+        request={"prompt_chars": 1},
+        db_path=db,
+    )
+    with mailbox._connect(db) as conn:
+        with conn:
+            conn.execute(
+                "UPDATE jobs SET owner_pid = ? WHERE job_id = ?", (_DEAD_PID, job_id)
+            )
+
+    assert sessions.claim(agent="codex", label="construction", db_path=db)["ok"] is True
+
+
+def test_a_claim_reports_the_backlog_it_inherits(tmp_path):
+    """A label is a role, so a claimant takes on whatever waited at that name.
+
+    Intended, and exactly what an operator would want to see afterwards if the
+    name turns out to have been the wrong one — so the claim says how much it
+    took on rather than only that it worked.
+    """
+    db = tmp_path / "mb.db"
+    for i in range(3):
+        mailbox.send("claude", "codex:construction", f"m{i}", db_path=db)
+
+    claimed = sessions.claim(agent="codex", label="construction", db_path=db)
+    assert claimed["ok"] is True
+    assert claimed["inherited_unread"] == 3
+
+
+def test_reclaiming_after_a_reconnect_still_works(tmp_path):
+    """The guard must not break the documented recovery path.
+
+    A /mcp reconnect returns a session to anonymity; re-claiming the same label
+    is how it gets its name and its waiting mail back. Finished work and a dead
+    former holder are not evidence against that.
+    """
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    sessions.register(
+        agent="codex", lane="codex:construction", pid=_DEAD_PID, db_path=db
+    )
+    job_id = jobs.create(
+        agent="codex",
+        requester="codex:construction",
+        label=None,
+        request={"prompt_chars": 1},
+        db_path=db,
+    )
+    jobs.finish(job_id, result={"ok": True}, db_path=db)
+    mailbox.send("claude", "codex:construction", "waiting for you", db_path=db)
+
+    claimed = sessions.claim(agent="codex", label="construction", db_path=db)
+    assert claimed["ok"] is True, claimed.get("error")
+    assert claimed["inherited_unread"] == 1
 
 
 def test_reclaiming_your_own_name_is_not_a_conflict(tmp_path):
@@ -626,6 +793,63 @@ def test_an_unknown_hardline_agent_is_ignored_rather_than_trusted(monkeypatch):
     assert adapters.self_agent() is None
 
 
+# ── the store underneath ─────────────────────────────────────────────────────
+
+
+def test_the_store_is_rebuilt_after_it_is_deleted(tmp_path):
+    """Initialization is cached by PATH, and a deleted store must not be fatal.
+
+    Without re-checking, every process that had already initialized would go on
+    believing a file that is gone was ready, and every call would fail with
+    "no such table" for the rest of that process's life.
+    """
+    db = tmp_path / "mb.db"
+    mailbox.send("claude", "hermes", "before", db_path=db)
+    db.unlink()
+    for stray in tmp_path.glob("mb.db-*"):  # WAL and shm go with it
+        stray.unlink()
+
+    sent = mailbox.send("claude", "hermes", "after", db_path=db)
+    assert isinstance(sent["message_id"], int)
+    msgs, _ = mailbox.inbox("hermes", db_path=db)
+    assert [m["body"] for m in msgs] == ["after"]
+
+
+def test_an_empty_poll_does_not_reserve_the_writer(tmp_path, monkeypatch):
+    """A consuming read takes BEGIN IMMEDIATE, and idle polls are most polls.
+
+    Taking the single writer lock only to discover there is nothing to do
+    serializes every idle session against every real writer. Asserted by
+    watching for the statement rather than by timing, which would be a race
+    dressed up as a test.
+    """
+    db = tmp_path / "mb.db"
+    mailbox.send("claude", "hermes", "for hermes", db_path=db)
+
+    started: list[str] = []
+    real_connect = mailbox._connect
+
+    def watching_connect(path):
+        conn = real_connect(path)
+        # SQLite's own statement trace, rather than wrapping the connection:
+        # execute() is read-only on a Connection, and a proxy object would be
+        # testing the proxy as much as the code.
+        conn.set_trace_callback(
+            lambda sql: started.append(sql.strip())
+            if sql.strip().upper().startswith("BEGIN")
+            else None
+        )
+        return conn
+
+    monkeypatch.setattr(mailbox, "_connect", watching_connect)
+
+    mailbox.inbox("codex", db_path=db)  # nothing addressed to codex
+    assert started == [], "an empty consuming read must not reserve the writer"
+
+    mailbox.inbox("hermes", db_path=db)  # something to consume
+    assert started == ["BEGIN IMMEDIATE"], "a real one still must"
+
+
 # ── the server tools ─────────────────────────────────────────────────────────
 
 
@@ -656,7 +880,7 @@ async def test_register_session_makes_this_session_addressable(codex_session):
         from_agent="claude", to_agent="codex:construction", message="ping"
     )
     assert before["ok"] is True
-    assert "no live session holds" in before["warning"]
+    assert "no REGISTERED holder" in before["warning"]
 
     claimed = await server.register_session(label="construction")
     assert claimed["ok"] is True
@@ -1004,14 +1228,14 @@ async def test_list_agents_marks_every_held_lane_live(monkeypatch, tmp_path):
 
     listing = await server.list_agents()
     marked = {
-        e["recipient"]: e.get("live")
+        e["recipient"]: e.get("registered_holder")
         for e in listing["observed_recipients"]
         if ":" in e["recipient"]
     }
     assert marked.get("codex:first") is True, (
         "the old name still has a live holder, so it is not a dead destination"
     )
-    assert "stale_lanes_note" not in listing
+    assert "unheld_lanes_note" not in listing
 
 
 @pytest.mark.anyio
@@ -1085,6 +1309,100 @@ def test_two_claims_in_the_same_second_keep_their_order(tmp_path):
     entry = sessions.live(db_path=db)[0]
     assert entry["lanes"] == ["codex:zebra", "codex:alpha"], "claim order, not sort order"
     assert entry["lane"] == "codex:alpha", "the most recent claim is the current name"
+
+
+@pytest.mark.anyio
+async def test_release_session_gives_a_name_back(codex_session):
+    """The correction path a mistaken claim previously had no way to undo.
+
+    Without it a name taken by typo stays owned and consumed until the process
+    exits, and nobody else can have it in the meantime.
+    """
+    from hardline_mcp import server
+
+    assert (await server.register_session(label="constrcution"))["ok"] is True
+    assert adapters.lane_suffix() == "constrcution"
+
+    released = await server.release_session(label="constrcution")
+    assert released["ok"] is True
+    assert released["released"] == "codex:constrcution"
+    assert adapters.held_lanes() == ()
+    assert sessions.holders("codex:constrcution", db_path=codex_session) == []
+
+    # And the name is genuinely free again.
+    assert (await server.register_session(label="construction"))["ok"] is True
+
+
+@pytest.mark.anyio
+async def test_release_session_cannot_evict_a_name_this_session_lacks(codex_session):
+    from hardline_mcp import server
+
+    await server.register_session(label="mine")
+    refused = await server.release_session(label="somebody-elses")
+    assert refused["ok"] is False
+    assert "does not hold" in refused["error"]
+    assert adapters.held_lanes() == ("mine",)
+
+
+@pytest.mark.anyio
+async def test_a_derived_lane_cannot_be_released(monkeypatch, tmp_path, in_session):
+    """It is not a claim; it is what this process IS."""
+    from hardline_mcp import server
+
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    refused = await server.release_session(label=in_session)
+    assert refused["ok"] is False
+    assert "derived lane" in refused["error"]
+    assert adapters.held_lanes() == (in_session,)
+
+
+@pytest.mark.anyio
+async def test_list_agents_reports_a_lane_two_sessions_both_hold(codex_session):
+    """Two live holders drain each other's mail nondeterministically.
+
+    ``claim`` refuses to create that, but a hand-set HARDLINE_AGENT_LABEL on
+    two sessions still can — so it has to be reported rather than collapsed
+    into a set where the second holder simply disappears.
+    """
+    from hardline_mcp import server
+
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available")
+
+    await server.register_session(label="construction")
+    sessions.register(
+        agent="codex",
+        lanes=["codex:construction"],
+        pid=other,
+        db_path=codex_session,
+    )
+
+    listing = await server.list_agents()
+    assert listing["contested_lanes"] == ["codex:construction"]
+    assert "drain each other" in listing["contested_lanes_note"]
+
+
+@pytest.mark.anyio
+async def test_a_failed_registration_is_reported_not_just_printed(
+    monkeypatch, codex_session
+):
+    """An unregistered session keeps consuming while everyone reads it as unheld.
+
+    Sending that only to stderr on a stdio server sends it nowhere anybody
+    looks, so the session that knows about it has to say so.
+    """
+    from hardline_mcp import server
+
+    await server.register_session(label="construction")
+
+    def explode(**kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(sessions, "register", explode)
+    listing = await server.list_agents()
+    assert "could not register itself" in listing["registration_warning"]
+    assert "database is locked" in listing["registration_warning"]
 
 
 @pytest.mark.anyio
@@ -1167,7 +1485,7 @@ async def test_send_still_persists_the_message_it_warns_about(codex_session):
     assert isinstance(result["message_id"], int)
     # Assert the warning too. Without this the test passes against an
     # implementation that warns for no lane at all, or only for some agents.
-    assert "no live session holds" in result["warning"]
+    assert "no REGISTERED holder" in result["warning"]
     assert "claude:gone.deadbeef" in result["warning"]
     kept, _ = mailbox.inbox(
         "claude:gone.deadbeef", auto_ack=False, db_path=codex_session
@@ -1195,12 +1513,12 @@ async def test_list_agents_separates_live_sessions_from_mailbox_history(
 
     assert [s["lane"] for s in listing["live_sessions"]] == ["codex:construction"]
     marked = {
-        e["recipient"]: e.get("live")
+        e["recipient"]: e.get("registered_holder")
         for e in listing["observed_recipients"]
         if ":" in e["recipient"]
     }
     assert marked == {"codex:long-gone": False, "codex:construction": True}
-    assert "1 lane(s)" in listing["stale_lanes_note"]
+    assert "1 lane(s)" in listing["unheld_lanes_note"]
 
 
 @pytest.mark.anyio
