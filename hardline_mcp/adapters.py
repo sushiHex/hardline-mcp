@@ -49,6 +49,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import procid
+
 
 def _codex_bin_root() -> Path:
     """Directory holding Codex's hash-named install subdirs
@@ -236,26 +238,84 @@ def derived_lane_suffix() -> str:
     respawns this process but keeps the session, so pending results still
     land in the same lane. A per-process random id would orphan them.
 
-    Hermes and Codex set neither variable, so they fall through to "" - which
-    is why every Codex session shared one unqualified identity and none could
-    be addressed individually. ``HARDLINE_AGENT_LABEL`` is the spawn-time fix,
-    but a Codex or Hermes registration is one STATIC env block shared by every
-    session it launches, so it cannot give two sessions different names.
-    ``claim_lane`` is the runtime answer to that.
+    Codex sets neither variable. Its MCP child gets a deliberately minimal
+    environment - 22 variables, of which the only relevant ones are whatever
+    the registration's own env block puts there. There is no session id, no
+    thread id, nothing unique. So for a Codex session the lane cannot come from
+    the environment at all, and every one of them shared the unqualified name
+    ``codex``.
 
-    Kept a pure function of the environment: it is the floor a session can
-    always fall back to, and nothing can desync it.
+    It can come from the PROCESS. Each session spawns its own hardline over
+    stdio, so the thing that spawned this one IS the session: its pid paired
+    with its creation time is unique, stable for as long as the session lives,
+    and needs no cooperation from the agent whatsoever. That is
+    ``parent_lane_suffix``.
+
+    Order: an explicit ``HARDLINE_AGENT_LABEL`` pin, then a session id the host
+    supplied, then the parent. Earlier entries are better only because they
+    survive more: a Claude session id outlives a ``/mcp`` reconnect, where the
+    parent-derived lane does not change either - the parent is the same process
+    - but a full restart is a new session under both.
     """
     label = os.environ.get("HARDLINE_AGENT_LABEL", "").strip()
     if label:
         return label
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
-    if not session_id:
+    if session_id:
+        project = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+        name = Path(project).name if project else Path.cwd().name
+        short = session_id[:8]
+        return f"{name}.{short}" if name else short
+    return parent_lane_suffix()
+
+
+# A hardline running underneath another hardline was spawned by ask_codex or
+# ask_claude: a one-shot subprocess doing a single piece of work, not a session
+# anybody can address. Giving those lanes would fill the live list with things
+# that are not sessions, which is the exact misreport the registry exists to
+# end.
+_NESTED_MARKERS = ("hardline-mcp",)
+
+
+# Computed once. The parent of a process never changes, so neither can this -
+# and the work is not trivial: identifying an ancestor enumerates every process
+# on the machine. derived_lane_suffix() is called on nearly every mailbox
+# operation, so recomputing would put a full process scan on the hot path.
+_parent_lane_cache: list[str] = []
+
+
+def parent_lane_suffix() -> str:
+    """A lane derived from the process that spawned this one, or "".
+
+    For the agents that identify themselves, this never runs. For Codex - which
+    identifies itself not at all - it is the only source of a per-session
+    identity that does not require the session to remember to ask for one.
+
+    Returns "" for a nested agent spawn, and "" wherever the platform will not
+    say who the parent is: a guessed identity is worse than none, because the
+    registry treats a lane as a destination somebody can be sent mail at.
+    """
+    if _parent_lane_cache:
+        return _parent_lane_cache[0]
+    _parent_lane_cache.append(_compute_parent_lane())
+    return _parent_lane_cache[0]
+
+
+def _compute_parent_lane() -> str:
+    parent = os.getppid()
+    if not parent:
         return ""
-    project = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
-    name = Path(project).name if project else Path.cwd().name
-    short = session_id[:8]
-    return f"{name}.{short}" if name else short
+    if any(
+        marker in name.lower()
+        for name in procid.ancestry(parent, depth=3)
+        for marker in _NESTED_MARKERS
+    ):
+        return ""
+    token = procid.session_token(parent)
+    if not token:
+        return ""
+    name = Path.cwd().name
+    return f"{name}.{token}" if name else token
 
 
 # A label becomes part of a recipient string, so it must not contain the ':'
@@ -485,7 +545,44 @@ def self_agent() -> Optional[str]:
     """
     if _declared_agent:
         return _declared_agent[0]
-    return intrinsic_agent()
+    return intrinsic_agent() or parent_agent()
+
+
+# The executable that spawns a hardline names the agent it serves. Checked as a
+# substring because the launcher is `codex.exe` on Windows and `codex` on
+# POSIX, and neither is going to be mistaken for the other.
+_AGENT_BY_LAUNCHER = ("codex", "claude", "hermes")
+
+_parent_agent_cache: list[str] = []
+
+
+def parent_agent() -> Optional[str]:
+    """Which agent spawned this hardline, judged by its executable name.
+
+    A lane is useless without an agent: ownership is over fully-qualified
+    recipients, so a session that knows it is ``construction`` but not WHICH
+    ``construction`` owns nothing. Codex supplies neither, and requiring an
+    operator to hand-write ``HARDLINE_AGENT`` into a config file to make
+    automatic registration work is not automatic.
+
+    The process that spawned this one is called ``codex.exe``. That is not a
+    guess about identity, it is a reading of it - the same source the lane
+    itself now comes from.
+
+    Cached: naming an ancestor enumerates every process, and this is consulted
+    on ownership checks.
+    """
+    if _parent_agent_cache:
+        return _parent_agent_cache[0] or None
+    found = ""
+    for name in procid.ancestry(os.getppid(), depth=3):
+        lowered = name.lower()
+        match = next((a for a in _AGENT_BY_LAUNCHER if a in lowered), None)
+        if match:
+            found = match
+            break
+    _parent_agent_cache.append(found)
+    return found or None
 
 
 def intrinsic_agent() -> Optional[str]:

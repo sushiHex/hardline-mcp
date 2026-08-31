@@ -774,6 +774,142 @@ def test_an_anonymous_process_owns_no_qualified_recipients(monkeypatch):
     assert adapters.owned_recipients("codex") == ("codex:construction",)
 
 
+# ── identity from the process, for agents that supply none ───────────────────
+
+
+@pytest.mark.anyio
+async def test_a_codex_session_is_addressable_without_being_asked(
+    monkeypatch, tmp_path, spawned_by_codex
+):
+    """The whole point: no manual call, no config edit, no restart ritual.
+
+    Codex hands its MCP child 22 environment variables and not one of them
+    identifies the session. So both halves of the identity come from the
+    process that spawned it — the lane from its instance, the agent from its
+    executable name — and registration happens at startup like Claude's.
+    """
+    from hardline_mcp import server
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+
+    assert adapters.self_agent() == "codex"
+    assert adapters.lane_for("codex") == f"codex:{spawned_by_codex}"
+
+    server._announce_self()  # what main() does before serving
+    assert [s["lane"] for s in sessions.live(db_path=db)] == [
+        f"codex:{spawned_by_codex}"
+    ]
+
+    # And it can actually take the mail, which needs the agent as well as the
+    # lane: ownership is over whole recipients.
+    mailbox.send("claude", f"codex:{spawned_by_codex}", "ping", db_path=db)
+    got = await server.inbox(agent="codex")
+    assert [m["body"] for m in got["messages"]] == ["ping"]
+    assert got["messages"][0]["acked_at"], "consumable, not merely visible"
+
+
+def test_a_nested_agent_spawn_gets_no_lane(monkeypatch):
+    """A hardline running under another hardline is a one-shot, not a session.
+
+    ask_codex and ask_claude spawn agents that load their own hardline. Giving
+    those lanes would fill the live list with subprocesses nobody can address —
+    the same misreport the registry exists to end.
+    """
+    monkeypatch.setattr(adapters, "_parent_lane_cache", [])
+    monkeypatch.setattr(procid, "session_token", lambda pid: "a1b2c3d4")
+    monkeypatch.setattr(
+        procid, "ancestry", lambda pid, depth=4: ["codex.exe", "hardline-mcp.exe"]
+    )
+    assert adapters.derived_lane_suffix() == ""
+
+    # The same session, launched from a shell instead, is a real one.
+    monkeypatch.setattr(adapters, "_parent_lane_cache", [])
+    monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4: ["codex.exe", "pwsh.exe"])
+    assert adapters.derived_lane_suffix().endswith(".a1b2c3d4")
+
+
+def test_naming_an_ancestor_stays_off_the_hot_path(monkeypatch):
+    """Identifying a parent enumerates every process on the machine.
+
+    ``derived_lane_suffix`` is consulted on nearly every mailbox operation, so
+    doing that work per call put a full process scan on the hot path — which is
+    exactly what it did, until measured.
+    """
+    scans = []
+    monkeypatch.setattr(adapters, "_parent_lane_cache", [])
+    monkeypatch.setattr(adapters, "_parent_agent_cache", [])
+    monkeypatch.setattr(procid, "session_token", lambda pid: "a1b2c3d4")
+    monkeypatch.setattr(
+        procid,
+        "ancestry",
+        lambda pid, depth=4: (scans.append(pid), ["codex.exe", "pwsh.exe"])[1],
+    )
+
+    for _ in range(5):
+        adapters.parent_lane_suffix()
+        adapters.parent_agent()
+    assert len(scans) == 2, f"one scan per question, not per call (got {len(scans)})"
+
+
+def test_the_parent_names_the_agent(monkeypatch):
+    for launcher, expected in [
+        ("codex.exe", "codex"),
+        ("claude.exe", "claude"),
+        ("hermes.exe", "hermes"),
+    ]:
+        monkeypatch.setattr(adapters, "_parent_agent_cache", [])
+        monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4, _l=launcher: [_l])
+        assert adapters.parent_agent() == expected
+
+    monkeypatch.setattr(adapters, "_parent_agent_cache", [])
+    monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4: ["pwsh.exe", "explorer.exe"])
+    assert adapters.parent_agent() is None, "an unrecognised launcher is not a guess"
+
+
+def test_session_token_identifies_an_instance_not_a_slot():
+    """Eight hex characters, stable, and never inherited by a reused pid."""
+    mine = procid.session_token(os.getpid())
+    if mine is None:
+        pytest.skip("this platform does not expose a process creation token")
+    assert len(mine) == 8
+    assert procid.session_token(os.getpid()) == mine, "stable across calls"
+    assert procid.session_token(_DEAD_PID) is None
+
+    other = os.getppid()
+    if other not in (0, os.getpid()) and procid.pid_alive(other):
+        assert procid.session_token(other) != mine
+
+
+def test_session_token_changes_when_a_pid_is_reused(monkeypatch):
+    """The creation time must be IN the hash, not merely consulted.
+
+    Everything above passes against a token hashed from the pid alone — same
+    length, stable, different between different pids. What it would not
+    survive is the case the token exists for: the OS handing that pid to a new
+    process, whose session would otherwise inherit the old one's lane and mail.
+    """
+    monkeypatch.setattr(procid, "process_key", lambda pid: "first-instance")
+    first = procid.session_token(4242)
+    monkeypatch.setattr(procid, "process_key", lambda pid: "second-instance")
+    second = procid.session_token(4242)
+    assert first and second and first != second, (
+        "same pid, different process, so it must be a different session"
+    )
+
+
+def test_an_explicit_pin_and_a_supplied_id_both_beat_the_parent(monkeypatch):
+    """Order matters: a host that names its session knows better than we do."""
+    monkeypatch.setattr(adapters, "_parent_lane_cache", ["from-parent.a1b2c3d4"])
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "1a2b3c4d-dead-beef-0000-000000000000")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "C:/Users/x/repos/fonts")
+    assert adapters.derived_lane_suffix() == "fonts.1a2b3c4d"
+
+    monkeypatch.setenv("HARDLINE_AGENT_LABEL", "pinned")
+    assert adapters.derived_lane_suffix() == "pinned"
+
+
 def test_self_agent_is_none_when_nothing_identifies_the_session(monkeypatch):
     """Codex and Hermes hand over nothing, and a guess would be a lie."""
     assert adapters.self_agent() is None

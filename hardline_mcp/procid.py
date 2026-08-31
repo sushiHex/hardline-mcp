@@ -18,6 +18,7 @@ creation-time token beside it and compare before acting.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from typing import Optional
 
@@ -64,6 +65,17 @@ def _kernel32():
         ctypes.POINTER(wintypes.FILETIME),
     )
     k.GetProcessTimes.restype = wintypes.BOOL
+    k.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    k.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    k.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k.Process32First.restype = wintypes.BOOL
+    k.Process32Next.restype = wintypes.BOOL
     _kernel32_cache.append(k)
     return k
 
@@ -277,6 +289,124 @@ def open_failure_state(err: int) -> str:
     if err == _ERROR_INVALID_PARAMETER:
         return DEAD
     return UNKNOWN
+
+
+def image_name(pid: int) -> Optional[str]:
+    """The executable name of ``pid``, or None if it will not say."""
+    if not pid or pid <= 0:
+        return None
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = _kernel32()
+            if kernel32 is None:
+                return None
+            handle = kernel32.OpenProcess(
+                _PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if not handle:
+                return None
+            try:
+                size = wintypes.DWORD(1024)
+                buf = ctypes.create_unicode_buffer(size.value)
+                if not kernel32.QueryFullProcessImageNameW(
+                    handle, 0, buf, ctypes.byref(size)
+                ):
+                    return None
+                return os.path.basename(buf.value)
+            finally:
+                kernel32.CloseHandle(handle)
+        with open(f"/proc/{pid}/comm", "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except Exception:  # noqa: BLE001 - a name is best effort, never fatal
+        return None
+
+
+def parent_pid_of(pid: int) -> Optional[int]:
+    """The parent of ``pid``. Not this process - see ``os.getppid`` for that."""
+    if not pid or pid <= 0:
+        return None
+    try:
+        if os.name == "nt":
+            return _windows_parent(pid)
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace") as fh:
+            fields = fh.read().rpartition(")")[2].split()
+        return int(fields[1]) if len(fields) > 1 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _windows_parent(pid: int) -> Optional[int]:
+    """Parent pid via a toolhelp snapshot - the dependency-free way to ask."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _ENTRY(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    kernel32 = _kernel32()
+    if kernel32 is None:
+        return None
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if snapshot == -1:
+        return None
+    try:
+        entry = _ENTRY()
+        entry.dwSize = ctypes.sizeof(_ENTRY)
+        if not kernel32.Process32First(snapshot, ctypes.byref(entry)):
+            return None
+        while True:
+            if entry.th32ProcessID == pid:
+                return int(entry.th32ParentProcessID)
+            if not kernel32.Process32Next(snapshot, ctypes.byref(entry)):
+                return None
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+
+def ancestry(pid: Optional[int] = None, depth: int = 4) -> list[str]:
+    """Image names walking up from ``pid``, nearest ancestor first."""
+    current = os.getppid() if pid is None else pid
+    names: list[str] = []
+    seen: set[int] = set()
+    for _ in range(depth):
+        if not current or current in seen:
+            break
+        seen.add(current)
+        name = image_name(current)
+        if not name:
+            break
+        names.append(name)
+        current = parent_pid_of(current) or 0
+    return names
+
+
+def session_token(pid: int) -> Optional[str]:
+    """A short, stable identifier for the process INSTANCE at ``pid``.
+
+    Pairs the pid with its creation time before hashing, so a reused pid does
+    not inherit the previous process's identifier. Eight hex characters, to
+    match the shape of the session-id prefix Claude Code supplies.
+    """
+    if not pid or pid <= 0:
+        return None
+    token = process_key(pid)
+    if token is None:
+        return None
+    return hashlib.sha256(f"{pid}:{token}".encode()).hexdigest()[:8]
 
 
 def instance_alive(pid: Optional[int], expect_key: Optional[str]) -> bool:

@@ -92,16 +92,28 @@ unqualified `claude` (so broadcasts still arrive), and `ack` refuses messages
 belonging to another session's lane. Keying on the session id rather than the
 process means a `/mcp` reconnect doesn't orphan in-flight results.
 
-Hermes and Codex set neither variable, so a *derived* lane is not available to
-them — see below.
+Codex sets neither variable. Its MCP child gets a deliberately minimal
+environment — 22 variables, none of them a session id — so for Codex the lane
+cannot come from the environment at all.
 
-### Naming a session so it can be addressed
+It comes from the **process** instead. Each session spawns its own hardline over
+stdio, so the thing that spawned it *is* the session: its pid paired with its
+creation time is unique, stable for the session's life, and needs no
+cooperation from the agent. The agent name comes from the same place — the
+launcher is called `codex.exe`. A Codex terminal session therefore registers
+itself at startup exactly as a Claude one does, with no call and no config.
 
-A Codex or Hermes MCP registration is one **static** env block shared by every
-session it launches, so `HARDLINE_AGENT_LABEL` cannot give two of them
-different names. Without a name they all share the unqualified `codex` /
-`hermes` identity and no individual session can be reached. `register_session`
-is the runtime answer:
+Two cases deliberately get no lane. A hardline running underneath **another**
+hardline was spawned by `ask_codex`/`ask_claude` — a one-shot doing a single
+piece of work, not a session anybody can address. And a launcher whose name
+matches no known agent is left alone rather than guessed at.
+
+Order of precedence: `HARDLINE_AGENT_LABEL` if pinned, then a session id the
+host supplied, then the parent process.
+
+### Naming a session yourself
+
+`register_session` overrides the derived name when you want a human one:
 
 ```python
 register_session(label="construction", agent="codex")
