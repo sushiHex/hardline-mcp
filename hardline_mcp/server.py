@@ -635,8 +635,10 @@ async def list_agents() -> dict:
             "'<agent>' addresses everyone with that name; '<agent>:<lane>' "
             "addresses one session. inbox('<agent>') reads the bare name AND "
             "every lane you hold. Only a lane's holder may consume a "
-            "lane-qualified message — so a lane with no live holder is a "
-            "message nobody can ever read."
+            "lane-qualified message, so a lane whose holder is really gone can "
+            "be read by nobody but that same name returning. 'No registered "
+            "holder' is not proof of that: a session on older code never "
+            "registers at all."
         ),
     }
     if unheld:
