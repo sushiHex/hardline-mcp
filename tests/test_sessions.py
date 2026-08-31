@@ -852,6 +852,32 @@ def test_naming_an_ancestor_stays_off_the_hot_path(monkeypatch):
     assert len(scans) == 2, f"one scan per question, not per call (got {len(scans)})"
 
 
+def test_the_parent_walk_agrees_with_the_os_on_this_platform():
+    """The real reads, unpatched, on whatever platform is running them.
+
+    Every other test here patches ``ancestry``, which proves the logic above it
+    and nothing about the two OS-specific implementations underneath: a
+    toolhelp snapshot on Windows, ``/proc`` on Linux. Neither had been
+    exercised for real, and the Linux one runs nowhere in this project — only
+    in CI.
+
+    ``os.getppid()`` is an independent answer to the same question, so making
+    the two agree tests the implementation rather than restating it.
+    """
+    me = os.getpid()
+    assert procid.image_name(me), "this process must at least be able to name itself"
+
+    parent = os.getppid()
+    if not parent or parent == me:
+        pytest.skip("no distinct parent to check against")
+
+    assert procid.parent_pid_of(me) == parent, (
+        "the parent walk must agree with os.getppid()"
+    )
+    assert procid.image_name(parent), "the parent must be nameable"
+    assert procid.ancestry(parent, depth=2)[0] == procid.image_name(parent)
+
+
 def test_the_parent_names_the_agent(monkeypatch):
     for launcher, expected in [
         ("codex.exe", "codex"),
