@@ -23,6 +23,7 @@ import functools
 import json
 import os
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -236,6 +237,20 @@ def _announce_self(agent: str | None = None) -> str | None:
     if not agent:
         return None
     lane = adapters.lane_for(agent)
+    with _identity_lock:
+        return _announce_locked(agent, lane)
+
+
+# Held by the two operations that can disagree about what this process owns:
+# the heartbeat, which reads the held set and writes it, and release, which
+# takes a name out of it. Registration is additive precisely so a stale
+# heartbeat cannot delete a lane - which means a stale heartbeat can instead
+# RESURRECT one that release has just given up. Serializing the pair is what
+# makes both safe; making registration additive only fixed one direction.
+_identity_lock = threading.Lock()
+
+
+def _announce_locked(agent: str, lane: str) -> str | None:
     try:
         # EVERY held lane, not just the current name. The process consumes mail
         # for all of them, and a registry that recorded only the newest would
@@ -263,6 +278,29 @@ def _announce_self(agent: str | None = None) -> str | None:
 # Last registration error, surfaced by list_agents and server_info. One slot:
 # the current state is what matters, not a log.
 _registration_failure: list[str] = []
+
+
+# Seconds between re-announcements on the polling path. Long enough that a
+# fleet of pollers is not a fleet of writers; short enough that a rebuilt store
+# repopulates before anybody's lane is given away.
+_HEARTBEAT_S = 60.0
+_last_heartbeat: list[float] = []
+
+
+def _heartbeat() -> None:
+    """Re-announce this session, at most every ``_HEARTBEAT_S``.
+
+    Registration is one small UPDATE and this is throttled in memory, so a poll
+    costs a clock read almost every time. The exception is the case it exists
+    for: a store rebuilt underneath the fleet, where this is what puts everyone
+    back on the map without waiting for them to restart.
+    """
+    now = time.monotonic()
+    if _last_heartbeat and now - _last_heartbeat[-1] < _HEARTBEAT_S:
+        return
+    _last_heartbeat.append(now)
+    del _last_heartbeat[:-1]
+    _announce_self()
 
 
 def _last_registration_failure() -> str | None:
@@ -509,6 +547,12 @@ async def inbox(
         agents = [agent] + [
             lane for lane in adapters.owned_recipients(agent) if lane != agent
         ]
+    # A throttled heartbeat on the polling path, because startup and
+    # list_agents are not enough: if the store is rebuilt underneath the fleet,
+    # every session that does neither stays invisible - and an invisible
+    # session's lane is immediately claimable by somebody else. Polling is the
+    # one thing they all keep doing.
+    await _in_thread(_heartbeat)
     msgs, remaining = await _in_thread(
         mailbox.inbox,
         agents,
@@ -660,6 +704,21 @@ async def list_agents() -> dict:
     return result
 
 
+def _release_locked(label: str, lane: str | None) -> None:
+    """Give up a name locally and durably, as one step.
+
+    Both halves under ``_identity_lock``, and the durable delete LAST. Dropping
+    local ownership first and then awaiting the delete leaves a window in which
+    a heartbeat re-adds the row this call is about to remove - and because
+    registration is additive, nothing later takes it back out. The lane would
+    then be advertised and unclaimable while this process no longer reads it.
+    """
+    with _identity_lock:
+        adapters.release_lane(label)
+        if lane:
+            sessions.drop_lane(lane)
+
+
 @mcp.tool()
 async def release_session(label: str) -> dict:
     """Give up a name this session claimed, so somebody else can have it.
@@ -695,9 +754,7 @@ async def release_session(label: str) -> dict:
         }
     agent = adapters.self_agent()
     lane = f"{agent}:{label}" if agent else None
-    adapters.release_lane(label)
-    if lane:
-        await _in_thread(sessions.drop_lane, lane)
+    await _in_thread(_release_locked, label, lane)
     return {
         "ok": True,
         "released": lane or label,
@@ -748,6 +805,13 @@ def _code_revision() -> str | None:
 
     Read straight from .git rather than by shelling out: this is a diagnostic
     on a stdio server, and it must not cost a subprocess or ever raise.
+
+    Captured at IMPORT (see below), not on first use. Computing it lazily
+    reported the tree as it stood when somebody first asked - so a process
+    spawned on one revision and first queried after a checkout confidently
+    named the wrong one, and then cached that. Under an editable install, where
+    telling two running revisions apart is the entire point, a lazily-read
+    answer is worse than none.
     """
     if _revision_cache:
         return _revision_cache[0] or None
@@ -805,6 +869,11 @@ async def server_info() -> dict:
         # The version cannot tell two of these processes apart; the revision
         # can. Several incompatible ones run against one store at a time.
         "code_revision": revision,
+        # A comment above _registration_failure said this was reported here.
+        # It was not - only list_agents consulted it - so the claim was simply
+        # false, and this is the tool an operator reaches for when a session is
+        # behaving as though it does not exist.
+        "registration_warning": _last_registration_failure(),
         "schema_version": mailbox.SCHEMA_VERSION,
         "module_path": str(Path(mailbox.__file__).resolve()),
         "db_path": str(mailbox._resolve_db(None)),
@@ -1417,6 +1486,13 @@ def _unregister_self() -> None:
         sessions.unregister()
     except Exception:  # noqa: BLE001 - shutdown must not raise
         pass
+
+
+# Capture the revision NOW, while it still describes the tree this process was
+# spawned from. Two small file reads, once, at import. Left until first use it
+# would report whatever the working tree said when somebody happened to ask -
+# which under an editable install is exactly the question it exists to answer.
+_code_revision()
 
 
 if __name__ == "__main__":

@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .mailbox import _connect, _default_now, _iso, _resolve_db
-from .procid import instance_alive, pid_alive, process_key
+from .procid import DEAD, instance_alive, instance_state, pid_alive, process_key
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -261,7 +261,12 @@ def _resolve_lost(conn, row, now_fn: Callable[[], datetime]) -> dict:
     job = _row_to_dict(row)
     if job["state"] not in ACTIVE_STATES:
         return job
-    if pid_alive(job["owner_pid"]):
+    # instance_state, not pid_alive: an owner that merely could not be PROBED
+    # is not a dead owner. Declaring it lost writes a terminal state onto work
+    # that may still be running, and the session registry then reads that
+    # state as "nothing is coming back for this lane" and lets somebody claim
+    # it out from under a live consumer.
+    if instance_state(job["owner_pid"], None) != DEAD:
         return job
     with conn:
         cur = conn.execute(
@@ -338,7 +343,7 @@ def _sweep_lost(conn, now_fn: Callable[[], datetime]) -> None:
             f"SELECT DISTINCT owner_pid FROM jobs WHERE state IN ({marks})", active
         ).fetchall()
     ]
-    dead = [pid for pid in owners if not pid_alive(pid)]
+    dead = [pid for pid in owners if instance_state(pid, None) == DEAD]
     if not dead:
         return
     with conn:

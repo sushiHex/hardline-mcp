@@ -197,6 +197,40 @@ def test_only_no_such_process_reads_as_death():
     assert procid.open_failure_state(0) == procid.UNKNOWN, "unrecognised is not dead"
 
 
+def test_only_a_signalled_handle_reads_as_an_exit(monkeypatch):
+    """The other half of the same judgement, on the WAIT rather than the open.
+
+    A handle opened successfully still has three outcomes. Only WAIT_OBJECT_0
+    means the process exited; WAIT_TIMEOUT means it is running; WAIT_FAILED
+    means the probe itself failed. Folding the third into "dead" makes a broken
+    probe indistinguishable from a real answer, which is the whole reason
+    UNKNOWN exists — and the open-failure test above cannot reach this branch.
+    """
+    if os.name != "nt":
+        pytest.skip("the WAIT branch is the Windows probe")
+
+    class _FakeKernel:
+        def __init__(self, waited):
+            self._waited = waited
+
+        def OpenProcess(self, *a):
+            return 1234  # a truthy handle
+
+        def WaitForSingleObject(self, handle, ms):
+            return self._waited
+
+        def CloseHandle(self, handle):
+            return True
+
+    for waited, expected in (
+        (procid._WAIT_TIMEOUT, procid.ALIVE),
+        (procid._WAIT_OBJECT_0, procid.DEAD),
+        (0xFFFFFFFF, procid.UNKNOWN),  # WAIT_FAILED
+    ):
+        monkeypatch.setattr(procid, "_kernel32", lambda _w=waited: _FakeKernel(_w))
+        assert procid._pid_state(4242) == expected, f"WaitForSingleObject -> {waited:#x}"
+
+
 def test_instance_alive_allows_an_unrecorded_identity(tmp_path):
     """A row written where the platform would not say must not read as dead.
 
@@ -247,6 +281,151 @@ def test_register_does_not_delete_lanes_outside_its_snapshot(tmp_path):
     assert sessions.holders("codex:b", db_path=db), (
         "a lane this process still consumes must keep its holder"
     )
+
+
+def test_registration_will_not_co_register_a_lane_someone_live_holds(tmp_path):
+    """The automatic path never went through ``claim``, so it had no exclusion.
+
+    A derived lane arrives via ``register``, and the key is (pid, lane) rather
+    than lane — so two processes deriving the same name both became consumers
+    of it, and the only thing that noticed was a report after the fact. Every
+    exclusivity check written for ``claim`` was simply absent from the path
+    that most sessions actually take.
+    """
+    db = tmp_path / "mb.db"
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available to hold the lane")
+
+    sessions.register(agent="codex", lanes=["codex:shared"], pid=other, db_path=db)
+    result = sessions.register(agent="codex", lanes=["codex:shared"], db_path=db)
+
+    assert result["lanes"] == [], "must not join a lane that already has a holder"
+    assert result["contested"] == ["codex:shared"]
+    assert [h["pid"] for h in sessions.holders("codex:shared", db_path=db)] == [other]
+
+
+def test_registration_still_refreshes_a_lane_this_process_already_holds(tmp_path):
+    """Its own row is not a conflict, or every heartbeat would refuse itself."""
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lanes=["codex:mine"], db_path=db)
+    again = sessions.register(agent="codex", lanes=["codex:mine"], db_path=db)
+    assert again["lanes"] == ["codex:mine"]
+    assert again["contested"] == []
+
+
+def test_a_legacy_holder_is_visible_to_the_new_table(tmp_path):
+    """Renaming the table bought a split-brain, and this closes half of it.
+
+    A process on older code writes `sessions` and reads only `sessions`. Unless
+    ownership questions consult both, each cohort hands out lanes the other is
+    holding — the failure the registry exists to prevent, reintroduced by the
+    fix for a different one.
+    """
+    db = tmp_path / "mb.db"
+    other = os.getppid()
+    if other in (0, os.getpid()) or not procid.pid_alive(other):
+        pytest.skip("no second live pid available")
+
+    sessions.register(agent="codex", lanes=["codex:x"], db_path=db)  # builds schema
+    with mailbox._connect(db) as conn:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS sessions (pid INTEGER PRIMARY KEY,"
+                " agent TEXT, lane TEXT, label TEXT, process_key TEXT, cwd TEXT,"
+                " started_at TEXT, last_seen TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO sessions (pid, agent, lane, label, process_key, cwd,"
+                " started_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (other, "codex", "codex:legacy", None, procid.process_key(other),
+                 "old", "2026-08-31T00:00:00Z", "2026-08-31T00:00:00Z"),
+            )
+
+    assert [h["pid"] for h in sessions.holders("codex:legacy", db_path=db)] == [other]
+    refused = sessions.claim(agent="codex", label="legacy", db_path=db)
+    assert refused["ok"] is False, "a lane an older process holds is not free"
+
+
+def test_a_holder_reports_which_kind_of_live_it_is(tmp_path, monkeypatch):
+    """UNKNOWN was folded into "live" and then reported as a live session.
+
+    That is the same overclaim as telling a sender nothing can consume their
+    message: the honest word is that the process could not be probed, and a
+    caller could not recover it from a boolean.
+    """
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lane="codex:a", db_path=db)
+    assert sessions.live(db_path=db)[0]["liveness"] == procid.ALIVE
+
+    monkeypatch.setattr(sessions, "_state", lambda row: procid.UNKNOWN)
+    assert sessions.live(db_path=db)[0]["liveness"] == procid.UNKNOWN
+    assert sessions.holders("codex:a", db_path=db)[0]["liveness"] == procid.UNKNOWN
+
+
+def test_a_spawned_agent_does_not_inherit_this_sessions_identity(monkeypatch):
+    """A spawned agent loads its own hardline, which reads what it inherited.
+
+    The ancestry guard cannot catch that: both identity variables are consulted
+    BEFORE it runs, so the child would register as a second consumer of the
+    lane belonging to the session that dispatched it — and drain the very mail
+    it was sent to help with.
+    """
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured.update(kwargs.get("env") or {})
+        return {"ok": True}
+
+    monkeypatch.setattr(adapters, "_run_cmd", fake_run)
+    monkeypatch.setenv("HARDLINE_AGENT_LABEL", "construction")
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "1a2b3c4d-dead-beef")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "C:/repos/fonts")
+    monkeypatch.setenv("HARDLINE_KEEP_ME", "yes")
+
+    adapters._run_agent_cmd("codex", ["codex", "exec", "hi"])
+
+    for leaked in (
+        "HARDLINE_AGENT_LABEL",
+        "HARDLINE_AGENT",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_PROJECT_DIR",
+    ):
+        assert leaked not in captured, f"{leaked} would name the child as this session"
+    assert captured.get("HARDLINE_KEEP_ME") == "yes", "only identity is stripped"
+
+
+def test_an_unprobeable_job_owner_is_not_declared_lost(tmp_path, monkeypatch):
+    """`lost` is read by the claim guard as "nothing is coming back for this lane".
+
+    Writing it because a probe FAILED — rather than because the owner died —
+    hands somebody else a lane a live consumer is still working against.
+    """
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    job_id = jobs.create(
+        agent="codex",
+        requester="codex:x",
+        label=None,
+        request={"prompt_chars": 1},
+        db_path=db,
+    )
+    with mailbox._connect(db) as conn:
+        with conn:
+            conn.execute(
+                "UPDATE jobs SET owner_pid = ?, state = 'running' WHERE job_id = ?",
+                (_DEAD_PID, job_id),
+            )
+
+    monkeypatch.setattr(jobs, "instance_state", lambda pid, key=None: procid.UNKNOWN)
+    assert jobs.get(job_id, db_path=db)["state"] == "running", (
+        "an unanswerable probe is not a death"
+    )
+
+    monkeypatch.setattr(jobs, "instance_state", lambda pid, key=None: procid.DEAD)
+    assert jobs.get(job_id, db_path=db)["state"] == "lost"
 
 
 def test_unregister_removes_the_row(tmp_path):
@@ -816,7 +995,7 @@ def test_a_nested_agent_spawn_gets_no_lane(monkeypatch):
     those lanes would fill the live list with subprocesses nobody can address —
     the same misreport the registry exists to end.
     """
-    monkeypatch.setattr(adapters, "_parent_lane_cache", [])
+    monkeypatch.setattr(adapters, "_session_anchor", [])
     monkeypatch.setattr(procid, "session_token", lambda pid: "a1b2c3d4")
     monkeypatch.setattr(
         procid, "ancestry", lambda pid, depth=4: ["codex.exe", "hardline-mcp.exe"]
@@ -824,7 +1003,7 @@ def test_a_nested_agent_spawn_gets_no_lane(monkeypatch):
     assert adapters.derived_lane_suffix() == ""
 
     # The same session, launched from a shell instead, is a real one.
-    monkeypatch.setattr(adapters, "_parent_lane_cache", [])
+    monkeypatch.setattr(adapters, "_session_anchor", [])
     monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4: ["codex.exe", "pwsh.exe"])
     assert adapters.derived_lane_suffix().endswith(".a1b2c3d4")
 
@@ -837,8 +1016,7 @@ def test_naming_an_ancestor_stays_off_the_hot_path(monkeypatch):
     exactly what it did, until measured.
     """
     scans = []
-    monkeypatch.setattr(adapters, "_parent_lane_cache", [])
-    monkeypatch.setattr(adapters, "_parent_agent_cache", [])
+    monkeypatch.setattr(adapters, "_session_anchor", [])
     monkeypatch.setattr(procid, "session_token", lambda pid: "a1b2c3d4")
     monkeypatch.setattr(
         procid,
@@ -849,7 +1027,11 @@ def test_naming_an_ancestor_stays_off_the_hot_path(monkeypatch):
     for _ in range(5):
         adapters.parent_lane_suffix()
         adapters.parent_agent()
-    assert len(scans) == 2, f"one scan per question, not per call (got {len(scans)})"
+    assert len(scans) == 1, (
+        f"ONE scan for both answers, not one each and not one per call "
+        f"(got {len(scans)}). Two walks could also describe two different "
+        f"processes, which is why they are now a single anchor."
+    )
 
 
 def test_the_parent_walk_agrees_with_the_os_on_this_platform():
@@ -884,13 +1066,25 @@ def test_the_parent_names_the_agent(monkeypatch):
         ("claude.exe", "claude"),
         ("hermes.exe", "hermes"),
     ]:
-        monkeypatch.setattr(adapters, "_parent_agent_cache", [])
+        monkeypatch.setattr(adapters, "_session_anchor", [])
         monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4, _l=launcher: [_l])
         assert adapters.parent_agent() == expected
 
-    monkeypatch.setattr(adapters, "_parent_agent_cache", [])
+    monkeypatch.setattr(adapters, "_session_anchor", [])
     monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4: ["pwsh.exe", "explorer.exe"])
     assert adapters.parent_agent() is None, "an unrecognised launcher is not a guess"
+
+    # Names that only EXACT matching rejects. Substring matching accepted all
+    # of these, and where a name contained two of the words it handed the
+    # identity to whichever happened to be tested first.
+    for impostor in ("claude-backup.exe", "notcodex.exe", "hermes-monitor.exe"):
+        monkeypatch.setattr(adapters, "_session_anchor", [])
+        monkeypatch.setattr(
+            procid, "ancestry", lambda pid, depth=4, _i=impostor: [_i]
+        )
+        assert adapters.parent_agent() is None, (
+            f"{impostor} merely CONTAINS an agent name; it is not that agent"
+        )
 
 
 def test_session_token_identifies_an_instance_not_a_slot():
@@ -926,7 +1120,9 @@ def test_session_token_changes_when_a_pid_is_reused(monkeypatch):
 
 def test_an_explicit_pin_and_a_supplied_id_both_beat_the_parent(monkeypatch):
     """Order matters: a host that names its session knows better than we do."""
-    monkeypatch.setattr(adapters, "_parent_lane_cache", ["from-parent.a1b2c3d4"])
+    monkeypatch.setattr(
+        adapters, "_session_anchor", [{"lane": "from-parent.a1b2c3d4", "agent": "claude"}]
+    )
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "1a2b3c4d-dead-beef-0000-000000000000")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", "C:/Users/x/repos/fonts")
@@ -975,6 +1171,117 @@ def test_the_store_is_rebuilt_after_it_is_deleted(tmp_path):
     assert isinstance(sent["message_id"], int)
     msgs, _ = mailbox.inbox("hermes", db_path=db)
     assert [m["body"] for m in msgs] == ["after"]
+
+
+def test_an_empty_recreated_store_is_rebuilt(tmp_path):
+    """`exists()` is not `initialized`.
+
+    Between the existence check and the connect that follows it, sqlite3 can
+    CREATE the file — so a deletion landing in that window left a zero-byte
+    database that exists, is therefore never re-initialized, and fails "no such
+    table" for the rest of every cached process's life.
+    """
+    db = tmp_path / "mb.db"
+    mailbox.send("claude", "hermes", "before", db_path=db)
+    for stray in tmp_path.glob("mb.db*"):
+        stray.unlink()
+    db.touch()  # exactly what a racing connect leaves behind
+    assert db.stat().st_size == 0
+
+    sent = mailbox.send("claude", "hermes", "after", db_path=db)
+    assert isinstance(sent["message_id"], int)
+
+
+@pytest.mark.anyio
+async def test_polling_puts_a_session_back_on_the_map(monkeypatch, codex_session):
+    """Startup and list_agents are not enough when the store is rebuilt.
+
+    Every session that does neither stays invisible — and an invisible
+    session's lane is immediately claimable by somebody else. Polling is the
+    one thing they all keep doing.
+    """
+    from hardline_mcp import server
+
+    await server.register_session(label="construction")
+    assert sessions.holders("codex:construction", db_path=codex_session)
+
+    sessions.unregister(db_path=codex_session)  # as a rebuilt store would leave it
+    assert sessions.holders("codex:construction", db_path=codex_session) == []
+
+    monkeypatch.setattr(server, "_last_heartbeat", [])  # let it fire now
+    await server.inbox(agent="codex")
+
+    assert sessions.holders("codex:construction", db_path=codex_session), (
+        "a poll must put this session back on the map"
+    )
+
+
+@pytest.mark.anyio
+async def test_server_info_reports_a_failed_registration(monkeypatch, codex_session):
+    """The comment claimed server_info surfaced this. It never did.
+
+    This is the tool an operator reaches for when a session behaves as though
+    it does not exist, which is exactly what a failed registration causes.
+    """
+    from hardline_mcp import server
+
+    await server.register_session(label="construction")
+
+    def explode(**kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(sessions, "register", explode)
+    monkeypatch.setattr(server, "_last_heartbeat", [])
+    await server.list_agents()
+
+    info = await server.server_info()
+    assert "could not register itself" in (info["registration_warning"] or "")
+
+
+def test_release_is_serialised_against_the_heartbeat(monkeypatch, tmp_path):
+    """Release and the heartbeat disagree about what this process owns.
+
+    Registration is additive precisely so a stale heartbeat cannot DELETE a
+    lane — which means a stale heartbeat can instead resurrect one that release
+    has just given up, and nothing takes it back out. The lane is then
+    advertised and unclaimable while this process no longer reads it.
+    """
+    from hardline_mcp import server
+
+    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setattr(
+        adapters, "_session_anchor", [{"lane": "construction.a1", "agent": "codex"}]
+    )
+    adapters.claim_lane("second")
+    server._announce_self()
+    assert sessions.holders("codex:second", db_path=tmp_path / "mb.db")
+
+    # Force the interleaving. Asserting the ORDER of the two halves proves
+    # nothing — removing the lock leaves that order intact. What the lock
+    # actually prevents is a heartbeat that snapshotted the held set BEFORE
+    # the release and writes it back AFTER, which additive registration then
+    # never undoes.
+    db = tmp_path / "mb.db"
+    real_register = sessions.register
+    snapshotted = threading.Event()
+
+    def slow_register(**kwargs):
+        snapshotted.set()
+        time.sleep(0.5)  # release happens in here, if it can
+        return real_register(**kwargs)
+
+    monkeypatch.setattr(sessions, "register", slow_register)
+    beat = threading.Thread(target=server._announce_self)
+    beat.start()
+    snapshotted.wait(timeout=5)
+
+    server._release_locked("second", "codex:second")
+    beat.join(timeout=10)
+
+    assert sessions.holders("codex:second", db_path=db) == [], (
+        "a heartbeat mid-flight must not resurrect a name just given up"
+    )
+    assert "second" not in adapters.held_lanes()
 
 
 def test_an_empty_poll_does_not_reserve_the_writer(tmp_path, monkeypatch):
@@ -1533,12 +1840,30 @@ async def test_list_agents_reports_a_lane_two_sessions_both_hold(codex_session):
         pytest.skip("no second live pid available")
 
     await server.register_session(label="construction")
-    sessions.register(
-        agent="codex",
-        lanes=["codex:construction"],
-        pid=other,
-        db_path=codex_session,
-    )
+    # Written straight into the table, because `register` now REFUSES to
+    # co-register a lane a live process already holds. Two holders can still
+    # arise — a process on older code writing the legacy table, or two
+    # registrations racing the same check — so the reporting still has a job,
+    # but it can no longer be reached through the front door.
+    with mailbox._connect(codex_session) as conn:
+        with conn:
+            conn.execute(
+                "INSERT INTO agent_sessions (pid, lane, agent, label, process_key,"
+                " cwd, started_at, last_seen, claimed_at, seq)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    other,
+                    "codex:construction",
+                    "codex",
+                    None,
+                    procid.process_key(other),
+                    "elsewhere",
+                    "2026-08-31T00:00:00Z",
+                    "2026-08-31T00:00:00Z",
+                    "2026-08-31T00:00:00Z",
+                    1,
+                ),
+            )
 
     listing = await server.list_agents()
     assert listing["contested_lanes"] == ["codex:construction"]

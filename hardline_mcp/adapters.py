@@ -274,48 +274,65 @@ def derived_lane_suffix() -> str:
 # anybody can address. Giving those lanes would fill the live list with things
 # that are not sessions, which is the exact misreport the registry exists to
 # end.
-_NESTED_MARKERS = ("hardline-mcp",)
+_NESTED_LAUNCHERS = frozenset({"hardline-mcp", "hardline_mcp"})
 
 
-# Computed once. The parent of a process never changes, so neither can this -
-# and the work is not trivial: identifying an ancestor enumerates every process
-# on the machine. derived_lane_suffix() is called on nearly every mailbox
-# operation, so recomputing would put a full process scan on the hot path.
-_parent_lane_cache: list[str] = []
+# ONE anchor, computed once, from which both the lane and the agent are read.
+#
+# Two caches filled by two separate process walks was a splice waiting to
+# happen: the lane hashed getppid() while the agent could match any of three
+# ancestors, so a wrapper made them describe different processes, and a parent
+# exiting between the two walks made them describe different INSTANCES. The
+# work is also not trivial - naming an ancestor enumerates every process on the
+# machine - and this is read on nearly every mailbox operation.
+_session_anchor: list[dict] = []
+
+
+def _anchor() -> dict:
+    """Identity of the process that spawned this one: {lane, agent}.
+
+    Empty strings for either where the answer is not knowable. A guessed
+    identity is worse than none, because the registry treats a lane as a
+    destination somebody can be sent mail at.
+    """
+    if _session_anchor:
+        return _session_anchor[0]
+    _session_anchor.append(_compute_anchor())
+    return _session_anchor[0]
+
+
+def _compute_anchor() -> dict:
+    blank = {"lane": "", "agent": ""}
+    parent = os.getppid()
+    if not parent:
+        return blank
+    chain = procid.ancestry(parent, depth=3)
+    if any(_launcher_name(n) in _NESTED_LAUNCHERS for n in chain):
+        return blank
+    token = procid.session_token(parent)
+    if not token:
+        return blank
+    name = Path.cwd().name
+    agent = next(
+        (a for n in chain if (a := _AGENT_BY_LAUNCHER.get(_launcher_name(n)))), ""
+    )
+    return {"lane": f"{name}.{token}" if name else token, "agent": agent}
+
+
+def _launcher_name(image: str) -> str:
+    """An executable's name without extension, lowercased.
+
+    Compared EXACTLY against a known set rather than searched for a substring.
+    Substring matching accepted `claude-backup.exe` as Claude and, where a name
+    contained two of the words, handed the identity to whichever happened to be
+    tested first.
+    """
+    return Path(image).stem.lower()
 
 
 def parent_lane_suffix() -> str:
-    """A lane derived from the process that spawned this one, or "".
-
-    For the agents that identify themselves, this never runs. For Codex - which
-    identifies itself not at all - it is the only source of a per-session
-    identity that does not require the session to remember to ask for one.
-
-    Returns "" for a nested agent spawn, and "" wherever the platform will not
-    say who the parent is: a guessed identity is worse than none, because the
-    registry treats a lane as a destination somebody can be sent mail at.
-    """
-    if _parent_lane_cache:
-        return _parent_lane_cache[0]
-    _parent_lane_cache.append(_compute_parent_lane())
-    return _parent_lane_cache[0]
-
-
-def _compute_parent_lane() -> str:
-    parent = os.getppid()
-    if not parent:
-        return ""
-    if any(
-        marker in name.lower()
-        for name in procid.ancestry(parent, depth=3)
-        for marker in _NESTED_MARKERS
-    ):
-        return ""
-    token = procid.session_token(parent)
-    if not token:
-        return ""
-    name = Path.cwd().name
-    return f"{name}.{token}" if name else token
+    """The lane this process's launcher implies, or ""."""
+    return _anchor()["lane"]
 
 
 # A label becomes part of a recipient string, so it must not contain the ':'
@@ -551,9 +568,11 @@ def self_agent() -> Optional[str]:
 # The executable that spawns a hardline names the agent it serves. Checked as a
 # substring because the launcher is `codex.exe` on Windows and `codex` on
 # POSIX, and neither is going to be mistaken for the other.
-_AGENT_BY_LAUNCHER = ("codex", "claude", "hermes")
-
-_parent_agent_cache: list[str] = []
+_AGENT_BY_LAUNCHER = {
+    "codex": "codex",
+    "claude": "claude",
+    "hermes": "hermes",
+}
 
 
 def parent_agent() -> Optional[str]:
@@ -569,20 +588,11 @@ def parent_agent() -> Optional[str]:
     guess about identity, it is a reading of it - the same source the lane
     itself now comes from.
 
-    Cached: naming an ancestor enumerates every process, and this is consulted
-    on ownership checks.
+    Read from the SAME cached anchor as the lane, so the two can never come to
+    describe different processes - which two separate walks, with two separate
+    caches, quietly allowed.
     """
-    if _parent_agent_cache:
-        return _parent_agent_cache[0] or None
-    found = ""
-    for name in procid.ancestry(os.getppid(), depth=3):
-        lowered = name.lower()
-        match = next((a for a in _AGENT_BY_LAUNCHER if a in lowered), None)
-        if match:
-            found = match
-            break
-    _parent_agent_cache.append(found)
-    return found or None
+    return _anchor()["agent"] or None
 
 
 def intrinsic_agent() -> Optional[str]:
@@ -864,7 +874,21 @@ def _as_text(stream: object) -> str:
 # one authorized write call multiplies into unbounded unattended ones. Removing
 # it from the child's environment is the boundary; hiding one discovery route
 # is not.
-_AGENT_CHILD_STRIPPED_ENV = frozenset({"HARDLINE_ALLOW_WRITE"})
+# Never inherited by a spawned agent. Write permission was the original reason;
+# the session-identity variables are here because a spawned agent loads its own
+# hardline, and that child would read whichever of these it inherited and
+# register as a SECOND consumer of the spawning session's lane - draining the
+# very mail it was dispatched to help with. The ancestry guard cannot catch
+# that, because both variables are consulted BEFORE it runs.
+_AGENT_CHILD_STRIPPED_ENV = frozenset(
+    {
+        "HARDLINE_ALLOW_WRITE",
+        "HARDLINE_AGENT_LABEL",
+        "HARDLINE_AGENT",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_PROJECT_DIR",
+    }
+)
 
 
 def _run_agent_cmd(agent: str, argv: list[str], *, env: dict | None = None, **kwargs) -> dict:

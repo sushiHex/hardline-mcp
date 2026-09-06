@@ -25,6 +25,7 @@ from typing import Optional
 _SYNCHRONIZE = 0x00100000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _WAIT_TIMEOUT = 0x00000102
+_WAIT_OBJECT_0 = 0x00000000
 # Why an OpenProcess failed. Without these the two cases that matter - "no such
 # process" and "exists, but not yours to open" - are one indistinguishable
 # falsy handle.
@@ -265,11 +266,16 @@ def _pid_state(pid: Optional[int]) -> str:
     )
     if handle:
         try:
-            return (
-                ALIVE
-                if kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
-                else DEAD
-            )
+            waited = kernel32.WaitForSingleObject(handle, 0)
+            if waited == _WAIT_TIMEOUT:
+                return ALIVE
+            if waited == _WAIT_OBJECT_0:
+                return DEAD
+            # WAIT_FAILED, or anything else. Only a SIGNALLED handle means the
+            # process exited; treating every other return as death made a
+            # failed probe indistinguishable from a real one, which is the
+            # whole reason UNKNOWN exists.
+            return UNKNOWN
         finally:
             kernel32.CloseHandle(handle)
     # The open failed. WHY it failed is the whole point: a pid that does not

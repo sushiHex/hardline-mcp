@@ -114,8 +114,7 @@ def _no_ambient_parent_lane(monkeypatch):
     """
     from hardline_mcp import adapters
 
-    monkeypatch.setattr(adapters, "_parent_lane_cache", [""])
-    monkeypatch.setattr(adapters, "_parent_agent_cache", [""])
+    monkeypatch.setattr(adapters, "_session_anchor", [{"lane": "", "agent": ""}])
 
 
 @pytest.fixture
@@ -127,8 +126,11 @@ def spawned_by_codex(monkeypatch):
     """
     from hardline_mcp import adapters
 
-    monkeypatch.setattr(adapters, "_parent_lane_cache", ["construction.a1b2c3d4"])
-    monkeypatch.setattr(adapters, "_parent_agent_cache", ["codex"])
+    monkeypatch.setattr(
+        adapters,
+        "_session_anchor",
+        [{"lane": "construction.a1b2c3d4", "agent": "codex"}],
+    )
     return "construction.a1b2c3d4"
 
 

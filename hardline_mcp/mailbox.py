@@ -252,12 +252,20 @@ def _ensure_initialized(db_path: Path) -> None:
         # would fail with "no such table" for the life of the process. One stat
         # is cheap beside opening SQLite.
         #
-        # This catches deletion, which is the case that happens. A file
-        # SWAPPED for a different one still exists, so it is not caught here -
-        # verifying the schema on every connection would cost a query per
-        # operation to defend against something nobody does by accident.
-        if db_path.exists():
-            return
+        # Size, not just existence. Between this check and the connect that
+        # follows it, sqlite3 can CREATE the file - so a deletion landing in
+        # that window left a zero-byte database that exists, is therefore
+        # never re-initialized, and fails "no such table" for the rest of every
+        # cached process's life. A real store is never zero bytes.
+        #
+        # A file SWAPPED for a different populated one is still not caught:
+        # verifying the schema per connection would cost a query per operation
+        # to defend against something nobody does by accident.
+        try:
+            if db_path.stat().st_size > 0:
+                return
+        except OSError:
+            pass  # gone, or unreadable - either way, rebuild
         _initialized_paths.discard(key)
     with _init_lock:
         if key in _initialized_paths:

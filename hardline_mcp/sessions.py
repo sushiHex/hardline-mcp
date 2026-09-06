@@ -87,6 +87,12 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         "cwd": row["cwd"],
         "started_at": row["started_at"],
         "last_seen": row["last_seen"],
+        # Say WHICH of the two live-ish answers this is. Folding UNKNOWN into
+        # "live" and then reporting it as a live session is the same overclaim
+        # as telling a sender nothing can consume their message: the honest
+        # word is that the process could not be probed, and a caller cannot
+        # recover that from a boolean.
+        "liveness": _state(row),
     }
 
 
@@ -266,6 +272,25 @@ def register(
     held = tuple(dict.fromkeys(list(lanes or ()) + ([lane] if lane else [])))
     if not held:
         return {"agent": agent, "label": label, "pid": pid, "lanes": []}
+    # Registration is where a DERIVED lane arrives, and derived lanes never
+    # pass through ``claim`` - so every exclusivity check that lives there was
+    # simply absent from the automatic path. The key is (pid, lane), not lane,
+    # so two processes deriving the same name both became consumers and the
+    # only thing that noticed was a report, after the fact.
+    contested = [
+        lane_name
+        for lane_name in held
+        if any(h["pid"] != pid for h in holders(lane_name, db_path=db_path))
+    ]
+    held = tuple(lane_name for lane_name in held if lane_name not in contested)
+    if not held:
+        return {
+            "agent": agent,
+            "label": label,
+            "pid": pid,
+            "lanes": [],
+            "contested": contested,
+        }
     stamp = _iso(now_fn())
     key = process_key(pid)
     cwd = cwd if cwd is not None else str(Path.cwd())
@@ -297,6 +322,7 @@ def register(
         "agent": agent,
         "label": label,
         "pid": pid,
+        "contested": contested,
     }
 
 
@@ -356,8 +382,31 @@ def holders(lane: str, *, db_path: Optional[Path] = None) -> list[dict]:
     """
     db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
-        rows = conn.execute("SELECT * FROM agent_sessions WHERE lane = ?", (lane,)).fetchall()
+        rows = list(
+            conn.execute("SELECT * FROM agent_sessions WHERE lane = ?", (lane,))
+        )
+        rows += _legacy_holders(conn, lane)
         return [_row_to_dict(r) for r in rows if _is_live(r)]
+
+
+def _legacy_holders(conn: sqlite3.Connection, lane: str) -> list:
+    """Rows for ``lane`` in the pre-rename `sessions` table, if it is there.
+
+    Renaming the table removed a migration that could destroy another
+    process's registrations, and bought a split-brain in exchange: a process on
+    older code writes `sessions` and reads only `sessions`, while this one uses
+    `agent_sessions`. Neither cohort could see the other, so each could hand
+    out a lane the other was holding - which is the failure the registry
+    exists to prevent, reintroduced by the fix for a different one.
+
+    Reading the old table for OWNERSHIP questions closes this half of it. The
+    other half cannot be closed from here: an older process will not consult
+    `agent_sessions` no matter what this one writes.
+    """
+    try:
+        return list(conn.execute("SELECT * FROM sessions WHERE lane = ?", (lane,)))
+    except sqlite3.Error:
+        return []  # no legacy table, which is the normal case after a while
 
 
 def claim(
@@ -403,21 +452,35 @@ def claim(
     with closing(_connect(db_path)) as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                "SELECT * FROM agent_sessions WHERE lane = ?", (lane,)
-            ).fetchall()
+            rows = list(
+                conn.execute("SELECT * FROM agent_sessions WHERE lane = ?", (lane,))
+            )
+            # The legacy table too. `holders` consults both, and `claim` asking
+            # a narrower question than the thing that reports the answer is how
+            # a lane reads as held everywhere except at the moment somebody
+            # takes it.
+            rows += _legacy_holders(conn, lane)
             existing = [
                 _row_to_dict(r) for r in rows if r["pid"] != pid and _is_live(r)
             ]
             if existing:
                 conn.rollback()
-                held_by = ", ".join(f"pid {h['pid']} ({h['cwd']})" for h in existing)
+                held_by = ", ".join(
+                    f"pid {h['pid']} ({h['liveness']}, {h['cwd']})" for h in existing
+                )
+                unsure = [h for h in existing if h["liveness"] != "alive"]
                 return {
                     "ok": False,
                     "error": (
-                        f"lane {lane!r} is already held by a live session: "
-                        f"{held_by}. Pick another label, or let that session "
-                        "exit first."
+                        f"lane {lane!r} is already held by {held_by}. "
+                        + (
+                            "That process could not be probed, so this refuses "
+                            "rather than risk taking a name somebody is still "
+                            "reading. "
+                            if unsure
+                            else ""
+                        )
+                        + "Pick another label, or let that session exit first."
                     ),
                     "lane": lane,
                     "held_by": existing,
