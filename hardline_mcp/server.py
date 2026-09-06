@@ -781,13 +781,25 @@ def _claude_invocation_overrides(
 
 
 def _validate_claude_reserve_override(
-    *, override_claude_reserve: bool, override_reason: str | None
+    *,
+    override_claude_reserve: bool,
+    override_reason: str | None,
+    require_claude: bool = True,
 ) -> tuple[str | None, str | None]:
     """Validate and normalize the one-call reserve bypass audit reason."""
     if not override_claude_reserve:
         if override_reason is not None:
             return None, "override_reason requires override_claude_reserve=true."
         return None, None
+    if not require_claude:
+        # The reserve exists to keep Claude available for work that can only be
+        # done by Claude. An override without that assertion is a request to
+        # spend it on anything - and the route will pick Claude whenever it has
+        # more headroom than ChatGPT, so this is not a hypothetical path.
+        return None, (
+            "override_claude_reserve=true requires require_claude=true. The "
+            "reserve may only be spent on work that asserts it needs Claude."
+        )
     if not isinstance(override_reason, str) or not override_reason.strip():
         return None, (
             "override_claude_reserve=true requires a non-empty override_reason."
@@ -810,8 +822,18 @@ def _ask_claude_with_reserve_guard(
     override_claude_reserve: bool,
     override_reason: str | None,
     on_spawn=None,
+    still_wanted=None,
 ) -> dict:
-    """Serialize the final live reserve check together with a Claude launch."""
+    """Serialize the final live reserve check together with a Claude launch.
+
+    ``still_wanted`` is re-asked AFTER the lock, not before. A dispatcher marks
+    its job running and then arrives here, where it can wait behind another
+    Claude launch for as long as that launch takes - and a cancel arriving
+    during the wait finds no child pid to kill, so it simply marks the row
+    cancelled and returns. Without re-asking, the guard then spawns Claude for
+    a job that is already cancelled: quota spent on work nobody wants, on the
+    very path that exists to protect quota.
+    """
     invocation_overrides = _claude_invocation_overrides(
         model=model,
         effort=effort,
@@ -823,6 +845,14 @@ def _ask_claude_with_reserve_guard(
         override_reason=override_reason,
     )
     with adapters._CLAUDE_DISPATCH_LOCK:
+        # Before anything expensive, and before the quota probe: the wait for
+        # this lock is exactly where a cancel lands.
+        if still_wanted is not None and not still_wanted():
+            return {
+                "ok": False,
+                "error": "job was cancelled while waiting for the Claude dispatch lock",
+                "cancelled_before_start": True,
+            }
         raw = adapters._claude_quota_route(
             require_claude=require_claude,
             override_claude_reserve=override_claude_reserve,
@@ -880,6 +910,7 @@ def _plan_claude_dispatch(
     override_reason, override_error = _validate_claude_reserve_override(
         override_claude_reserve=override_claude_reserve,
         override_reason=override_reason,
+        require_claude=require_claude,
     )
     audit_reason = (
         override_reason if override_error is None else supplied_override_reason
@@ -1146,6 +1177,15 @@ def _ask_async_impl(
                     job_id, pid, started_key=jobs.process_key(pid)
                 ),
             )
+            if ask_fn is _ask_claude_with_reserve_guard:
+                # Only the guarded Claude path can BLOCK before spawning, and
+                # only it takes this. mark_running above proves the job was not
+                # cancelled when the worker STARTED; it proves nothing about
+                # the moment the subprocess is actually launched, which may be
+                # a whole other dispatch later.
+                ask_kwargs["still_wanted"] = (
+                    lambda: (jobs.get(job_id) or {}).get("state") == jobs.RUNNING
+                )
             if extra_ask_kwargs:
                 ask_kwargs.update(extra_ask_kwargs)
             result = ask_fn(prompt, **ask_kwargs)

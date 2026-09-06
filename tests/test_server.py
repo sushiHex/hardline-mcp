@@ -682,6 +682,67 @@ async def test_claude_reserve_override_is_rechecked_and_audited(monkeypatch):
     }
 
 
+def test_the_reserve_cannot_be_spent_on_work_that_did_not_ask_for_claude():
+    """The reserve keeps Claude free for work only Claude can do.
+
+    An override without ``require_claude`` is a request to spend it on
+    anything — and the route picks Claude whenever it has more headroom than
+    ChatGPT, so this was reachable rather than hypothetical.
+    """
+    reason, error = server._validate_claude_reserve_override(
+        override_claude_reserve=True,
+        override_reason="Owner approved one run.",
+        require_claude=False,
+    )
+    assert reason is None
+    assert "requires require_claude=true" in error
+
+    ok_reason, ok_error = server._validate_claude_reserve_override(
+        override_claude_reserve=True,
+        override_reason="Owner approved one run.",
+        require_claude=True,
+    )
+    assert ok_error is None and ok_reason == "Owner approved one run."
+
+
+def test_a_job_cancelled_while_queued_behind_another_never_launches_claude():
+    """The wait for the dispatch lock is exactly where a cancel lands.
+
+    A worker marks its job running and then blocks here behind another Claude
+    launch. A cancel arriving during that wait finds no child pid to kill, so
+    it just marks the row cancelled — and without re-asking after the lock, the
+    guard spawns Claude anyway. Quota spent on work nobody wants, on the code
+    path that exists to protect quota.
+    """
+    spawned = []
+
+    def should_not_run(prompt, **kwargs):
+        spawned.append(prompt)
+        return {"ok": True, "reply": "should never happen"}
+
+    original = server.adapters.ask_claude
+    server.adapters.ask_claude = should_not_run
+    try:
+        result = server._ask_claude_with_reserve_guard(
+            "review this",
+            model=None,
+            effort="default",
+            mode="default",
+            workdir=None,
+            write=False,
+            require_claude=True,
+            override_claude_reserve=False,
+            override_reason=None,
+            still_wanted=lambda: False,  # cancelled during the wait
+        )
+    finally:
+        server.adapters.ask_claude = original
+
+    assert spawned == [], "a cancelled job must not launch Claude"
+    assert result["ok"] is False
+    assert result["cancelled_before_start"] is True
+
+
 def test_claude_invocation_audit_lists_every_non_default_override():
     assert server._claude_invocation_overrides(
         model="opus",

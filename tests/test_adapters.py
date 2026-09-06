@@ -1002,6 +1002,54 @@ def test_reserve_override_rejects_malformed_numeric_telemetry(monkeypatch, malfo
     assert "finite percentages" in decision["reason"]
 
 
+@pytest.mark.parametrize("boolish", [True, False])
+def test_reserve_override_rejects_boolean_telemetry(monkeypatch, boolish):
+    """``bool`` is a subclass of ``int``, so this passed every numeric check.
+
+    ``float(True)`` is ``1.0`` and lands inside [0, 100], so a snapshot
+    reporting ``true`` authorised spending the reserve as though 1% remained —
+    the opposite of the fail-closed handling malformed telemetry is documented
+    to get.
+    """
+    _enable_quota_router(
+        monkeypatch,
+        _quota_snapshot(claude_remaining=boolish, chatgpt_remaining=86),
+    )
+
+    decision = adapters._claude_quota_route(
+        require_claude=True,
+        override_claude_reserve=True,
+        override_reason="Owner approved this one review in the current task.",
+    )
+
+    assert decision["selected_provider"] is None
+    assert decision["quota_status"] == "unavailable"
+    assert decision["reserve_override"]["applied"] is False
+
+
+def test_reserve_override_survives_an_unrepresentable_number(monkeypatch):
+    """A valid JSON integer too large for a float must not escape as an exception.
+
+    ``float()`` raises OverflowError there, which was not in the fail-closed
+    branch — so ask_claude raised at the MCP level instead of returning the
+    structured refusal it documents.
+    """
+    _enable_quota_router(
+        monkeypatch,
+        _quota_snapshot(claude_remaining=10**400, chatgpt_remaining=86),
+    )
+
+    decision = adapters._claude_quota_route(
+        require_claude=True,
+        override_claude_reserve=True,
+        override_reason="Owner approved this one review in the current task.",
+    )
+
+    assert decision["selected_provider"] is None
+    assert decision["quota_status"] == "unavailable"
+    assert "failing closed" in decision["reason"]
+
+
 def test_required_claude_can_run_above_reserve_despite_chatgpt_headroom(monkeypatch):
     _enable_quota_router(
         monkeypatch,

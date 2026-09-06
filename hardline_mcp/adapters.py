@@ -1231,6 +1231,24 @@ def _fetch_subscription_quota() -> dict:
     return payload
 
 
+def _remaining_percent(value) -> float:
+    """One telemetry percentage as a float, or raise so the caller fails closed.
+
+    Rejects booleans BEFORE converting. ``bool`` is a subclass of ``int``, so
+    ``float(True)`` is ``1.0`` and sails through the range check - a malformed
+    snapshot reporting ``true`` would authorise spending the Claude reserve as
+    though 1% remained, which is the opposite of the fail-closed handling this
+    telemetry is documented to get.
+
+    ``OverflowError`` is not caught here either: a JSON integer too large for a
+    float is malformed telemetry like any other, and belongs in the caller's
+    fail-closed branch rather than escaping as an MCP-level exception.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"remaining_percent must be a number, not {value!r}")
+    return float(value)
+
+
 def _claude_quota_route(
     *,
     require_claude: bool,
@@ -1280,8 +1298,8 @@ def _claude_quota_route(
         chatgpt = providers["chatgpt"]
         claude_weekly = claude["weekly"]
         chatgpt_weekly = chatgpt["weekly"]
-        claude_remaining = float(claude_weekly["remaining_percent"])
-        chatgpt_remaining = float(chatgpt_weekly["remaining_percent"])
+        claude_remaining = _remaining_percent(claude_weekly["remaining_percent"])
+        chatgpt_remaining = _remaining_percent(chatgpt_weekly["remaining_percent"])
         remaining_values = (claude_remaining, chatgpt_remaining)
         if not all(
             math.isfinite(value) and 0 <= value <= 100
@@ -1290,7 +1308,7 @@ def _claude_quota_route(
             raise ValueError(
                 "remaining_percent values must be finite percentages in [0, 100]"
             )
-    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+    except (KeyError, TypeError, ValueError, OverflowError, RuntimeError) as exc:
         base.update(
             selected_provider=None,
             quota_status="unavailable",
