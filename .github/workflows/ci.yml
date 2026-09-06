@@ -27,7 +27,7 @@ jobs:
       - name: Install (fresh env)
         run: pip install -e ".[dev]"
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q -rs
       - name: Import wires the FastMCP server
         # Don't launch the console script here: it's a stdio server that would
         # block on stdin. Importing proves the package + tool registration; the

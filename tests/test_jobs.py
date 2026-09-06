@@ -458,9 +458,15 @@ def test_sweep_probes_once_per_owner_and_starves_nobody(tmp_path, monkeypatch):
         jobs.mark_running(job_id, db_path=db)
 
     probed = []
-    real_alive = jobs.pid_alive
+    # instance_state, not pid_alive: the sweep now asks for a THREE-state
+    # answer, so that an owner which merely could not be probed is not written
+    # off as dead. Counting the old call would have counted nothing and read
+    # as a pass.
+    real_alive = jobs.instance_state
     monkeypatch.setattr(
-        jobs, "pid_alive", lambda pid: (probed.append(pid), real_alive(pid))[1]
+        jobs,
+        "instance_state",
+        lambda pid, key=None: (probed.append(pid), real_alive(pid, key))[1],
     )
 
     lost = jobs.listing(state=jobs.LOST, limit=200, db_path=db)

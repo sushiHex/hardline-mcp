@@ -267,7 +267,7 @@ def test_consuming_read_honours_the_lane_guard(tmp_path):
     # A process holding a DIFFERENT lane reads both.
     msgs, _ = mailbox.inbox(
         ["claude", "claude:owner.aaaa1111"],
-        lane_suffix="intruder.bbbb2222",
+        owned="claude:intruder.bbbb2222",
         db_path=db,
         now_fn=now_fn,
     )
@@ -285,7 +285,7 @@ def test_consuming_read_honours_the_lane_guard(tmp_path):
 def test_a_laneless_process_cannot_consume_lane_qualified_mail(tmp_path):
     db = tmp_path / "mb.db"
     mailbox.send("codex", "claude:owner.aaaa1111", "theirs", db_path=db)
-    mailbox.inbox("claude:owner.aaaa1111", lane_suffix=None, db_path=db)
+    mailbox.inbox("claude:owner.aaaa1111", owned=None, db_path=db)
     left, _ = mailbox.inbox("claude:owner.aaaa1111", auto_ack=False, db_path=db)
     assert len(left) == 1
 
@@ -310,7 +310,7 @@ def test_remaining_excludes_mail_this_caller_cannot_consume(tmp_path):
     mailbox.send("codex", "claude:owner.aaaa1111", "theirs", db_path=db)
 
     msgs, remaining = mailbox.inbox(
-        "claude:owner.aaaa1111", lane_suffix="intruder.bbbb2222", db_path=db
+        "claude:owner.aaaa1111", owned="claude:intruder.bbbb2222", db_path=db
     )
     assert len(msgs) == 1  # visible, as history/visibility semantics allow
     assert remaining == 0  # but not deliverable to me, so the loop ends
@@ -318,7 +318,7 @@ def test_remaining_excludes_mail_this_caller_cannot_consume(tmp_path):
     # The real owner still sees it as theirs to take.
     _, owner_remaining = mailbox.inbox(
         "claude:owner.aaaa1111",
-        lane_suffix="owner.aaaa1111",
+        owned="claude:owner.aaaa1111",
         auto_ack=False,
         db_path=db,
     )
