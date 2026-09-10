@@ -97,9 +97,10 @@ Avoid the store's initializing or pruning helpers: `mailbox._connect`,
 
 ## One reminder clock, one host callback
 
-The observer calls `poll(notice)` once per successful snapshot. It passes
-`None` when there is no due notice. The callback still validates its host
-during quiet polls and returns true only when it accepts a notice.
+The observer calls `poll(notice, pending)` once per successful snapshot. It
+passes `None` when there is no due notice and the snapshot's unread state as
+`pending`. The callback still validates its host during quiet polls and returns
+true only when it accepts a notice.
 The stdout callback simply ignores `None`.
 
 | Observation or result | Observer transition |
