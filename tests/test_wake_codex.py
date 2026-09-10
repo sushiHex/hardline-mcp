@@ -29,6 +29,7 @@ class FakeApp:
         self.fault = None
         self.notification = False
         self.connections = 0
+        self.initialize = {"userAgent": "hardline_watch/0.153.4 (Windows; x86_64)"}
 
     def handle(self, socket):
         self.connections += 1
@@ -51,7 +52,7 @@ class FakeApp:
                         json.dumps({"method": "thread/status/changed", "params": {}})
                     )
                 if method == "initialize":
-                    result = {"userAgent": "fake"}
+                    result = self.initialize
                 elif method == "thread/loaded/list":
                     result = {"data": self.loaded, "nextCursor": None}
                 elif method == "thread/read":
@@ -123,8 +124,11 @@ def notice(sequence=1):
     return {"event": "mail_pending", "agent": "codex", "sequence": sequence}
 
 
-def test_check_sends_no_turn_even_with_unread_mail(app, target, capsys):
+@pytest.mark.parametrize("compatible", [False, True])
+def test_check_sends_no_turn_even_with_unread_mail(app, target, capsys, compatible):
     mail(target)
+    if not compatible:
+        app.initialize = {"userAgent": "hardline_watch/0.144.0-alpha.4 (Linux)"}
     code = wake_codex.main(
         [
             "--endpoint",
@@ -140,9 +144,54 @@ def test_check_sends_no_turn_even_with_unread_mail(app, target, capsys):
             "--check",
         ]
     )
-    assert code == 0 and app.turns == []
-    assert capsys.readouterr().out == ""
+    assert code == (0 if compatible else 1) and app.turns == []
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    if not compatible:
+        assert "requires a stable Codex app-server >= 0.153.4" in captured.err
     assert watch.read_pending(target)
+
+
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        {"userAgent": "hardline_watch/0.144.0-alpha.4 (Linux)"},
+        {"userAgent": "hardline_watch/0.153.3 (Windows)"},
+        {"userAgent": "hardline_watch/0.153.4-alpha.1 (Windows)"},
+        {"userAgent": "unknown"},
+        {"userAgent": None},
+        {},
+    ],
+)
+def test_incompatible_server_cannot_accept_a_silent_wake(wake, app, target, initialize):
+    mail(target)
+    app.initialize = initialize
+    reports = []
+    wake.report = reports.append
+    with pytest.raises(RuntimeError, match="requires a stable Codex app-server"):
+        wake.poll(notice())
+    assert [r["method"] for r in app.requests] == ["initialize"]
+    assert not app.turns and not reports
+    assert wake.socket is None and wake.uncertain_until == 0
+    assert watch.read_pending(target)
+
+
+@pytest.mark.parametrize("version", ["0.153.4", "0.154.0", "1.0.0"])
+def test_compatible_server_can_receive_tool_output(wake, app, target, version):
+    mail(target)
+    app.initialize = {"userAgent": f"hardline_watch/{version} (Linux; x86_64)"}
+    assert wake.poll(notice())
+    assert json.loads(app.turns[0]["toolOutput"]["output"]) == notice()
+
+
+def test_reconnect_rechecks_server_compatibility(wake, app, target):
+    wake.poll()
+    wake.close()
+    mail(target)
+    app.initialize = {"userAgent": "hardline_watch/0.144.0-alpha.4 (Linux)"}
+    with pytest.raises(RuntimeError, match="requires a stable Codex app-server"):
+        wake.poll(notice())
+    assert app.connections == 2 and not app.turns
 
 
 def test_exact_thread_tool_output_and_no_permission_overrides(wake, app, target):

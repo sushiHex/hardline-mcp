@@ -131,9 +131,15 @@ fresh mail. Notices can repeat; a lost reply can duplicate a hint.
 ## Codex connection and delivery
 
 `wake_codex.py` accepts an explicit loopback WebSocket URL and exact UUID.
-Initialize with experimental API support, find that UUID through
-`thread/loaded/list`, then check `thread/read(includeTurns=false)` once per
-poll. Paginate loaded threads without guessing by name or reading history.
+Initialize with experimental API support and require the connected server's
+`userAgent` to report a stable version >= 0.153.4, our verified compatibility
+floor. Older servers can silently ignore `toolOutput` while accepting a turn;
+unknown and prerelease versions also fail before attachment or submission.
+This checks the owning runtime, not a separate CLI on PATH.
+
+Find that UUID through `thread/loaded/list`, then check
+`thread/read(includeTurns=false)` once per poll. Paginate loaded threads
+without guessing by name or reading history.
 
 Any failed exchange closes the connection, including rejected attachment and
 protocol errors. A subsequent connection must initialize and validate again.

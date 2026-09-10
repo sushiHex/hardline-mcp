@@ -110,6 +110,10 @@ python -m pip install -e ".[codex-watch]"
 hardline-mcp watch-codex --endpoint ws://127.0.0.1:4500 --thread THREAD_UUID --db MAILBOX_PATH --owner-pid MCP_PID --owner-key CREATION_TOKEN --check
 ```
 
+The connected app-server must report a stable Codex version **0.153.4 or
+newer**, the minimum verified for `toolOutput`. Initialization rejects older,
+prerelease, or unknown versions, which could silently discard the signal.
+
 Use the database and owner arguments from the descriptor. The endpoint and
 thread UUID must come from that same session's host; a lane or working
 directory cannot identify a Codex conversation. `--check` validates both

@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import ipaddress
 import json
+import re
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -137,13 +138,26 @@ class CodexWake:
                 proxy=None,
             )
         )
-        self._rpc(
+        initialized = self._rpc(
             "initialize",
             {
                 "clientInfo": {"name": "hardline_watch", "version": "1"},
                 "capabilities": {"experimentalApi": True},
             },
         )
+        # Older servers silently ignore toolOutput. Use the connected runtime's
+        # version, not a CLI on PATH; 0.153.4 is our verified compatibility floor.
+        agent = initialized.get("userAgent")
+        version = (
+            re.match(r"^[^/\s]+/(\d+)\.(\d+)\.(\d+)(?:\s|$)", agent)
+            if isinstance(agent, str)
+            else None
+        )
+        if version is None or tuple(map(int, version.groups())) < (0, 153, 4):
+            raise RuntimeError(
+                "watch-codex requires a stable Codex app-server >= 0.153.4 "
+                "with toolOutput support; upgrade the server at --endpoint"
+            )
         self.socket.send(json.dumps({"method": "initialized", "params": {}}))
         cursor = None
         visited = set()
