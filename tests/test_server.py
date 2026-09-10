@@ -1,6 +1,8 @@
 """Server wiring smoke tests — import, tool registration, send/deliver glue."""
 
 import json
+import os
+import sys
 import threading
 
 import pytest
@@ -1365,8 +1367,24 @@ async def test_server_info_reports_version_limits_and_timeouts(monkeypatch, tmp_
     assert set(got["timeouts_s"]) == set(server.adapters.known_agents())
     assert got["module_path"].endswith("mailbox.py")
     assert isinstance(got["write_enabled"], bool)
+    assert "argv" in got["watch"]
     assert got["quota_routing"]["configured"] is True
     assert got["quota_routing"]["claude_weekly_reserve_percent"] == 7
+
+
+@pytest.mark.anyio
+async def test_watch_descriptor_binds_this_process_and_mailbox(monkeypatch, tmp_path):
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "isolated.db"))
+    monkeypatch.setattr(server.adapters, "self_agent", lambda: "codex")
+    monkeypatch.setattr(server.watch.procid, "process_key", lambda _: "test-creation-key")
+    got = await server.server_info()
+    argv = got["watch"]["argv"]
+    assert argv[0] == sys.executable
+    assert argv[1:3] == ["-m", "hardline_mcp.watch"]
+    assert argv[argv.index("--owner-pid") + 1] == str(os.getpid())
+    assert argv[argv.index("--owner-key") + 1] == "test-creation-key"
+    assert argv[argv.index("--db") + 1] == str((tmp_path / "isolated.db").resolve())
+    assert argv[argv.index("--agent") + 1] == "codex"
 
 
 @pytest.mark.anyio
