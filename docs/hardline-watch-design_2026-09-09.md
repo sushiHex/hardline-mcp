@@ -122,11 +122,19 @@ eventually recovers attention.
 Sequence numbers are local to a watcher. The signal contains no body, sender,
 preview, arbitrary label, or new task instruction.
 
-The Codex adapter has one additional deadline, solely for an unconfirmed
-submission. Reserve it before sending; clear it after a valid acceptance.
-If the reply is lost, retain it across reconnection for at least the reminder
-interval. This bounds retries without imposing a second reminder delay on
-fresh mail. Notices can repeat; a lost reply can duplicate a hint.
+The Codex adapter has one additional deadline, solely for an unresolved
+submission. Reserve it before sending. A valid acceptance, matching rejection,
+or observed empty inbox clears it. A lost reply retains it across reconnection
+until the deadline or one of those observations resolves the uncertainty.
+
+The observer passes both the due notice and its observed `pending` state to
+the adapter. No notice does not imply an empty inbox: a quiet preflight or
+backlog awaiting its reminder also produces no notice. An explicit empty
+snapshot clears uncertainty before querying the host, so host unavailability
+cannot erase that observation. A rejected status query or malformed reply
+does not resolve a prior submission. These distinctions bound duplicate
+retries while allowing fresh mail and rejected submissions to retry promptly.
+Notices can repeat; a lost reply can duplicate a hint.
 
 ## Codex connection and delivery
 

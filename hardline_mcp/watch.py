@@ -112,7 +112,7 @@ def diagnostic(message: str) -> None:
     print("hardline watch: " + escaped[:2048], file=sys.stderr, flush=True)
 
 
-def emit(notice: dict | None) -> bool:
+def emit(notice: dict | None, pending: bool = True) -> bool:
     if notice is None:
         return False
     try:
@@ -139,7 +139,7 @@ def run(
     interval: float = 1.0,
     remind_after: float = 30.0,
     once: bool = False,
-    poll: Callable[[dict | None], bool] = emit,
+    poll: Callable[[dict | None, bool], bool] = emit,
     clock: Callable[[], float] = time.monotonic,
     wait: Callable[[float], bool] | None = None,
     report: Callable[[str], None] = diagnostic,
@@ -147,8 +147,9 @@ def run(
 ) -> int:
     """Notify until observed empty; defer busy hosts without accumulating mail.
 
-    Call ``poll`` once per snapshot, with a due notice or None. It validates
-    its host even when quiet and returns True only for an accepted notice.
+    Call ``poll(notice, pending)`` once per snapshot. A None notice means no
+    delivery is due; pending distinguishes an empty inbox from a quiet backlog.
+    The host validates even when quiet and returns True only for acceptance.
     The observer alone schedules reminders; ``wait`` returns True to stop.
     """
     wait = wait or threading.Event().wait
@@ -175,7 +176,7 @@ def run(
                         "agent": target.agent,
                         "sequence": sequence + 1,
                     }
-                accepted = poll(notice)
+                accepted = poll(notice, pending)
                 if notice is not None and accepted:
                     sequence += 1
                     due = clock() + remind_after

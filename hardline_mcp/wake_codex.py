@@ -107,6 +107,15 @@ class CodexWake:
                 raise RuntimeError("app-server reply has an unexpected request id")
             if "error" in message:
                 error = message["error"]
+                if (
+                    not isinstance(error, dict)
+                    or not isinstance(error.get("code"), int)
+                    or not isinstance(error.get("message"), str)
+                ):
+                    raise RuntimeError("invalid app-server error response")
+                if method == "turn/start":
+                    # A matching rejection proves this submission did not run.
+                    self.uncertain_until = 0.0
                 if error.get("code") == -32001:
                     raise watch.Unavailable("Codex app-server is overloaded")
                 raise RuntimeError(
@@ -217,16 +226,20 @@ class CodexWake:
             self.close()
             raise
 
-    def poll(self, notice: dict | None = None) -> bool:
+    def poll(self, notice: dict | None = None, pending: bool = True) -> bool:
         """Validate once, then offer a due notice if the thread can receive it.
 
-        None checks attachment without waking. Only an unconfirmed submission
-        keeps a cooldown; confirmed notices use the observer's reminder clock.
+        None checks attachment without waking; it does not imply an empty inbox.
+        An explicit empty snapshot resolves any earlier submission uncertainty,
+        even if the host is busy or unavailable. Quiet preflights preserve it.
         """
+        if not pending:
+            self.uncertain_until = 0.0
         with self._transport():
             status = self._status()
             if (
                 notice is None
+                or not pending
                 or status == "active"
                 or self.clock() < self.uncertain_until
             ):
@@ -282,7 +295,9 @@ def main(argv: list[str] | None = None) -> int:
                 interval=args.interval,
                 remind_after=args.remind_after,
                 once=args.check,
-                poll=(lambda _: wake.poll()) if args.check else wake.poll,
+                poll=(lambda _, pending: wake.poll(pending=pending))
+                if args.check
+                else wake.poll,
                 wait=wait,
             )
     finally:

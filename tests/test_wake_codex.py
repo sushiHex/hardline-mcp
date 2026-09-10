@@ -332,6 +332,7 @@ def test_lost_reply_cools_down_and_rechecks_busy_thread(wake, app, target):
     app.fault = None
     # The unconfirmed turn may already have finished without consuming mail.
     app.status = "idle"
+    assert not wake.poll(), "a quiet host check is not evidence of an empty inbox"
     assert not wake.poll(notice())
     clock[0] = 31.0
     app.status = "active"
@@ -340,6 +341,182 @@ def test_lost_reply_cools_down_and_rechecks_busy_thread(wake, app, target):
     app.status = "idle"
     assert wake.poll(notice())
     assert len(app.turns) == 2
+
+
+@pytest.mark.parametrize("empty_status", ["idle", "active", "overloaded"])
+def test_empty_snapshot_rearms_after_lost_reply(wake, app, target, empty_status):
+    mail(target)
+    clock = [0.0]
+    wake.clock = lambda: clock[0]
+    wake.remind_after = 3600
+    attempts = []
+
+    def fault(request, socket):
+        if request["method"] == "turn/start":
+            attempts.append(clock[0])
+            if len(attempts) == 1:
+                app.turns.append(request["params"])
+                return "close"
+        if request["method"] == "thread/read" and app.status == "overloaded":
+            socket.send(
+                json.dumps(
+                    {
+                        "id": request["id"],
+                        "error": {
+                            "code": -32001,
+                            "message": "Server overloaded; retry later.",
+                        },
+                    }
+                )
+            )
+            return True
+
+    app.fault = fault
+
+    def wait(delay):
+        clock[0] += delay
+        if clock[0] == 1:
+            with contextlib.closing(sqlite3.connect(target.db)) as conn, conn:
+                conn.execute("UPDATE messages SET acked_at='read'")
+            app.status = empty_status
+        elif clock[0] == 2:
+            mail(target)
+            app.status = "idle"
+        return clock[0] >= 3
+
+    assert (
+        watch.run(
+            target, clock=wake.clock, wait=wait, poll=wake.poll, remind_after=3600
+        )
+        == 0
+    )
+    assert attempts == [0, 2], "new mail must not inherit the lost turn's deadline"
+    assert len(app.turns) == 2
+
+
+def test_overload_retries_due_notice_after_recovery(wake, app, target):
+    mail(target)
+    clock = [0.0]
+    wake.clock = lambda: clock[0]
+    wake.remind_after = 3600
+    attempts = []
+
+    def overload(request, socket):
+        if request["method"] == "turn/start":
+            attempts.append(clock[0])
+            if len(attempts) <= 2:
+                socket.send(
+                    json.dumps(
+                        {
+                            "id": request["id"],
+                            "error": {
+                                "code": -32001,
+                                "message": "Server overloaded; retry later.",
+                            },
+                        }
+                    )
+                )
+                return True
+
+    app.fault = overload
+
+    def wait(delay):
+        clock[0] += delay
+        return clock[0] >= 4
+
+    assert (
+        watch.run(
+            target, clock=wake.clock, wait=wait, poll=wake.poll, remind_after=3600
+        )
+        == 0
+    )
+    assert attempts == [0, 1, 2]
+    assert len(app.turns) == 1
+    assert json.loads(app.turns[0]["toolOutput"]["output"])["sequence"] == 1
+
+
+def test_definite_turn_rejection_leaves_no_submission_uncertainty(wake, app, target):
+    mail(target)
+    wake.clock = lambda: 0.0
+
+    def reject(request, socket):
+        if request["method"] == "turn/start":
+            socket.send(
+                json.dumps(
+                    {
+                        "id": request["id"],
+                        "error": {"code": -32602, "message": "Invalid params"},
+                    }
+                )
+            )
+            return True
+
+    app.fault = reject
+    with pytest.raises(RuntimeError, match="Invalid params"):
+        wake.poll(notice())
+    assert not app.turns
+    app.fault = None
+    assert wake.poll(notice()), "a rejected turn cannot be duplicated by retrying"
+
+
+def test_status_rejection_cannot_resolve_a_lost_submission(wake, app, target):
+    mail(target)
+    wake.clock = lambda: 0.0
+
+    def fault(request, socket):
+        if request["method"] == "turn/start":
+            app.turns.append(request["params"])
+            return "close"
+        if request["method"] == "thread/read" and app.turns:
+            socket.send(
+                json.dumps(
+                    {
+                        "id": request["id"],
+                        "error": {
+                            "code": -32001,
+                            "message": "Server overloaded; retry later.",
+                        },
+                    }
+                )
+            )
+            return True
+
+    app.fault = fault
+    for _ in range(2):
+        with pytest.raises(watch.Unavailable):
+            wake.poll(notice())
+    app.fault = None
+    assert not wake.poll(notice())
+    assert len(app.turns) == 1
+
+
+@pytest.mark.parametrize(
+    "response,wrong_id",
+    [
+        ({"error": None}, False),
+        ({"error": {"code": -32001}}, False),
+        ({"error": {"code": -32001, "message": "Overloaded"}}, True),
+        ({"result": {}}, False),
+    ],
+)
+def test_invalid_submission_reply_keeps_uncertainty(
+    wake, app, target, response, wrong_id
+):
+    mail(target)
+    wake.clock = lambda: 0.0
+
+    def invalid(request, socket):
+        if request["method"] == "turn/start":
+            app.turns.append(request["params"])
+            socket.send(json.dumps({"id": request["id"] + int(wrong_id), **response}))
+            return True
+
+    app.fault = invalid
+    with pytest.raises(RuntimeError):
+        wake.poll(notice())
+    app.fault = None
+    assert not wake.poll(notice())
+    assert len(app.turns) == 1
 
 
 def test_failure_is_visible_even_when_mailbox_empty(wake, app, target):

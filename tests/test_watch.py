@@ -168,7 +168,7 @@ def exercise(target, *, duration, tick=lambda _: None, **kwargs):
         target,
         clock=clock,
         wait=wait,
-        poll=lambda n: (
+        poll=lambda n, pending: (
             (notices.append((clock.now, n)) or True) if n is not None else False
         ),
         report=reports.append,
@@ -220,7 +220,7 @@ def test_deferred_delivery_does_not_advance_sequence_or_deadline(target):
     send(target, "codex")
     clock, attempts = Clock(), []
 
-    def deliver(notice):
+    def deliver(notice, pending):
         if notice is None:
             return False
         attempts.append((clock.now, notice["sequence"]))
@@ -358,7 +358,7 @@ def test_db_resolution_and_deduplication(target, monkeypatch):
 def test_connection_is_closed_before_delivery_and_wait(target):
     send(target, "codex")
 
-    def writer(_):
+    def writer(_, pending=True):
         sql(target, "BEGIN EXCLUSIVE")
         return True
 
@@ -372,7 +372,10 @@ def test_lost_owner_and_closed_output_exit_cleanly(target, monkeypatch):
     assert watch.run(target, once=True) == 3
     monkeypatch.setattr(watch, "read_pending", lambda _: True)
     assert (
-        watch.run(target, poll=lambda _: (_ for _ in ()).throw(BrokenPipeError())) == 0
+        watch.run(
+            target, poll=lambda _, pending: (_ for _ in ()).throw(BrokenPipeError())
+        )
+        == 0
     )
 
 
