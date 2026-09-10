@@ -33,7 +33,7 @@ from typing import Literal
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 
-from . import adapters, jobs, mailbox, sessions
+from . import adapters, jobs, mailbox, sessions, watch
 
 mcp = FastMCP("hardline-mcp")
 
@@ -878,6 +878,7 @@ async def server_info() -> dict:
         "module_path": str(Path(mailbox.__file__).resolve()),
         "db_path": str(mailbox._resolve_db(None)),
         "pid": os.getpid(),
+        "watch": watch.launch_info(adapters.self_agent()),
         "jobs": await _in_thread(jobs.counts),
         "limits": {
             "inbox_default": mailbox.DEFAULT_INBOX_LIMIT,

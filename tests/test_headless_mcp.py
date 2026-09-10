@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import sysconfig
+from pathlib import Path
 
 import anyio
 import pytest
@@ -46,9 +48,14 @@ def _tool_dict(result) -> dict:
 
 
 @pytest.mark.anyio
-async def test_headless_cross_instance_round_trip(tmp_path):
+@pytest.mark.parametrize("entry", ["module", "console"])
+async def test_headless_cross_instance_round_trip(tmp_path, entry):
     db = tmp_path / "shared.db"
     params = _params(db)
+    if entry == "console":
+        executable = "hardline-mcp.exe" if os.name == "nt" else "hardline-mcp"
+        params.command = str(Path(sysconfig.get_path("scripts")) / executable)
+        params.args = []
 
     with anyio.fail_after(60):
         # Instance A ("claude") — a full server subprocess — sends a message.

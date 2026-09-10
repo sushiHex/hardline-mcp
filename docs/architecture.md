@@ -111,10 +111,15 @@ still stands. See `TODO.md`.
 
 ## What this cannot do
 
-**It cannot wake an idle session.** A session reads its mailbox only while a
-turn is running. `deliver=true` spawns a *fresh* one-shot CLI, which can never
-reach the session that owns the lane. See
-`docs/hardline-watch-design_2026-09-09.md` for a proposal.
+**Wake requires a host connection.** `watch.py` observes an exact unread scope
+through fresh read-only SQLite snapshots. Claude's Monitor consumes its JSON
+notices; `wake_codex.py` supplies the same observation as tool output to an
+explicitly bound app-server thread. Both leave consumption to the existing
+`inbox` tool. Codex waits while the thread is busy, and neither adapter creates
+a replacement session. An already-open client without an inbound connection
+still needs host integration. `deliver=true` continues to spawn a fresh
+one-shot CLI. See `hardline-watch-design_2026-09-09.md` for the contract and
+measured integration boundaries.
 
 **Identity is self-declared and unenforced.** Every process runs as the same
 user on one machine, so there is nothing to defend against that an attacker

@@ -31,9 +31,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+codex-watch = ["websockets>=15,<18"]
 
 [project.scripts]
-hardline-mcp = "hardline_mcp.server:main"
+hardline-mcp = "hardline_mcp.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/sushiHex/hardline-mcp"
