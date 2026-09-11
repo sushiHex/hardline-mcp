@@ -236,7 +236,8 @@ session that used it crashed.
 
 Automatic registration follows the same atomic acquisition rule. A refused
 registration reports contested lanes; `inbox` and `ack` consume qualified mail
-only with a durable grant for this process. Reads can still inspect an unowned
+only with a durable grant for this process, checked in the acknowledgement
+transaction. Reads can still inspect an unowned
 lane, and unqualified mail remains shared.
 
 Two consequences worth knowing, both deliberate:
