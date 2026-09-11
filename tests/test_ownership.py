@@ -1,0 +1,193 @@
+from concurrent.futures import ThreadPoolExecutor
+import os
+import threading
+import time
+
+import pytest
+
+from hardline_mcp import adapters, mailbox, sessions, server
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_acquisition_serializes_check_and_write(tmp_path, monkeypatch, explicit):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(sessions, "instance_state", lambda *args: "alive")
+    monkeypatch.setattr(sessions, "process_key", lambda pid: str(pid))
+    original = sessions._refusal
+    rendezvous = threading.Barrier(2)
+
+    def slow_check(*args):
+        result = original(*args)
+        if result is None:
+            time.sleep(0.3)  # force an unprotected contender to finish its SELECT
+        return result
+
+    monkeypatch.setattr(sessions, "_refusal", slow_check)
+
+    def acquire(pid):
+        rendezvous.wait(timeout=5)
+        if explicit:
+            return sessions.claim(agent="codex", label="shared", pid=pid, db_path=db)
+        return sessions.register(
+            agent="codex", lane="codex:shared", pid=pid, db_path=db
+        )
+
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(acquire, [10001, 10002]))
+    assert sum("codex:shared" in r.get("lanes", []) for r in results) == 1
+    assert len(sessions.holders("codex:shared", db_path=db)) == 1
+
+
+@pytest.mark.anyio
+async def test_refused_registration_cannot_consume(monkeypatch, tmp_path):
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+    monkeypatch.setenv("HARDLINE_AGENT_LABEL", "shared")
+    monkeypatch.setattr(sessions, "instance_state", lambda *args: "alive")
+    sessions.register(agent="codex", lane="codex:shared", pid=os.getpid() + 10000)
+    message = mailbox.send("claude", "codex:shared", "only for the owner")
+    server._announce_self()
+    assert "contested" in server._last_registration_failure()
+    batch = await server.inbox("codex")
+    assert batch["messages"][0]["acked_at"] is None
+    assert batch["remaining"] == 0
+    assert "registration_warning" in batch
+    assert (await server.ack(message["message_id"]))["ok"] is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["ack", "inbox"])
+async def test_consumption_rechecks_conflict_after_preflight(
+    monkeypatch, tmp_path, operation
+):
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setenv("HARDLINE_DB", str(db))
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+    monkeypatch.setenv("HARDLINE_AGENT_LABEL", "shared")
+    monkeypatch.setattr(sessions, "instance_state", lambda *args: "alive")
+    server._announce_self()
+    message = mailbox.send("claude", "codex:shared", "waiting")
+    original = getattr(mailbox, operation)
+
+    def introduce_conflict(*args, **kwargs):
+        job_id = jobs.create(
+            agent="claude", requester="codex:shared", label=None, request={}
+        )
+        with mailbox._connect(db) as conn:
+            conn.execute(
+                "UPDATE jobs SET owner_pid = ? WHERE job_id = ?",
+                (os.getpid() + 10000, job_id),
+            )
+            conn.commit()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mailbox, operation, introduce_conflict)
+    if operation == "ack":
+        assert (await server.ack(message["message_id"]))["ok"] is False
+    else:
+        result = await server.inbox("codex")
+        assert result["messages"][0]["acked_at"] is None
+        assert "registration_warning" in result
+
+
+@pytest.mark.anyio
+async def test_missing_grant_cannot_be_consumed_from_local_identity(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+    adapters.claim_lane("shared")
+    server._announce_self()
+    monkeypatch.setattr(server, "_last_heartbeat", [time.monotonic()])
+    sessions.drop_lane("codex:shared")
+
+    def unavailable(**kwargs):
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(sessions, "register", unavailable)
+    message = mailbox.send("claude", "codex:shared", "ungranted")
+    assert (await server.ack(message["message_id"]))["ok"] is False
+    assert (await server.inbox("codex"))["messages"][0]["acked_at"] is None
+
+
+@pytest.mark.anyio
+async def test_missing_grant_recovers_without_waiting_for_heartbeat(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+    adapters.claim_lane("shared")
+    server._announce_self()
+    monkeypatch.setattr(server, "_last_heartbeat", [time.monotonic()])
+    sessions.drop_lane("codex:shared")
+    mailbox.send("claude", "codex:shared", "one")
+    mailbox.send("claude", "codex:shared", "two")
+    first = await server.inbox("codex", limit=1)
+    assert first["messages"][0]["acked_at"] is not None
+    assert first["remaining"] == 1
+    assert "registration_warning" not in first
+    second = await server.inbox("codex", limit=1)
+    assert second["messages"][0]["acked_at"] is not None
+    assert second["remaining"] == 0
+
+
+def test_automatic_registration_respects_unregistered_work(monkeypatch, tmp_path):
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    jobs.create(
+        agent="claude", requester="codex:shared", label=None, request={}, db_path=db
+    )
+    result = sessions.register(
+        agent="codex", lane="codex:shared", pid=os.getpid() + 10000, db_path=db
+    )
+    assert result["lanes"] == []
+    assert result["contested"] == ["codex:shared"]
+
+
+def test_refused_retained_lane_rolls_back_entire_claim(monkeypatch, tmp_path):
+    db = tmp_path / "mb.db"
+    monkeypatch.setattr(sessions, "instance_state", lambda *args: "alive")
+    sessions.register(
+        agent="codex", lane="codex:other", pid=os.getpid() + 10000, db_path=db
+    )
+    result = sessions.claim(
+        agent="codex", label="new", lanes=["codex:free", "codex:other"], db_path=db
+    )
+    assert result["ok"] is False
+    assert sessions.holders("codex:free", db_path=db) == []
+    assert sessions.holders("codex:new", db_path=db) == []
+
+
+@pytest.mark.anyio
+async def test_existing_grant_cannot_consume_after_foreign_work_appears(
+    monkeypatch, tmp_path
+):
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setenv("HARDLINE_DB", str(db))
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+    monkeypatch.setenv("HARDLINE_AGENT_LABEL", "shared")
+    monkeypatch.setattr(sessions, "instance_state", lambda *args: "alive")
+    server._announce_self()
+    assert sessions.granted(["codex:shared"]) == ("codex:shared",)
+    job_id = jobs.create(
+        agent="claude", requester="codex:shared", label=None, request={}
+    )
+    with mailbox._connect(db) as conn:
+        conn.execute(
+            "UPDATE jobs SET owner_pid = ? WHERE job_id = ?",
+            (os.getpid() + 10000, job_id),
+        )
+        conn.commit()
+    # Consumption honors the same live-work guard even before the next refresh.
+    assert sessions.granted(["codex:shared"]) == ()
+    server._announce_self()
+    message = mailbox.send("claude", "codex:shared", "foreign work")
+    assert (await server.ack(message["message_id"]))["ok"] is False
+    batch = await server.inbox("codex")
+    assert batch["messages"][0]["acked_at"] is None
+    assert "registration_warning" in batch

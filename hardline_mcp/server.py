@@ -64,7 +64,9 @@ _ASYNC_EARLY_FAILURE_S = 2.0
 # caller's context. Truncation is display-only - the row is untouched and
 # peek(message_id) returns the body whole.
 _MAX_BODY_CHARS = 4000
-_TRUNCATION_NOTE = "\n...[{n} characters truncated - call peek(message_id={mid}) for the full body]"
+_TRUNCATION_NOTE = (
+    "\n...[{n} characters truncated - call peek(message_id={mid}) for the full body]"
+)
 
 # Ceiling on a WHOLE response, not just one body. Capping per-message was not
 # enough: a 50-row history page of 4000-char bodies is ~200KB, which the host
@@ -209,6 +211,7 @@ async def _in_thread(fn, *args, limiter=None, **kwargs):
 
 # ── session registry ─────────────────────────────────────────────────────────
 
+
 def _announce_self(agent: str | None = None) -> str | None:
     """Record this process in the session registry; return the lane, or None.
 
@@ -252,22 +255,15 @@ _identity_lock = threading.Lock()
 
 def _announce_locked(agent: str, lane: str) -> str | None:
     try:
-        # EVERY held lane, not just the current name. The process consumes mail
-        # for all of them, and a registry that recorded only the newest would
-        # report the older ones unheld - so they would read as dead, senders
-        # would be told nobody could receive them, and another session could
-        # claim one out from under this still-consuming process.
-        # No label. This is a heartbeat over the whole held set, and a label
-        # belongs to ONE lane - the one it was claimed for, which ``claim``
-        # has already recorded. Passing one here applied it to every lane in
-        # the set, so a lane derived from the environment - which nobody ever
-        # chose a name for - came out recorded as though somebody had.
-        sessions.register(agent=agent, lanes=adapters.owned_recipients(agent))
-    except Exception as exc:  # noqa: BLE001 - discovery is a convenience,
-        # never a reason to fail the call the caller actually made. But it must
-        # not be SILENT either: an unregistered session keeps consuming its
-        # lanes locally while everything else reads it as unheld, and stderr on
-        # a stdio server goes nowhere anybody looks.
+        registration = sessions.register(
+            agent=agent, lanes=adapters.owned_recipients(agent)
+        )
+        if registration.get("contested"):
+            _registration_failure[:] = [
+                "contested lanes: " + ", ".join(registration["contested"])
+            ]
+            return None
+    except Exception as exc:
         traceback.print_exc()
         _registration_failure[:] = [f"{type(exc).__name__}: {exc}"]
         return None
@@ -309,7 +305,7 @@ def _last_registration_failure() -> str | None:
         return None
     return (
         f"this session could not register itself ({_registration_failure[0]}), "
-        "so others see its lanes as unheld while it goes on consuming them"
+        "so only lanes with a durable ownership grant can be consumed"
     )
 
 
@@ -344,8 +340,7 @@ def _register_session_impl(label: str, agent: str | None) -> dict:
         return {
             "ok": False,
             "error": (
-                f"unknown agent {agent!r}; known: "
-                f"{sorted(adapters.known_agents())}"
+                f"unknown agent {agent!r}; known: {sorted(adapters.known_agents())}"
             ),
         }
     # A declaration may fill in an unknown identity, never contradict a
@@ -491,6 +486,41 @@ async def send(
     return await _in_thread(_send_impl, from_agent, to_agent, message, deliver)
 
 
+def _consume(operation, *args, **kwargs):
+    # Release and consuming reads agree about ownership, including while a
+    # registration failed or an old revision left conflicting registry rows.
+    with _identity_lock:
+        db_path = mailbox._resolve_db(None)
+        try:
+            expected = adapters.owned_recipients()
+            owned = sessions.granted(expected, db_path=db_path)
+            if set(expected) - set(owned):
+                # A rebuilt store cannot wait for the heartbeat cooldown: the
+                # current poll may be the caller's last until another signal.
+                agent = adapters.self_agent()
+                _announce_locked(agent, adapters.lane_for(agent))
+                owned = sessions.granted(expected, db_path=db_path)
+                if set(expected) - set(owned) and not _registration_failure:
+                    _registration_failure[:] = ["expected lane grants are missing"]
+        except Exception as exc:
+            _registration_failure[:] = [f"{type(exc).__name__}: {exc}"]
+            owned = ()
+
+        def verify(conn):
+            try:
+                granted = sessions.granted(adapters.owned_recipients(), conn=conn)
+                if set(adapters.owned_recipients()) - set(granted):
+                    _registration_failure[:] = [
+                        "lane ownership is contested or unavailable"
+                    ]
+                return granted
+            except Exception as exc:
+                _registration_failure[:] = [f"{type(exc).__name__}: {exc}"]
+                return ()
+
+        return operation(*args, owned=verify, db_path=db_path, **kwargs)
+
+
 @mcp.tool()
 async def inbox(
     agent: str,
@@ -554,14 +584,12 @@ async def inbox(
     # one thing they all keep doing.
     await _in_thread(_heartbeat)
     msgs, remaining = await _in_thread(
+        _consume,
         mailbox.inbox,
         agents,
         unread_only=unread_only,
         limit=limit,
         auto_ack=auto_ack,
-        # Same identity the explicit ack tool uses, so a consuming read cannot
-        # drain a lane this session does not own.
-        owned=adapters.owned_recipients(),
     )
     msgs, truncated, _ = _fit_response(msgs, allow_drop=False)
     response = {
@@ -582,6 +610,9 @@ async def inbox(
         response["recover_with"] = (
             f"history(agent={agent!r}, before_id={msgs[-1]['message_id'] + 1})"
         )
+    warning = _last_registration_failure()
+    if warning:
+        response["registration_warning"] = warning
     return response
 
 
@@ -825,9 +856,11 @@ def _code_revision() -> str | None:
             if target.exists():
                 revision = target.read_text(encoding="utf-8").strip()[:12]
             else:  # packed-refs, or a ref with no loose file
-                for line in (git / "packed-refs").read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines():
+                for line in (
+                    (git / "packed-refs")
+                    .read_text(encoding="utf-8", errors="replace")
+                    .splitlines()
+                ):
                     if line.endswith(f" {ref}"):
                         revision = line.split(" ", 1)[0][:12]
                         break
@@ -942,9 +975,8 @@ async def ack(message_id: int) -> dict:
     existed and was ackable by this session (idempotent — a second ack
     returns false).
     """
-    return await _in_thread(
-        mailbox.ack, message_id, owned=adapters.owned_recipients()
-    )
+    await _in_thread(_heartbeat)
+    return await _in_thread(_consume, mailbox.ack, message_id)
 
 
 @mcp.tool()
@@ -992,7 +1024,9 @@ async def history(
         # rather than a special case the caller has to detect.
         response["next_before_id"] = msgs[-1]["message_id"]
     # More to fetch if the aggregate cap bit, or the page came back full.
-    response["has_more"] = bool(dropped) or full_page >= max(1, min(limit, mailbox.MAX_HISTORY_LIMIT))
+    response["has_more"] = bool(dropped) or full_page >= max(
+        1, min(limit, mailbox.MAX_HISTORY_LIMIT)
+    )
     if not msgs and agent is not None:
         # An empty page for a filtered query is ambiguous: no traffic, or the
         # wrong name? That ambiguity cost real time — an agent filtered on its
@@ -1245,9 +1279,7 @@ def _claude_invocation_overrides(
     if require_claude:
         overrides["require_claude"] = True
     if override_claude_reserve:
-        audited_reason, truncation = _bounded_override_reason_for_audit(
-            override_reason
-        )
+        audited_reason, truncation = _bounded_override_reason_for_audit(override_reason)
         overrides["claude_weekly_reserve"] = {
             "bypass": True,
             "reason": audited_reason,
@@ -1255,13 +1287,9 @@ def _claude_invocation_overrides(
             **truncation,
         }
     elif override_reason is not None:
-        audited_reason, truncation = _bounded_override_reason_for_audit(
-            override_reason
-        )
+        audited_reason, truncation = _bounded_override_reason_for_audit(override_reason)
         overrides["override_reason"] = (
-            {"value": audited_reason, **truncation}
-            if truncation
-            else audited_reason
+            {"value": audited_reason, **truncation} if truncation else audited_reason
         )
     return overrides
 
@@ -1669,8 +1697,8 @@ def _ask_async_impl(
                 # cancelled when the worker STARTED; it proves nothing about
                 # the moment the subprocess is actually launched, which may be
                 # a whole other dispatch later.
-                ask_kwargs["still_wanted"] = (
-                    lambda: (jobs.get(job_id) or {}).get("state") == jobs.RUNNING
+                ask_kwargs["still_wanted"] = lambda: (
+                    (jobs.get(job_id) or {}).get("state") == jobs.RUNNING
                 )
             if extra_ask_kwargs:
                 ask_kwargs.update(extra_ask_kwargs)

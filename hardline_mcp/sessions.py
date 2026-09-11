@@ -240,6 +240,108 @@ def _upsert(conn, *, pid, lane, agent, label, key, cwd, stamp) -> None:
         )
 
 
+def _refusal(conn, lane: str, pid: int) -> dict | None:
+    """One ownership rule; acquisition reserves the writer before evaluating it."""
+    rows = list(conn.execute("SELECT * FROM agent_sessions WHERE lane = ?", (lane,)))
+    # The legacy table too. `holders` consults both, and `claim` asking
+    # a narrower question than the thing that reports the answer is how
+    # a lane reads as held everywhere except at the moment somebody
+    # takes it.
+    rows += _legacy_holders(conn, lane)
+    existing = [_row_to_dict(r) for r in rows if r["pid"] != pid and _is_live(r)]
+    if existing:
+        held_by = ", ".join(
+            f"pid {h['pid']} ({h['liveness']}, {h['cwd']})" for h in existing
+        )
+        unsure = [h for h in existing if h["liveness"] != "alive"]
+        return {
+            "ok": False,
+            "error": (
+                f"lane {lane!r} is already held by {held_by}. "
+                + (
+                    "That process could not be probed, so this refuses "
+                    "rather than risk taking a name somebody is still "
+                    "reading. "
+                    if unsure
+                    else ""
+                )
+                + "Pick another label, or let that session exit first."
+            ),
+            "lane": lane,
+            "held_by": existing,
+        }
+    # No REGISTERED holder is not the same as no holder. Before taking
+    # a name on the strength of an empty table, look for work that is
+    # still owed to it and still owned by something alive.
+    outstanding = [j for j in _live_work(conn, lane) if j["owner_pid"] != pid]
+    if outstanding:
+        which = ", ".join(
+            f"{j['job_id']} ({j['state']}, owner pid {j['owner_pid']})"
+            for j in outstanding
+        )
+        return {
+            "ok": False,
+            "error": (
+                f"lane {lane!r} has no registered holder, but unfinished "
+                f"work is still addressed to it: {which}. Something is "
+                "consuming this name without being registered - an older "
+                "hardline, or one whose registration failed. Refusing "
+                "rather than splitting its mail."
+            ),
+            "lane": lane,
+            "outstanding_jobs": outstanding,
+        }
+    return None
+
+
+def _acquire(
+    *, agent, lanes, label, primary, pid, cwd, db_path, now_fn, atomic: bool
+) -> dict:
+    pid = os.getpid() if pid is None else pid
+    requested = tuple(dict.fromkeys(lanes))
+    stamp, key = _iso(now_fn()), process_key(pid)
+    accepted, refused = [], []
+    inherited = 0
+    with closing(_connect(_resolve_db(db_path))) as conn:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for lane in requested:
+                refusal = _refusal(conn, lane, pid)
+                if refusal:
+                    if atomic:
+                        conn.rollback()
+                        return refusal
+                    refused.append(lane)
+                    continue
+                if lane == primary:
+                    inherited = _unread_for(conn, lane)
+                conn.execute(
+                    "DELETE FROM agent_sessions WHERE lane = ? AND pid != ?",
+                    (lane, pid),
+                )
+                _upsert(
+                    conn,
+                    pid=pid,
+                    lane=lane,
+                    agent=agent,
+                    label=label if lane == primary else None,
+                    key=key,
+                    cwd=cwd if cwd is not None else str(Path.cwd()),
+                    stamp=stamp,
+                )
+                accepted.append(lane)
+    return {
+        "ok": True,
+        "agent": agent,
+        "label": label,
+        "pid": pid,
+        "lane": accepted[-1] if accepted else None,
+        "lanes": accepted,
+        "contested": refused,
+        "inherited_unread": inherited,
+    }
+
+
 def register(
     *,
     agent: str,
@@ -251,79 +353,50 @@ def register(
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> dict:
-    """Record (or refresh) the lanes this process holds. Idempotent.
+    """Acquire or refresh each requested lane; report contested ones separately.
 
-    ``lanes`` is what to RECORD, not the whole truth to enforce: rows already
-    there and absent from it are left alone. ``lane`` is the single-lane
-    spelling, kept because most callers hold exactly one.
-
-    Only ever writes rows whose pid is this process, so the cross-process case
-    cannot collide. A row left behind by a dead session that happened to hold
-    this pid is correctly overwritten: the pid is ours now.
-
-    Safe without an explicit transaction even though ``_upsert`` is a
-    check-then-act, because the UPDATE takes SQLite's single write lock whether
-    or not it matches a row: a second writer blocks there and then finds the row
-    its own UPDATE was looking for. ``claim`` cannot lean on that - its check is
-    a SELECT, which takes no such lock - so it opens the transaction itself.
+    Ownership checks and writes share one transaction with explicit claims.
+    Refreshes are additive: a stale announcement cannot remove a newer claim.
     """
-    db_path = _resolve_db(db_path)
-    pid = os.getpid() if pid is None else pid
-    held = tuple(dict.fromkeys(list(lanes or ()) + ([lane] if lane else [])))
-    if not held:
-        return {"agent": agent, "label": label, "pid": pid, "lanes": []}
-    # Registration is where a DERIVED lane arrives, and derived lanes never
-    # pass through ``claim`` - so every exclusivity check that lives there was
-    # simply absent from the automatic path. The key is (pid, lane), not lane,
-    # so two processes deriving the same name both became consumers and the
-    # only thing that noticed was a report, after the fact.
-    contested = [
-        lane_name
-        for lane_name in held
-        if any(h["pid"] != pid for h in holders(lane_name, db_path=db_path))
-    ]
-    held = tuple(lane_name for lane_name in held if lane_name not in contested)
-    if not held:
-        return {
-            "agent": agent,
-            "label": label,
-            "pid": pid,
-            "lanes": [],
-            "contested": contested,
-        }
-    stamp = _iso(now_fn())
-    key = process_key(pid)
-    cwd = cwd if cwd is not None else str(Path.cwd())
-    with closing(_connect(db_path)) as conn:
-        with conn:
-            for one in held:
-                _upsert(
-                    conn,
-                    pid=pid,
-                    lane=one,
-                    agent=agent,
-                    label=label,
-                    key=key,
-                    cwd=cwd,
-                    stamp=stamp,
-                )
-            # ADDITIVE. No "delete whatever is absent from this set", because
-            # the set is a SNAPSHOT and the caller is not always serialized
-            # against claims: `_announce_self` runs from `list_agents`, reads
-            # the held lanes, and writes them, so a heartbeat that started
-            # before a rename can arrive after it carrying the older set.
-            # Deleting on that basis unregisters the lane just claimed - while
-            # this process keeps consuming it locally, and while another
-            # process is now free to take it. Registration cannot be the thing
-            # that removes rows; `drop_lane` is, for the one case that needs it.
-    return {
-        "lane": held[-1],
-        "lanes": list(held),
-        "agent": agent,
-        "label": label,
-        "pid": pid,
-        "contested": contested,
-    }
+    requested = list(lanes or ()) + ([lane] if lane else [])
+    return _acquire(
+        agent=agent,
+        lanes=requested,
+        label=label,
+        primary=lane or (requested[-1] if requested else None),
+        pid=pid,
+        cwd=cwd,
+        db_path=db_path,
+        now_fn=now_fn,
+        atomic=False,
+    )
+
+
+def granted(
+    lanes: Iterable[str],
+    *,
+    db_path: Optional[Path] = None,
+    conn: sqlite3.Connection | None = None,
+) -> tuple[str, ...]:
+    """Return only this process's uncontested, durable lane grants."""
+    if conn is None:
+        with closing(_connect(_resolve_db(db_path))) as snapshot:
+            snapshot.execute("BEGIN")
+            return granted(lanes, conn=snapshot)
+    pid, key = os.getpid(), process_key(os.getpid())
+    owned = []
+    for lane in lanes:
+        if _refusal(conn, lane, pid):
+            continue
+        rows = list(
+            conn.execute("SELECT * FROM agent_sessions WHERE lane = ?", (lane,))
+        )
+        rows += _legacy_holders(conn, lane)
+        if any(
+            r["pid"] == pid and r["process_key"] == key and _is_live(r) for r in rows
+        ):
+            owned.append(lane)
+    return tuple(owned)
 
 
 def _group(rows: list[sqlite3.Row]) -> list[dict]:
@@ -376,9 +449,8 @@ def live(
 def holders(lane: str, *, db_path: Optional[Path] = None) -> list[dict]:
     """Live sessions holding ``lane`` (a fully-qualified recipient).
 
-    Normally zero or one. Two would mean two processes answering to one name,
-    which ``claim`` refuses to create but a hand-set ``HARDLINE_AGENT_LABEL``
-    on two sessions can still produce - so callers get a list and can say so.
+    Normally zero or one. Older revisions can leave conflicting live rows,
+    so callers receive a list and can report the conflict.
     """
     db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
@@ -419,132 +491,26 @@ def claim(
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> dict:
-    """Take ``agent:label`` as this process's lane, unless someone live holds it.
+    """Acquire the named role and retained lanes together, or change nothing.
 
-    Returns ``{"ok": True, "lane": ...}`` or ``{"ok": False, "error": ...}``.
-    ``lanes`` is what the process already holds; they are retained alongside the
-    new name so nothing in flight to them strands.
-
-    A name collision is resolved by liveness rather than by seniority: a dead
-    holder's claim means nothing, and refusing on its behalf would make a label
-    unusable forever after the session that used it crashed. A LIVE holder is
-    refused and named, because silently moving a name would redirect mail
-    somebody is still waiting on.
-
-    The check and the write are one transaction, opened with BEGIN IMMEDIATE.
-    Without it this is a check-then-act across two connections: two sessions
-    claiming the same label at once both read "nobody holds it", both insert
-    their OWN rows - which collide with nothing, since the key is (pid, lane) -
-    and both end up holding the lane. They would then each consume the other's
-    mail. ``register``'s UPDATE-then-INSERT is safe for the opposite reason (its
-    UPDATE takes the write lock immediately), and relying on that here would be
-    relying on a lock this code does not take. BEGIN DEFERRED is not enough
-    under WAL: the read-to-write upgrade can fail with SQLITE_BUSY_SNAPSHOT,
-    which busy_timeout cannot resolve.
+    A successful claimant inherits unread mail already addressed to the role.
+    Live or unprobeable holders and outstanding work prevent a takeover.
     """
-    db_path = _resolve_db(db_path)
-    pid = os.getpid() if pid is None else pid
     lane = f"{agent}:{label}"
-    held = tuple(dict.fromkeys([*lanes, lane]))
-    stamp = _iso(now_fn())
-    key = process_key(pid)
-    cwd = cwd if cwd is not None else str(Path.cwd())
-    with closing(_connect(db_path)) as conn:
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            rows = list(
-                conn.execute("SELECT * FROM agent_sessions WHERE lane = ?", (lane,))
-            )
-            # The legacy table too. `holders` consults both, and `claim` asking
-            # a narrower question than the thing that reports the answer is how
-            # a lane reads as held everywhere except at the moment somebody
-            # takes it.
-            rows += _legacy_holders(conn, lane)
-            existing = [
-                _row_to_dict(r) for r in rows if r["pid"] != pid and _is_live(r)
-            ]
-            if existing:
-                conn.rollback()
-                held_by = ", ".join(
-                    f"pid {h['pid']} ({h['liveness']}, {h['cwd']})" for h in existing
-                )
-                unsure = [h for h in existing if h["liveness"] != "alive"]
-                return {
-                    "ok": False,
-                    "error": (
-                        f"lane {lane!r} is already held by {held_by}. "
-                        + (
-                            "That process could not be probed, so this refuses "
-                            "rather than risk taking a name somebody is still "
-                            "reading. "
-                            if unsure
-                            else ""
-                        )
-                        + "Pick another label, or let that session exit first."
-                    ),
-                    "lane": lane,
-                    "held_by": existing,
-                }
-            # No REGISTERED holder is not the same as no holder. Before taking
-            # a name on the strength of an empty table, look for work that is
-            # still owed to it and still owned by something alive.
-            outstanding = [j for j in _live_work(conn, lane) if j["owner_pid"] != pid]
-            if outstanding:
-                conn.rollback()
-                which = ", ".join(
-                    f"{j['job_id']} ({j['state']}, owner pid {j['owner_pid']})"
-                    for j in outstanding
-                )
-                return {
-                    "ok": False,
-                    "error": (
-                        f"lane {lane!r} has no registered holder, but unfinished "
-                        f"work is still addressed to it: {which}. Something is "
-                        "consuming this name without being registered - an older "
-                        "hardline, or one whose registration failed. Refusing "
-                        "rather than splitting its mail."
-                    ),
-                    "lane": lane,
-                    "outstanding_jobs": outstanding,
-                }
-            inherited = _unread_for(conn, lane)
-            # Any remaining row for this lane belongs to a dead session (or to
-            # us). Clear it so the takeover leaves exactly one holder.
-            conn.execute(
-                "DELETE FROM agent_sessions WHERE lane = ? AND pid != ?", (lane, pid)
-            )
-            for one in held:
-                _upsert(
-                    conn,
-                    pid=pid,
-                    lane=one,
-                    agent=agent,
-                    label=label if one == lane else None,
-                    key=key,
-                    cwd=cwd,
-                    stamp=stamp,
-                )
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-    return {
-        "ok": True,
-        "lane": lane,
-        "label": label,
-        "pid": pid,
-        "lanes": list(held),
-        # Say what was taken on, not just that it worked. A label is a role, so
-        # a claimant inherits whatever was already waiting at that name - which
-        # is the intended behaviour and also the thing an operator would most
-        # want to see afterwards if it turns out to have been the wrong name.
-        "inherited_unread": inherited,
-    }
+    return _acquire(
+        agent=agent,
+        lanes=[*lanes, lane],
+        label=label,
+        primary=lane,
+        pid=pid,
+        cwd=cwd,
+        db_path=db_path,
+        now_fn=now_fn,
+        atomic=True,
+    )
 
 
-def unregister(
-    *, pid: Optional[int] = None, db_path: Optional[Path] = None
-) -> bool:
+def unregister(*, pid: Optional[int] = None, db_path: Optional[Path] = None) -> bool:
     """Remove every row for this process. Returns whether any were there.
 
     Not required for correctness - a vanished process is pruned on the next
