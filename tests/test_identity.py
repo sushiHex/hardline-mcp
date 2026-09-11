@@ -432,6 +432,34 @@ def test_unknown_wrapper_retains_verified_descendant_creation_bound(
     assert adapters.host_identity()["host_pid"] == expected_pid
 
 
+def test_unverified_host_remains_unknown_until_confirmed_dead(tmp_path, monkeypatch):
+    db = tmp_path / "mb.db"
+    host_pid = os.getpid() + 10000
+    state = [procid.ALIVE]
+    monkeypatch.setattr(
+        sessions,
+        "instance_state",
+        lambda pid, key: state[0] if pid == host_pid else procid.ALIVE,
+    )
+    assert sessions.register(
+        agent="codex", lane="codex:role", host_pid=host_pid, host_key=None, db_path=db
+    )["ok"]
+    mailbox.send("claude", "codex:role", "pending", db_path=db)
+    assert sessions.live(db_path=db)[0]["liveness"] == procid.UNKNOWN
+    assert not sessions.claim(
+        agent="codex", label="role", pid=host_pid + 1, db_path=db
+    )["ok"]
+    target = watch.Target(
+        db, "codex", owner_pid=os.getpid(), owner_key=procid.process_key(os.getpid())
+    )
+    with pytest.raises(watch.Unavailable):
+        watch.read_pending(target)
+    state[0] = procid.DEAD
+    with pytest.raises(watch.TargetLost):
+        watch.read_pending(target)
+    assert sessions.live(db_path=db) == []
+
+
 def test_additive_identity_migration_keeps_old_writers_compatible(tmp_path):
     db = tmp_path / "old.db"
     old_schema = mailbox._SCHEMA.replace("    owner_key    TEXT,\n", "").replace(

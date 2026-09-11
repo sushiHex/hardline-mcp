@@ -111,10 +111,11 @@ def _state(row: sqlite3.Row) -> str:
 
 
 def host_state(row: sqlite3.Row) -> str:
-    """Host liveness for current and legacy rows; absent identity adds no constraint."""
+    """Legacy rows are unbound; a bound host needs a token to be verified alive."""
     if "host_pid" not in row.keys() or row["host_pid"] is None:
         return ALIVE
-    return instance_state(row["host_pid"], row["host_key"])
+    state = instance_state(row["host_pid"], row["host_key"])
+    return UNKNOWN if row["host_key"] is None and state == ALIVE else state
 
 
 def _is_live(row: sqlite3.Row) -> bool:
