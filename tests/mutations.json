@@ -25,8 +25,8 @@
   },
   "admission-release": {
     "file": "hardline_mcp/server.py",
-    "before": "    future.add_done_callback(lambda _future: slots.release())\n",
-    "after": "",
+    "before": "        slots.release()\n\n    future.add_done_callback(finished)",
+    "after": "\n    future.add_done_callback(finished)",
     "tests": [
       "tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"
     ]
@@ -166,6 +166,38 @@
     "after": "host_pid = ?",
     "tests": [
       "tests/test_identity.py::test_legacy_refresh_keeps_host_binding"
+    ]
+  },
+  "admission-cancel-releases": {
+    "file": "hardline_mcp/server.py",
+    "before": "and future.cancel():",
+    "after": "and False:",
+    "tests": [
+      "tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"
+    ]
+  },
+  "cancel-removes-prompt": {
+    "file": "hardline_mcp/dispatch.py",
+    "before": "removed = self._pending.pop(future, None)",
+    "after": "removed = self._pending.get(future)",
+    "tests": [
+      "tests/test_dispatch.py::test_cancel_removes_prompt_and_notifies_waiters_before_worker_is_free"
+    ]
+  },
+  "lane-grant-work-conflict": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "        if _refusal(conn, lane, pid):\n            continue\n",
+    "after": "",
+    "tests": [
+      "tests/test_ownership.py::test_existing_grant_cannot_consume_after_foreign_work_appears"
+    ]
+  },
+  "lane-consumption-transaction": {
+    "file": "hardline_mcp/server.py",
+    "before": "return operation(*args, owned=verify, db_path=db_path, **kwargs)",
+    "after": "return operation(*args, owned=owned, db_path=db_path, **kwargs)",
+    "tests": [
+      "tests/test_ownership.py::test_consumption_rechecks_conflict_after_preflight"
     ]
   }
 }

@@ -236,7 +236,8 @@ session that used it crashed.
 
 Automatic registration follows the same atomic acquisition rule. A refused
 registration reports contested lanes; `inbox` and `ack` consume qualified mail
-only with a durable grant for this process. Reads can still inspect an unowned
+only with a durable grant for this process, checked in the acknowledgement
+transaction. Reads can still inspect an unowned
 lane, and unqualified mail remains shared.
 
 Two consequences worth knowing, both deliberate:
@@ -486,10 +487,10 @@ ask_codex(
 
 For a task that shouldn't block the caller, `ask_codex_async` dispatches the
 same `ask_codex` through the bounded background thread pool (see
-*Configuration*) and returns `{"ok": true, "dispatched": true, "label": ...}`
-immediately. The result lands in the mailbox as a
-message from `"codex"` to `from_agent` once the run finishes — poll it the
-same way you'd poll for any other mailbox message:
+*Configuration*) and returns `{"ok": true, "accepted": true, "state": "queued", "job_id": ...}`
+immediately (the state can already be running or terminal). A `job_finished`
+notice arrives from `"codex"` once the result is saved. Poll the inbox, then
+retrieve the answer using the notice's job ID:
 
 ```text
 ask_codex_async(
@@ -501,13 +502,14 @@ ask_codex_async(
 )
 # later:
 inbox(agent="claude")
+job_result(job_id="job_...")
 ```
 
-`label` is echoed back in the delivered message body so a caller firing
-several concurrent dispatches can match each result to its request. This is
-fire-and-forget, not durable: if hardline-mcp restarts before a dispatched
-task finishes, that task is lost — there is no task table, only the
-existing send/inbox mailbox the result is dropped into on completion.
+`job_id` identifies the durable run; `label` helps match concurrent requests.
+Interrupted work is reported as `lost` after a restart. Cancelling queued work
+removes its callable and releases capacity immediately in the owning process.
+A cancellation from another process is reconciled before the owner's next
+admission, so a replacement request can use the freed slot.
 
 ### Claude model and effort selection
 
@@ -682,8 +684,8 @@ A provider reset is observed on the next call; no scheduled re-enable is
 necessary.
 
 `ask_claude_async` mirrors `ask_codex_async` exactly: dispatches `ask_claude`
-through the same bounded background thread pool and delivers the result
-through the mailbox once it finishes. The sender records the provider that
+through the same bounded background thread pool and delivers a completion
+notice through the mailbox. The sender records the provider that
 actually ran: `claude`, or `codex` after a ChatGPT redirect.
 
 ```text
@@ -696,12 +698,10 @@ ask_claude_async(
 )
 # later:
 inbox(agent="codex")
+job_result(job_id="job_...")
 ```
 
-Same caveats as the Codex version: `label` is echoed back for matching
-concurrent dispatches, and this is fire-and-forget — a hardline-mcp restart
-before completion loses the task, since only the existing mailbox holds the
-eventual result, not a task table.
+The receipt, cancellation, and durable result contract is the same as Codex's.
 After execution, advisory calls therefore fail closed unless runtime telemetry
 verifies first-party account auth with no overage. This is post-call evidence;
 it cannot undo a request already made by a misconfigured trusted wrapper.

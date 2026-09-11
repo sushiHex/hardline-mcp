@@ -278,7 +278,7 @@ def _upsert(
 
 
 def _refusal(conn, lane: str, pid: int) -> dict | None:
-    """One ownership rule, evaluated while the caller holds the write lock."""
+    """One ownership rule; acquisition reserves the writer before evaluating it."""
     rows = list(conn.execute("SELECT * FROM agent_sessions WHERE lane = ?", (lane,)))
     # The legacy table too. `holders` consults both, and `claim` asking
     # a narrower question than the thing that reports the answer is how
@@ -438,24 +438,30 @@ def register(
     )
 
 
-def granted(lanes: Iterable[str], *, db_path: Optional[Path] = None) -> tuple[str, ...]:
+def granted(
+    lanes: Iterable[str],
+    *,
+    db_path: Optional[Path] = None,
+    conn: sqlite3.Connection | None = None,
+) -> tuple[str, ...]:
     """Return only this process's uncontested, durable lane grants."""
+    if conn is None:
+        with closing(_connect(_resolve_db(db_path))) as snapshot:
+            snapshot.execute("BEGIN")
+            return granted(lanes, conn=snapshot)
     pid, key = os.getpid(), process_key(os.getpid())
     owned = []
-    with closing(_connect(_resolve_db(db_path))) as conn:
-        conn.execute("BEGIN")
-        for lane in lanes:
-            rows = list(
-                conn.execute("SELECT * FROM agent_sessions WHERE lane = ?", (lane,))
-            )
-            rows += _legacy_holders(conn, lane)
-            if any(r["pid"] != pid and _is_live(r) for r in rows):
-                continue
-            if any(
-                r["pid"] == pid and r["process_key"] == key and _is_live(r)
-                for r in rows
-            ):
-                owned.append(lane)
+    for lane in lanes:
+        if _refusal(conn, lane, pid):
+            continue
+        rows = list(
+            conn.execute("SELECT * FROM agent_sessions WHERE lane = ?", (lane,))
+        )
+        rows += _legacy_holders(conn, lane)
+        if any(
+            r["pid"] == pid and r["process_key"] == key and _is_live(r) for r in rows
+        ):
+            owned.append(lane)
     return tuple(owned)
 
 
