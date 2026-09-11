@@ -32,6 +32,24 @@ _WAIT_OBJECT_0 = 0x00000000
 _ERROR_INVALID_PARAMETER = 87
 _ERROR_ACCESS_DENIED = 5
 _kernel32_cache: list = []
+_current_identity: tuple[int, str] | None = None
+
+
+def current_identity() -> tuple[int, Optional[str]]:
+    """Retain our first verified creation token; a live process cannot reuse its PID.
+
+    Foreign processes still need fresh probes. A fork changes our PID and gets
+    a new identity. Failed probes are not cached, so an initially unknown token
+    can become known, but a later failure cannot erase a verified token.
+    """
+    global _current_identity
+    pid = os.getpid()
+    if _current_identity is None or _current_identity[0] != pid:
+        token = process_key(pid)
+        if token is not None:
+            _current_identity = (pid, token)
+    known = _current_identity
+    return known if known is not None and known[0] == pid else (pid, None)
 
 
 def _kernel32():
@@ -197,7 +215,9 @@ def process_key(pid: int) -> Optional[str]:
                 kernel32.CloseHandle(handle)
         # Linux: field 22 of /proc/<pid>/stat is starttime in clock ticks.
         try:
-            with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace") as fh:
+            with open(
+                f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace"
+            ) as fh:
                 data = fh.read()
         except (OSError, ValueError):
             return None

@@ -61,9 +61,10 @@ def _no_leaked_claims():
     identity of every test that runs afterwards, and the failures land
     somewhere else entirely.
     """
-    from hardline_mcp import adapters
+    from hardline_mcp import adapters, procid
 
     adapters.reset_claimed_lanes()
+    procid._current_identity = None
     server = sys.modules.get("hardline_mcp.server")
     if server is not None:
         server._last_heartbeat.clear()

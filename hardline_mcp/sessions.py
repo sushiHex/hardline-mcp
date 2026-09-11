@@ -75,7 +75,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from .mailbox import _connect, _default_now, _iso, _resolve_db
-from .procid import ALIVE, DEAD, UNKNOWN, instance_state, process_key
+from .procid import ALIVE, DEAD, UNKNOWN, current_identity, instance_state, process_key
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -354,7 +354,8 @@ def _acquire(
             "lanes": [],
             "contested": list(requested),
         }
-    stamp, key = _iso(now_fn()), process_key(pid)
+    stamp = _iso(now_fn())
+    key = current_identity()[1] if pid == os.getpid() else process_key(pid)
     accepted, refused = [], []
     inherited = 0
     with closing(_connect(_resolve_db(db_path))) as conn:
@@ -449,7 +450,7 @@ def granted(
         with closing(_connect(_resolve_db(db_path))) as snapshot:
             snapshot.execute("BEGIN")
             return granted(lanes, conn=snapshot)
-    pid, key = os.getpid(), process_key(os.getpid())
+    pid, key = current_identity()
     owned = []
     for lane in lanes:
         if _refusal(conn, lane, pid):

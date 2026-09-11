@@ -41,7 +41,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .mailbox import _connect, _default_now, _iso, _resolve_db
-from .procid import DEAD, instance_alive, instance_state, pid_alive, process_key
+from .procid import (
+    DEAD,
+    current_identity,
+    instance_alive,
+    instance_state,
+    pid_alive,
+    process_key,
+)
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -118,6 +125,7 @@ def create(
     """Record a job as ``queued`` and return its id."""
     db_path = _resolve_db(db_path)
     job_id = new_job_id()
+    owner_pid, owner_key = current_identity()
     with closing(_connect(db_path)) as conn:
         with conn:
             conn.execute(
@@ -130,8 +138,8 @@ def create(
                     label,
                     QUEUED,
                     json.dumps(request, default=str),
-                    os.getpid(),
-                    process_key(os.getpid()),
+                    owner_pid,
+                    owner_key,
                     _iso(now_fn()),
                 ),
             )
@@ -154,8 +162,7 @@ def mark_running(
     carried on, which is worse than not supporting cancel at all.
     """
     db_path = _resolve_db(db_path)
-    owner_pid = os.getpid()
-    owner_key = process_key(owner_pid)
+    owner_pid, owner_key = current_identity()
     with closing(_connect(db_path)) as conn:
         with conn:
             cur = conn.execute(
@@ -191,6 +198,7 @@ def set_child_pid(
     process it was never entitled to signal.
     """
     db_path = _resolve_db(db_path)
+    owner_pid, owner_key = current_identity()
     with closing(_connect(db_path)) as conn:
         with conn:
             cur = conn.execute(
@@ -202,8 +210,8 @@ def set_child_pid(
                     started_key,
                     job_id,
                     RUNNING,
-                    os.getpid(),
-                    process_key(os.getpid()),
+                    owner_pid,
+                    owner_key,
                 ),
             )
         return cur.rowcount > 0
@@ -224,6 +232,7 @@ def finish(
     """
     ok = bool(result and result.get("ok"))
     stamp = _iso(now_fn())
+    owner_pid, owner_key = current_identity()
     with closing(_connect(_resolve_db(db_path))) as conn:
         with conn:
             changed = conn.execute(
@@ -243,8 +252,8 @@ def finish(
                     stamp,
                     stamp,
                     job_id,
-                    os.getpid(),
-                    process_key(os.getpid()),
+                    owner_pid,
+                    owner_key,
                     RUNNING,
                     LOST,
                     CANCELLED,

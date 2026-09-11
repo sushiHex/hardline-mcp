@@ -158,22 +158,55 @@ def test_legacy_refresh_keeps_host_binding(tmp_path):
     assert row["host_pid"] == pid and row["host_key"] == key
 
 
-@pytest.mark.parametrize("first_probe_known", [True, False])
-def test_start_uses_one_owner_token_for_assignment_and_predicate(
-    tmp_path, monkeypatch, first_probe_known
+@pytest.mark.parametrize("known_at_creation", [True, False])
+def test_verified_owner_token_survives_later_probe_failure(
+    tmp_path, monkeypatch, known_at_creation
 ):
     db = tmp_path / "mb.db"
-    job_id = create(db)
     key = procid.process_key(os.getpid())
-    answers = iter([key, None] if first_probe_known else [None, key])
-    monkeypatch.setattr(jobs, "process_key", lambda pid: next(answers))
-    assert jobs.mark_running(job_id, db_path=db) is first_probe_known
+    monkeypatch.setattr(
+        procid, "process_key", lambda pid: key if known_at_creation else None
+    )
+    job_id = create(db)
+    if not known_at_creation:
+        monkeypatch.setattr(procid, "process_key", lambda pid: key)
+        assert jobs.mark_running(job_id, db_path=db)
+    monkeypatch.setattr(procid, "process_key", lambda pid: None)
+    monkeypatch.setattr(jobs, "process_key", lambda pid: None)
+    if known_at_creation:
+        assert jobs.mark_running(job_id, db_path=db)
+    assert jobs.set_child_pid(job_id, 123, started_key="child", db_path=db)
+    assert jobs.finish(job_id, result={"ok": True, "reply": "preserved"}, db_path=db)
     with mailbox._connect(db) as conn:
         row = conn.execute(
             "SELECT state, owner_key FROM jobs WHERE job_id = ?", (job_id,)
         ).fetchone()
-    assert row["owner_key"] == key
-    assert row["state"] == (jobs.RUNNING if first_probe_known else jobs.QUEUED)
+    assert row["state"] == jobs.COMPLETED and row["owner_key"] == key
+    assert len(mailbox.inbox("claude:role", auto_ack=False, db_path=db)[0]) == 1
+
+
+def test_cached_identity_changes_with_process_pid(monkeypatch):
+    monkeypatch.setattr(procid.os, "getpid", lambda: 10001)
+    monkeypatch.setattr(procid, "process_key", lambda pid: str(pid))
+    assert procid.current_identity() == (10001, "10001")
+    monkeypatch.setattr(procid.os, "getpid", lambda: 10002)
+    assert procid.current_identity() == (10002, "10002")
+
+
+def test_session_refresh_retains_verified_identity_during_probe_failure(
+    tmp_path, monkeypatch
+):
+    db = tmp_path / "mb.db"
+    key = procid.process_key(os.getpid())
+    sessions.register(agent="codex", lane="codex:role", db_path=db)
+    monkeypatch.setattr(procid, "process_key", lambda pid: None)
+    monkeypatch.setattr(sessions, "process_key", lambda pid: None)
+    sessions.register(agent="codex", lane="codex:role", db_path=db)
+    assert sessions.granted(["codex:role"], db_path=db) == ("codex:role",)
+    with mailbox._connect(db) as conn:
+        assert (
+            conn.execute("SELECT process_key FROM agent_sessions").fetchone()[0] == key
+        )
 
 
 def test_registration_retains_captured_host_after_reparenting(monkeypatch, tmp_path):

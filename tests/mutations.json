@@ -4,7 +4,7 @@
     "before": "                    QUEUED,\n                    owner_pid,\n                    owner_key,",
     "after": "                    QUEUED,\n                    owner_pid,\n                    process_key(owner_pid),",
     "tests": [
-      "tests/test_identity.py::test_start_uses_one_owner_token_for_assignment_and_predicate"
+      "tests/test_identity.py::test_verified_owner_token_survives_later_probe_failure"
     ]
   },
   "admission-capacity": {
@@ -214,6 +214,14 @@
     "after": "                    routing=None,",
     "tests": [
       "tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"
+    ]
+  },
+  "owner-completion-retention": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "                    owner_pid,\n                    owner_key,\n                    RUNNING,",
+    "after": "                    owner_pid,\n                    process_key(owner_pid),\n                    RUNNING,",
+    "tests": [
+      "tests/test_identity.py::test_verified_owner_token_survives_later_probe_failure"
     ]
   }
 }
