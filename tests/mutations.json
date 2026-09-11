@@ -154,8 +154,8 @@
   },
   "host-lifetime": {
     "file": "hardline_mcp/sessions.py",
-    "before": "return instance_state(row[\"host_pid\"], row[\"host_key\"])",
-    "after": "return ALIVE",
+    "before": "state = instance_state(row[\"host_pid\"], row[\"host_key\"])",
+    "after": "state = ALIVE",
     "tests": [
       "tests/test_identity.py::test_orphan_server_lifetime_follows_host"
     ]
