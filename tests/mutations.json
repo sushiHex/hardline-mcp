@@ -248,12 +248,36 @@
       "tests/test_identity.py::test_known_host_survives_an_unverifiable_wrapper"
     ]
   },
+  "host-parent-edge": {
+    "file": "hardline_mcp/procid.py",
+    "before": "                parent_pid_of(child_pid) != current\n",
+    "after": "                False\n",
+    "tests": [
+      "tests/test_identity.py::test_ancestry_rejects_a_changed_parent_edge"
+    ]
+  },
+  "host-parent-birth-order": {
+    "file": "hardline_mcp/procid.py",
+    "before": "                or _created_after(captured.key, child_key)\n",
+    "after": "                or False\n",
+    "tests": [
+      "tests/test_identity.py::test_ancestry_rejects_a_parent_born_after_its_child"
+    ]
+  },
   "host-ancestry-reuse": {
     "file": "hardline_mcp/procid.py",
     "before": "if key is not None and confirmed is not None and key != confirmed:",
     "after": "if False:",
     "tests": [
       "tests/test_identity.py::test_ancestry_stops_when_a_process_changes_during_capture"
+    ]
+  },
+  "host-initial-parent-edge": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "parent, depth=3, child=procid.current_identity()",
+    "after": "parent, depth=3",
+    "tests": [
+      "tests/test_identity.py::test_anchor_rejects_a_reused_initial_parent_pid"
     ]
   }
 }

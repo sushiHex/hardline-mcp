@@ -221,11 +221,14 @@ def test_registration_retains_captured_host_after_reparenting(monkeypatch, tmp_p
         lambda pid: {10001: "wrapper", 10002: "codex.exe"}.get(pid),
     )
     monkeypatch.setattr(
-        procid, "parent_pid_of", lambda pid: 10002 if pid == 10001 else None
+        procid,
+        "parent_pid_of",
+        lambda pid: 10001 if pid == os.getpid() else (10002 if pid == 10001 else None),
     )
     monkeypatch.setattr(procid, "identity_token", lambda pid, key: "token")
     monkeypatch.setattr(procid, "process_key", lambda pid: f"key-{pid}")
     monkeypatch.setattr(sessions, "instance_state", lambda *args: procid.ALIVE)
+    monkeypatch.setattr(procid, "_pid_state", lambda pid: procid.ALIVE)
     assert adapters.host_identity() == {"host_pid": 10002, "host_key": "key-10002"}
     monkeypatch.setattr(adapters.os, "getppid", lambda: 10003)
     server._announce_self()
@@ -248,7 +251,9 @@ def test_anchor_retains_verified_host_token_after_probe_failure(tmp_path, monkey
     monkeypatch.setattr(adapters, "_session_anchor", [])
     monkeypatch.setattr(adapters.os, "getppid", lambda: host_pid)
     monkeypatch.setattr(procid, "image_name", lambda pid: "codex.exe")
-    monkeypatch.setattr(procid, "parent_pid_of", lambda pid: None)
+    monkeypatch.setattr(
+        procid, "parent_pid_of", lambda pid: 10001 if pid == os.getpid() else None
+    )
     monkeypatch.setattr(procid, "process_key", probe)
     monkeypatch.setattr(procid, "_pid_state", lambda pid: procid.ALIVE)
     host = adapters.host_identity()
@@ -275,7 +280,7 @@ def test_host_selection_never_rewalks_wrappers(tmp_path, monkeypatch, later_pare
     def parent_of(pid):
         walks.append(pid)
         if pid == 10001:
-            return 10002 if walks.count(pid) == 1 else later_parent
+            return 10002
         return None
 
     monkeypatch.setattr(adapters, "_session_anchor", [])
@@ -288,9 +293,11 @@ def test_host_selection_never_rewalks_wrappers(tmp_path, monkeypatch, later_pare
     )
     monkeypatch.setattr(procid, "process_key", lambda pid: f"key-{pid}")
     monkeypatch.setattr(procid, "_pid_state", lambda pid: procid.ALIVE)
+    captured = procid.ancestry_snapshot(10001, depth=3)
+    monkeypatch.setattr(procid, "ancestry_snapshot", lambda *args, **kwargs: captured)
+    monkeypatch.setattr(procid, "parent_pid_of", lambda pid: later_parent)
     host = adapters.host_identity()
     assert host == {"host_pid": 10002, "host_key": "key-10002"}
-    assert walks == [10001, 10002]
     assert sessions.register(agent="codex", lane="codex:role", db_path=db, **host)["ok"]
     # The wrapper can exit while the actual agent host remains alive.
     monkeypatch.setattr(
@@ -317,6 +324,9 @@ def test_missing_host_name_retains_captured_identity(monkeypatch):
     monkeypatch.setattr(adapters.os, "getppid", lambda: 10001)
     monkeypatch.setattr(procid, "process_key", lambda pid: "host")
     monkeypatch.setattr(procid, "image_name", lambda pid: None)
+    monkeypatch.setattr(
+        procid, "parent_pid_of", lambda pid: 10001 if pid == os.getpid() else None
+    )
     assert adapters.host_identity() == {"host_pid": 10001, "host_key": "host"}
 
 
@@ -333,6 +343,69 @@ def test_known_host_survives_an_unverifiable_wrapper(monkeypatch):
     )
     assert adapters.host_identity() == {"host_pid": 10002, "host_key": "host"}
     assert adapters.parent_agent() == "codex"
+    assert adapters.parent_lane_suffix() == ""
+
+
+@pytest.mark.parametrize("later_parent", [None, 99999])
+def test_ancestry_rejects_a_changed_parent_edge(monkeypatch, later_parent):
+    reads = []
+
+    def parent_of(pid):
+        reads.append(pid)
+        if pid == 10001:
+            return 10002 if reads.count(pid) == 1 else later_parent
+        return None
+
+    monkeypatch.setattr(procid, "parent_pid_of", parent_of)
+    monkeypatch.setattr(
+        procid, "image_name", lambda pid: "wrapper" if pid == 10001 else "codex.exe"
+    )
+    monkeypatch.setattr(procid, "process_key", lambda pid: f"key-{pid}")
+    monkeypatch.setattr(procid, "_pid_state", lambda pid: procid.ALIVE)
+    assert procid.ancestry_snapshot(10001) == [
+        procid.Ancestor(10001, "wrapper", "key-10001")
+    ]
+
+
+@pytest.mark.parametrize(
+    "child_key,parent_key", [("100", "200"), ("1:100", "1:200"), ("1:999", "2:0")]
+)
+def test_ancestry_rejects_a_parent_born_after_its_child(
+    monkeypatch, child_key, parent_key
+):
+    # Windows can keep reporting an exited parent's old PID even after reuse.
+    monkeypatch.setattr(
+        procid,
+        "parent_pid_of",
+        lambda pid: 10001 if pid == os.getpid() else (10002 if pid == 10001 else None),
+    )
+    monkeypatch.setattr(
+        procid, "image_name", lambda pid: "wrapper" if pid == 10001 else "codex.exe"
+    )
+    monkeypatch.setattr(
+        procid, "process_key", lambda pid: child_key if pid == 10001 else parent_key
+    )
+    monkeypatch.setattr(procid, "_pid_state", lambda pid: procid.ALIVE)
+    assert procid.ancestry_snapshot(10001) == [
+        procid.Ancestor(10001, "wrapper", child_key)
+    ]
+
+
+def test_anchor_rejects_a_reused_initial_parent_pid(monkeypatch):
+    child = os.getpid()
+    monkeypatch.setattr(adapters, "_session_anchor", [])
+    monkeypatch.setattr(adapters.os, "getppid", lambda: 10002)
+    monkeypatch.setattr(procid, "current_identity", lambda: (child, "100"))
+    monkeypatch.setattr(
+        procid, "parent_pid_of", lambda pid: 10002 if pid == child else None
+    )
+    monkeypatch.setattr(procid, "image_name", lambda pid: "codex.exe")
+    monkeypatch.setattr(
+        procid, "process_key", lambda pid: "100" if pid == child else "200"
+    )
+    monkeypatch.setattr(procid, "_pid_state", lambda pid: procid.ALIVE)
+    assert adapters.host_identity() == {"host_pid": None, "host_key": None}
+    assert adapters.parent_agent() is None
     assert adapters.parent_lane_suffix() == ""
 
 

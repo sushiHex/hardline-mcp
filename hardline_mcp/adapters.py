@@ -304,7 +304,7 @@ def _anchor() -> dict:
 
 def _compute_anchor() -> dict:
     parent = os.getppid()
-    chain = procid.ancestry_snapshot(parent, depth=3)
+    chain = procid.ancestry_snapshot(parent, depth=3, child=procid.current_identity())
     blank = {"lane": "", "agent": "", "host_pid": None, "host_key": None}
     if not chain:
         return blank

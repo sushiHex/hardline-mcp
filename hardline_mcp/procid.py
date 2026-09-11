@@ -409,11 +409,34 @@ class Ancestor(NamedTuple):
     key: Optional[str]
 
 
-def ancestry_snapshot(pid: Optional[int] = None, depth: int = 4) -> list[Ancestor]:
+def _created_after(parent_key: Optional[str], child_key: Optional[str]) -> bool:
+    """A reused parent PID cannot have been created after its living child.
+
+    Linux tokens are start ticks; Windows tokens are FILETIME high:low words.
+    Unknown tokens cannot establish creation order.
+    """
+
+    def stamp(key):
+        high, separator, low = key.partition(":")
+        return (int(high) << 32) + int(low) if separator else int(high)
+
+    try:
+        return stamp(parent_key) > stamp(child_key)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def ancestry_snapshot(
+    pid: Optional[int] = None,
+    depth: int = 4,
+    *,
+    child: tuple[int, Optional[str]] | None = None,
+) -> list[Ancestor]:
     """Capture names and identities in one bounded parent walk.
 
-    A confirmed identity change during a read ends the walk. A failed later
-    probe cannot erase an identity already captured for the same process.
+    Each captured parent must still be linked to its verified child and cannot
+    be younger than it. A confirmed identity change ends the walk; a failed
+    later probe cannot erase identity already captured for the same process.
     """
     current = os.getppid() if pid is None else pid
     ancestors: list[Ancestor] = []
@@ -427,9 +450,18 @@ def ancestry_snapshot(pid: Optional[int] = None, depth: int = 4) -> list[Ancesto
         parent = (parent_pid_of(current) or 0) if name else 0
         confirmed = process_key(current)
         if key is not None and confirmed is not None and key != confirmed:
-            ancestors.append(Ancestor(current, "", key))
-            break
-        ancestors.append(Ancestor(current, name, key if key is not None else confirmed))
+            name, parent = "", 0
+        captured = Ancestor(current, name, key if key is not None else confirmed)
+        if child is not None:
+            child_pid, child_key = child
+            if (
+                parent_pid_of(child_pid) != current
+                or instance_state(child_pid, child_key) == DEAD
+                or _created_after(captured.key, child_key)
+            ):
+                break
+        ancestors.append(captured)
+        child = (captured.pid, captured.key)
         current = parent
     return ancestors
 

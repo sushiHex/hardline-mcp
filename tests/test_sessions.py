@@ -999,7 +999,7 @@ def test_a_nested_agent_spawn_gets_no_lane(monkeypatch):
     monkeypatch.setattr(adapters, "_session_anchor", [])
     monkeypatch.setattr(procid, "identity_token", lambda pid, key: "a1b2c3d4")
     monkeypatch.setattr(
-        procid, "ancestry_snapshot", lambda pid, depth=4: [
+        procid, "ancestry_snapshot", lambda pid, depth=4, **kwargs: [
             procid.Ancestor(pid, "codex.exe", "host"),
             procid.Ancestor(pid + 1, "hardline-mcp.exe", "outer"),
         ]
@@ -1009,7 +1009,7 @@ def test_a_nested_agent_spawn_gets_no_lane(monkeypatch):
     # The same session, launched from a shell instead, is a real one.
     monkeypatch.setattr(adapters, "_session_anchor", [])
     monkeypatch.setattr(
-        procid, "ancestry_snapshot", lambda pid, depth=4: [
+        procid, "ancestry_snapshot", lambda pid, depth=4, **kwargs: [
             procid.Ancestor(pid, "codex.exe", "host"),
             procid.Ancestor(pid + 1, "pwsh.exe", "outer"),
         ]
@@ -1030,7 +1030,7 @@ def test_naming_an_ancestor_stays_off_the_hot_path(monkeypatch):
     monkeypatch.setattr(
         procid,
         "ancestry_snapshot",
-        lambda pid, depth=4: (scans.append(pid), [
+        lambda pid, depth=4, **kwargs: (scans.append(pid), [
             procid.Ancestor(pid, "codex.exe", "host"),
             procid.Ancestor(pid + 1, "pwsh.exe", "outer"),
         ])[1],
@@ -1080,7 +1080,7 @@ def test_the_parent_names_the_agent(monkeypatch):
     ]:
         monkeypatch.setattr(adapters, "_session_anchor", [])
         monkeypatch.setattr(
-            procid, "ancestry_snapshot", lambda pid, depth=4, _l=launcher: [
+            procid, "ancestry_snapshot", lambda pid, depth=4, _l=launcher, **kwargs: [
                 procid.Ancestor(pid, _l, "host")
             ]
         )
@@ -1088,7 +1088,7 @@ def test_the_parent_names_the_agent(monkeypatch):
 
     monkeypatch.setattr(adapters, "_session_anchor", [])
     monkeypatch.setattr(
-        procid, "ancestry_snapshot", lambda pid, depth=4: [
+        procid, "ancestry_snapshot", lambda pid, depth=4, **kwargs: [
             procid.Ancestor(pid, "pwsh.exe", "host"),
             procid.Ancestor(pid + 1, "explorer.exe", "outer"),
         ]
@@ -1101,7 +1101,7 @@ def test_the_parent_names_the_agent(monkeypatch):
     for impostor in ("claude-backup.exe", "notcodex.exe", "hermes-monitor.exe"):
         monkeypatch.setattr(adapters, "_session_anchor", [])
         monkeypatch.setattr(
-            procid, "ancestry_snapshot", lambda pid, depth=4, _i=impostor: [
+            procid, "ancestry_snapshot", lambda pid, depth=4, _i=impostor, **kwargs: [
                 procid.Ancestor(pid, _i, "host")
             ]
         )
