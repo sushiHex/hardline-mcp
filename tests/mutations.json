@@ -3,25 +3,33 @@
     "file": "hardline_mcp/server.py",
     "before": "    if not slots.acquire(blocking=False):",
     "after": "    if not slots.acquire(blocking=False) and False:",
-    "tests": ["tests/test_admission.py::test_concurrent_admission_bounds_running_and_queued"]
+    "tests": [
+      "tests/test_admission.py::test_concurrent_admission_bounds_running_and_queued"
+    ]
   },
   "admission-validation": {
     "file": "hardline_mcp/server.py",
     "before": "    if error:\n        return {**error, \"accepted\": False, \"dispatched\": False}",
     "after": "    if error and False:\n        return {**error, \"accepted\": False, \"dispatched\": False}",
-    "tests": ["tests/test_admission.py::test_invalid_request_is_rejected_before_admission"]
+    "tests": [
+      "tests/test_admission.py::test_invalid_request_is_rejected_before_admission"
+    ]
   },
   "admission-state": {
     "file": "hardline_mcp/server.py",
     "before": "        \"accepted\": True,\n        \"state\": state,",
     "after": "        \"accepted\": True,\n        \"state\": jobs.RUNNING,",
-    "tests": ["tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"]
+    "tests": [
+      "tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"
+    ]
   },
   "admission-release": {
     "file": "hardline_mcp/server.py",
     "before": "    future.add_done_callback(lambda _future: slots.release())\n",
     "after": "",
-    "tests": ["tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"]
+    "tests": [
+      "tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"
+    ]
   },
   "completion-transaction": {
     "file": "hardline_mcp/jobs.py",
@@ -41,8 +49,8 @@
   },
   "completion-store": {
     "file": "hardline_mcp/server.py",
-    "before": "jobs.mark_running(job_id, db_path=db_path)",
-    "after": "jobs.mark_running(job_id)",
+    "before": "if not jobs.mark_running(job_id, db_path=db_path)",
+    "after": "if not jobs.mark_running(job_id)",
     "tests": [
       "tests/test_completion.py::test_worker_retains_dispatch_store"
     ]
@@ -86,6 +94,78 @@
     "after": "            if False:",
     "tests": [
       "tests/test_ownership.py::test_missing_grant_recovers_without_waiting_for_heartbeat"
+    ]
+  },
+  "owner-read-token": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "instance_state(job[\"owner_pid\"], job[\"owner_key\"])",
+    "after": "instance_state(job[\"owner_pid\"], None)",
+    "tests": [
+      "tests/test_identity.py::test_reused_owner_pid_is_lost_without_affecting_new_instance"
+    ]
+  },
+  "owner-sweep-token": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "for pid, key in owners if instance_state(pid, key) == DEAD",
+    "after": "for pid, key in owners if instance_state(pid, None) == DEAD",
+    "tests": [
+      "tests/test_identity.py::test_reused_owner_pid_is_lost_without_affecting_new_instance"
+    ]
+  },
+  "owner-finish-token": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "AND (owner_key IS NULL OR owner_key = ?) AND",
+    "after": "AND (owner_key IS NULL OR owner_key = ? OR 1) AND",
+    "tests": [
+      "tests/test_identity.py::test_previous_owner_cannot_start_attach_or_finish"
+    ]
+  },
+  "owner-work-token": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "instance_state(r[\"owner_pid\"], r[\"owner_key\"])",
+    "after": "instance_state(r[\"owner_pid\"], None)",
+    "tests": [
+      "tests/test_identity.py::test_work_owned_by_reused_pid_does_not_block_role"
+    ]
+  },
+  "owner-read-cas": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "state IN (?, ?) AND owner_pid = ? AND owner_key IS ?",
+    "after": "state IN (?, ?) AND owner_pid = ? AND (owner_key IS ? OR 1)",
+    "tests": [
+      "tests/test_identity.py::test_lost_resolution_only_updates_probed_identity"
+    ]
+  },
+  "owner-sweep-cas": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "WHERE owner_pid = ? AND owner_key IS ? AND state IN ({marks})",
+    "after": "WHERE owner_pid = ? AND (owner_key IS ? OR 1) AND state IN ({marks})",
+    "tests": [
+      "tests/test_identity.py::test_lost_resolution_only_updates_probed_identity"
+    ]
+  },
+  "host-lifetime": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "return instance_state(row[\"host_pid\"], row[\"host_key\"])",
+    "after": "return ALIVE",
+    "tests": [
+      "tests/test_identity.py::test_orphan_server_lifetime_follows_host"
+    ]
+  },
+  "host-prune-cas": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "AND host_pid IS ? AND host_key IS ?",
+    "after": "AND (? IS NULL OR 1) AND (? IS NULL OR 1)",
+    "tests": [
+      "tests/test_identity.py::test_prune_preserves_replaced_host_identity"
+    ]
+  },
+  "host-retention": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "host_pid = COALESCE(?, host_pid)",
+    "after": "host_pid = ?",
+    "tests": [
+      "tests/test_identity.py::test_legacy_refresh_keeps_host_binding"
     ]
   }
 }

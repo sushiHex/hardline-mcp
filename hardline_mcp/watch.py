@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import mailbox, procid
+from . import mailbox, procid, sessions
 
 
 class Unavailable(Exception):
@@ -65,6 +65,8 @@ def read_pending(target: Target) -> bool:
         uri = target.db.as_uri() + "?mode=ro"
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as conn:
             if target.owner_pid is not None:
+                conn.row_factory = sqlite3.Row
+                conn.execute("BEGIN")
                 registered, pending = conn.execute(
                     _OWNER_QUERY,
                     {
@@ -77,6 +79,18 @@ def read_pending(target: Target) -> bool:
                     raise Unavailable(
                         "mailbox owner is not registered; call list_agents and re-arm"
                     )
+                owners = conn.execute(
+                    "SELECT * FROM agent_sessions WHERE pid = ? AND process_key = ? AND agent = ?",
+                    (target.owner_pid, target.owner_key, target.agent),
+                ).fetchall()
+                for owner in owners:
+                    state = sessions.host_state(owner)
+                    if state == procid.DEAD:
+                        raise TargetLost(
+                            "launching host exited or its PID was reused; re-arm"
+                        )
+                    if state == procid.UNKNOWN:
+                        raise Unavailable("cannot verify launching host")
             else:
                 recipients = (target.agent, *target.lanes)
                 marks = ",".join("?" for _ in recipients)

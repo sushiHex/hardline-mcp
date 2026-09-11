@@ -357,6 +357,13 @@ including time spent awaiting dispatch policy. The compatibility `dispatched`
 field is true only for `running` or `completed`. Follow `track_with` for updates;
 acceptance alone does not promise that an agent process has started.
 
+Job owners are identified by PID and process creation token. Session records
+also retain the launching host's PID and token, so an orphan MCP process does
+not keep a departed host's lanes alive. Unverifiable processes remain unknown
+and block takeover. Schema version 5 adds nullable `jobs.owner_key` and
+`agent_sessions.host_pid`/`host_key`; existing rows and older writers remain
+compatible. Legacy rows without tokens retain their previous liveness behavior.
+
 At shutdown, dispatches still queued are dropped rather than run; one already
 in flight is awaited, since its agent subprocess can't be interrupted safely
 mid-call. Without that, teardown would block until *every* queued dispatch had

@@ -86,6 +86,7 @@ def _row_to_dict(row) -> dict:
         "label": row["label"],
         "state": row["state"],
         "owner_pid": row["owner_pid"],
+        "owner_key": row["owner_key"],
         "child_pid": row["child_pid"],
         "child_key": row["child_key"] if "child_key" in row.keys() else None,
         "created_at": row["created_at"],
@@ -121,7 +122,7 @@ def create(
         with conn:
             conn.execute(
                 "INSERT INTO jobs (job_id, agent, requester, label, state, request,"
-                " owner_pid, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " owner_pid, owner_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     agent,
@@ -130,6 +131,7 @@ def create(
                     QUEUED,
                     json.dumps(request, default=str),
                     os.getpid(),
+                    process_key(os.getpid()),
                     _iso(now_fn()),
                 ),
             )
@@ -156,9 +158,19 @@ def mark_running(
         with conn:
             cur = conn.execute(
                 "UPDATE jobs SET state = ?, started_at = COALESCE(started_at, ?),"
-                " child_pid = COALESCE(?, child_pid), owner_pid = ?"
-                " WHERE job_id = ? AND state = ?",
-                (RUNNING, _iso(now_fn()), child_pid, os.getpid(), job_id, QUEUED),
+                " child_pid = COALESCE(?, child_pid), owner_key = ?"
+                " WHERE job_id = ? AND state = ? AND owner_pid = ?"
+                " AND (owner_key IS NULL OR owner_key = ?)",
+                (
+                    RUNNING,
+                    _iso(now_fn()),
+                    child_pid,
+                    process_key(os.getpid()),
+                    job_id,
+                    QUEUED,
+                    os.getpid(),
+                    process_key(os.getpid()),
+                ),
             )
         return cur.rowcount > 0
 
@@ -181,8 +193,16 @@ def set_child_pid(
         with conn:
             cur = conn.execute(
                 "UPDATE jobs SET child_pid = ?, child_key = ?"
-                " WHERE job_id = ? AND state = ?",
-                (child_pid, started_key, job_id, RUNNING),
+                " WHERE job_id = ? AND state = ? AND owner_pid = ?"
+                " AND (owner_key IS NULL OR owner_key = ?)",
+                (
+                    child_pid,
+                    started_key,
+                    job_id,
+                    RUNNING,
+                    os.getpid(),
+                    process_key(os.getpid()),
+                ),
             )
         return cur.rowcount > 0
 
@@ -209,7 +229,7 @@ def finish(
                 " result = ?, error = CASE WHEN state = ? THEN error ELSE ? END,"
                 " finished_at = CASE WHEN state = ? THEN COALESCE(finished_at, ?) ELSE ? END,"
                 " child_pid = NULL, child_key = NULL"
-                " WHERE job_id = ? AND owner_pid = ? AND"
+                " WHERE job_id = ? AND owner_pid = ? AND (owner_key IS NULL OR owner_key = ?) AND"
                 " (state IN (?, ?) OR (state = ? AND result IS NULL))",
                 (
                     CANCELLED,
@@ -222,6 +242,7 @@ def finish(
                     stamp,
                     job_id,
                     os.getpid(),
+                    process_key(os.getpid()),
                     RUNNING,
                     LOST,
                     CANCELLED,
@@ -262,12 +283,12 @@ def _resolve_lost(conn, row, now_fn: Callable[[], datetime]) -> dict:
     # that may still be running, and the session registry then reads that
     # state as "nothing is coming back for this lane" and lets somebody claim
     # it out from under a live consumer.
-    if instance_state(job["owner_pid"], None) != DEAD:
+    if instance_state(job["owner_pid"], job["owner_key"]) != DEAD:
         return job
     with conn:
         cur = conn.execute(
             "UPDATE jobs SET state = ?, error = ?, finished_at = COALESCE(finished_at, ?)"
-            " WHERE job_id = ? AND state IN (?, ?)",
+            " WHERE job_id = ? AND state IN (?, ?) AND owner_pid = ? AND owner_key IS ?",
             (
                 LOST,
                 _OWNER_DIED,
@@ -275,6 +296,8 @@ def _resolve_lost(conn, row, now_fn: Callable[[], datetime]) -> dict:
                 job["job_id"],
                 QUEUED,
                 RUNNING,
+                job["owner_pid"],
+                job["owner_key"],
             ),
         )
     if cur.rowcount == 0:
@@ -334,21 +357,22 @@ def _sweep_lost(conn, now_fn: Callable[[], datetime]) -> None:
     marks = ", ".join("?" for _ in ACTIVE_STATES)
     active = tuple(sorted(ACTIVE_STATES))
     owners = [
-        row[0]
+        (row[0], row[1])
         for row in conn.execute(
-            f"SELECT DISTINCT owner_pid FROM jobs WHERE state IN ({marks})", active
+            f"SELECT DISTINCT owner_pid, owner_key FROM jobs WHERE state IN ({marks})",
+            active,
         ).fetchall()
     ]
-    dead = [pid for pid in owners if instance_state(pid, None) == DEAD]
+    dead = [(pid, key) for pid, key in owners if instance_state(pid, key) == DEAD]
     if not dead:
         return
     with conn:
-        for pid in dead:
+        for pid, key in dead:
             conn.execute(
                 f"UPDATE jobs SET state = ?, error = ?,"
                 f" finished_at = COALESCE(finished_at, ?)"
-                f" WHERE owner_pid = ? AND state IN ({marks})",
-                (LOST, _OWNER_DIED, _iso(now_fn()), pid, *active),
+                f" WHERE owner_pid = ? AND owner_key IS ? AND state IN ({marks})",
+                (LOST, _OWNER_DIED, _iso(now_fn()), pid, key, *active),
             )
 
 

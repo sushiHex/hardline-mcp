@@ -590,7 +590,8 @@ def test_a_lane_with_live_unfinished_work_is_not_claimable(tmp_path):
     with mailbox._connect(db) as conn:
         with conn:
             conn.execute(
-                "UPDATE jobs SET owner_pid = ? WHERE job_id = ?", (other, job_id)
+                "UPDATE jobs SET owner_pid = ?, owner_key = ? WHERE job_id = ?",
+                (other, procid.process_key(other), job_id)
             )
 
     refused = sessions.claim(agent="codex", label="construction", db_path=db)

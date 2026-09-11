@@ -303,8 +303,13 @@ def _anchor() -> dict:
 
 
 def _compute_anchor() -> dict:
-    blank = {"lane": "", "agent": ""}
     parent = os.getppid()
+    blank = {
+        "lane": "",
+        "agent": "",
+        "host_pid": parent or None,
+        "host_key": procid.process_key(parent),
+    }
     if not parent:
         return blank
     chain = procid.ancestry(parent, depth=3)
@@ -317,7 +322,26 @@ def _compute_anchor() -> dict:
     agent = next(
         (a for n in chain if (a := _AGENT_BY_LAUNCHER.get(_launcher_name(n)))), ""
     )
-    return {"lane": f"{name}.{token}" if name else token, "agent": agent}
+    # Preserve the parent-derived address, but bind lifetime to the actual
+    # agent host when a persistent launcher sits between it and this server.
+    host_pid = parent
+    if agent:
+        for image in chain:
+            if _AGENT_BY_LAUNCHER.get(_launcher_name(image)) == agent:
+                break
+            host_pid = procid.parent_pid_of(host_pid) or host_pid
+    return {
+        "lane": f"{name}.{token}" if name else token,
+        "agent": agent,
+        "host_pid": host_pid,
+        "host_key": procid.process_key(host_pid),
+    }
+
+
+def host_identity() -> dict:
+    """The launching host captured with the session anchor, never re-parented."""
+    anchor = _anchor()
+    return {"host_pid": anchor.get("host_pid"), "host_key": anchor.get("host_key")}
 
 
 def _launcher_name(image: str) -> str:

@@ -255,7 +255,9 @@ _identity_lock = threading.Lock()
 def _announce_locked(agent: str, lane: str) -> str | None:
     try:
         registration = sessions.register(
-            agent=agent, lanes=adapters.owned_recipients(agent)
+            agent=agent,
+            lanes=adapters.owned_recipients(agent),
+            **adapters.host_identity(),
         )
         if registration.get("contested"):
             _registration_failure[:] = [
@@ -362,7 +364,10 @@ def _register_session_impl(label: str, agent: str | None) -> dict:
         return {"ok": False, "error": refused}
 
     claimed = sessions.claim(
-        agent=agent, label=label, lanes=adapters.owned_recipients(agent)
+        agent=agent,
+        label=label,
+        lanes=adapters.owned_recipients(agent),
+        **adapters.host_identity(),
     )
     if not claimed.get("ok"):
         return claimed

@@ -1530,7 +1530,8 @@ async def test_a_child_spawned_into_a_cancelled_job_is_killed_locally(
     killed = []
     monkeypatch.setattr(server.adapters, "_kill_tree", lambda proc: killed.append(proc))
     monkeypatch.setattr(server.adapters, "_reap", lambda proc: True)
-    monkeypatch.setattr(server.jobs, "process_key", lambda pid: "tok")
+    real_key = server.jobs.process_key
+    monkeypatch.setattr(server.jobs, "process_key", lambda pid: "tok" if pid == 4242 else real_key(pid))
 
     ran = []
 
