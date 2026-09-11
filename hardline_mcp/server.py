@@ -492,7 +492,16 @@ def _consume(operation, *args, **kwargs):
     with _identity_lock:
         db_path = mailbox._resolve_db(None)
         try:
-            owned = sessions.granted(adapters.owned_recipients(), db_path=db_path)
+            expected = adapters.owned_recipients()
+            owned = sessions.granted(expected, db_path=db_path)
+            if set(expected) - set(owned):
+                # A rebuilt store cannot wait for the heartbeat cooldown: the
+                # current poll may be the caller's last until another signal.
+                agent = adapters.self_agent()
+                _announce_locked(agent, adapters.lane_for(agent))
+                owned = sessions.granted(expected, db_path=db_path)
+                if set(expected) - set(owned) and not _registration_failure:
+                    _registration_failure[:] = ["expected lane grants are missing"]
         except Exception as exc:
             _registration_failure[:] = [f"{type(exc).__name__}: {exc}"]
             owned = ()
