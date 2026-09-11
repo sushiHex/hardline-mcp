@@ -28,6 +28,9 @@ jobs:
         run: pip install -e ".[dev,codex-watch]"
       - name: Run tests
         run: python -m pytest -q -rs
+      - name: Check regression mutations
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python scripts/mutate.py
       - name: Import wires the FastMCP server
         # Don't launch the console script here: it's a stdio server that would
         # block on stdin. Importing proves the package + tool registration; the

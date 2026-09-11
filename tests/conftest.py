@@ -9,11 +9,22 @@ CI - green in both while covering neither on purpose.
 Default every test to the unqualified case; the lane tests opt in explicitly.
 """
 
-import sqlite3
+import os
+import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
+# Isolate collection, subprocesses, and workers that outlive test fixtures.
+_store = tempfile.TemporaryDirectory(prefix="hardline-tests-")
+_previous_db = os.environ.get("HARDLINE_DB")
+os.environ["HARDLINE_DB"] = str(Path(_store.name) / "mailbox.db")
+
 from hardline_mcp import mailbox
+
+_previous_default = mailbox._DEFAULT_PATH
+mailbox._DEFAULT_PATH = Path(os.environ["HARDLINE_DB"])
 
 _LANE_ENV = (
     "HARDLINE_AGENT_LABEL",
@@ -22,61 +33,17 @@ _LANE_ENV = (
 )
 
 
-def _live_row_count() -> int | None:
-    """Rows in the OPERATOR's real mailbox, or None if it does not exist."""
-    path = mailbox._DEFAULT_PATH
-    if not path.exists():
-        return None
-    try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5) as conn:
-            return conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-    except sqlite3.Error:
-        return None
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _never_write_the_real_mailbox():
-    """Fail the run if the suite wrote to the operator's live mailbox.
-
-    Patching ``mailbox._DEFAULT_PATH`` is not sufficient on its own: a test
-    that dispatches through the REAL thread pool has its worker call
-    ``mailbox.send`` after the test returns, by which point monkeypatch has
-    restored the real path - so the delivery lands in production. That leak ran
-    unnoticed from 2026-07-30 and put 71 stray ``{"reply": "eventually"}``
-    messages into the live store, where they sat in an inbox nobody drained.
-
-    SESSION scope, deliberately. A per-test version was written first and it
-    MISSED this exact bug: the offending write happens on a pool thread after
-    the test body returns, so a teardown check races the thing it is checking
-    and usually wins. Comparing once around the whole run cannot race, at the
-    cost of naming the run rather than the test - and a leak is rare enough
-    that bisecting it afterwards is fine.
-
-    Tests that legitimately spawn late-delivering workers must wait for the
-    delivery before returning; this makes forgetting loud.
-    """
-    before = _live_row_count()
-    yield
-    # Drain the pool BEFORE comparing. Without this the guard races the very
-    # write it exists to catch and loses: the offending delivery happens on a
-    # worker thread that has not been joined yet, so both a per-test teardown
-    # and a plain session teardown read the count too early and report clean.
-    # Verified - the first two versions of this guard MISSED the leak.
-    try:
-        from hardline_mcp import server
-
+def pytest_unconfigure(config):
+    """Retain isolation until workers stop, including on collection errors."""
+    server = sys.modules.get("hardline_mcp.server")
+    if server is not None:
         server._async_executor.shutdown(wait=True)
-    except Exception:  # noqa: BLE001 - the guard must never break the run
-        pass
-    after = _live_row_count()
-    if before is not None and after is not None and after != before:
-        pytest.fail(
-            f"the suite wrote to the OPERATOR'S real mailbox "
-            f"({mailbox._DEFAULT_PATH}): {before} -> {after} rows. A worker most "
-            "likely delivered after its test returned, once monkeypatch had "
-            "restored _DEFAULT_PATH. Find the test that dispatches through the "
-            "real executor and make it wait for delivery."
-        )
+    mailbox._DEFAULT_PATH = _previous_default
+    if _previous_db is None:
+        os.environ.pop("HARDLINE_DB", None)
+    else:
+        os.environ["HARDLINE_DB"] = _previous_db
+    _store.cleanup()
 
 
 @pytest.fixture(autouse=True)

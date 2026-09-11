@@ -730,6 +730,7 @@ ask_hermes(prompt="what's the current gateway status?")
 ```bash
 pip install -e ".[dev,codex-watch]"
 python -m pytest -q -rs
+python scripts/mutate.py                 # prove committed regressions catch defects
 ```
 
 The suite includes a **headless end-to-end test** that launches two real

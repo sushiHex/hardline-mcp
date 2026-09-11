@@ -90,6 +90,11 @@ Anchors go stale when code moves. A harness that stops at a stale anchor and
 reports a "kill" for a mutation it never applied is worse than no harness:
 assert each anchor appears exactly once before applying it.
 
+Run `python scripts/mutate.py` for all committed cases, or pass case names
+from `tests/mutations.json`. Each case runs a passing baseline, applies one
+exact replacement in a temporary source copy, and requires a regression
+assertion failure. Skips, empty selections, and execution errors do not count.
+
 ### Watch the skip count
 
 Skips are silent under `-q`. CI runs with `-rs` for exactly this reason: a test
@@ -102,11 +107,10 @@ last. `subprocess.run(text=True)` decodes as cp1252; `print()` encodes as
 cp1252. Name the encoding on both, or force output to ASCII. Fixing one and
 restarting is how you find the other.
 
-**The mailbox seat belt false-positives locally.** `tests/conftest.py` fails the
-run if the operator's real mailbox gained rows. It counts messages around the
-whole run, so on a machine with live agent sessions, a message from *any other
-session* reads as the suite writing. Harmless in CI, where there is no live
-store. Re-run before believing it.
+**Tests always start with an isolated mailbox.** `tests/conftest.py` replaces
+`HARDLINE_DB` before collection and retains a temporary fallback until workers
+stop. Use `monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))` for a
+test-specific store; never restore an operator path inside a test.
 
 **Never reshape a table in place here.** Inspecting a table and then dropping it
 is two statements with no transaction between them, and under this deployment
