@@ -219,7 +219,7 @@ def test_registration_retains_captured_host_after_reparenting(monkeypatch, tmp_p
         procid, "ancestry", lambda *args, **kwargs: ["wrapper", "codex.exe"]
     )
     monkeypatch.setattr(procid, "parent_pid_of", lambda pid: 10002)
-    monkeypatch.setattr(procid, "session_token", lambda pid: "token")
+    monkeypatch.setattr(procid, "identity_token", lambda pid, key: "token")
     monkeypatch.setattr(procid, "process_key", lambda pid: f"key-{pid}")
     monkeypatch.setattr(sessions, "instance_state", lambda *args: procid.ALIVE)
     assert adapters.host_identity() == {"host_pid": 10002, "host_key": "key-10002"}
@@ -227,6 +227,39 @@ def test_registration_retains_captured_host_after_reparenting(monkeypatch, tmp_p
     server._announce_self()
     row = sessions.live()[0]
     assert row["host_pid"] == 10002 and row["host_key"] == "key-10002"
+
+
+def test_anchor_retains_verified_host_token_after_probe_failure(tmp_path, monkeypatch):
+    db = tmp_path / "mb.db"
+    real_probe = procid.process_key
+    host_pid = 10001
+    probes = []
+
+    def probe(pid):
+        if pid != host_pid:
+            return real_probe(pid)
+        probes.append(pid)
+        return "host" if len(probes) == 1 else None
+
+    monkeypatch.setattr(adapters, "_session_anchor", [])
+    monkeypatch.setattr(adapters.os, "getppid", lambda: host_pid)
+    monkeypatch.setattr(procid, "ancestry", lambda *args, **kwargs: ["codex.exe"])
+    monkeypatch.setattr(procid, "process_key", probe)
+    monkeypatch.setattr(procid, "_pid_state", lambda pid: procid.ALIVE)
+    host = adapters.host_identity()
+    assert host == {"host_pid": host_pid, "host_key": "host"}
+    assert adapters.parent_lane_suffix().endswith(
+        procid.identity_token(host_pid, "host")
+    )
+    assert sessions.register(agent="codex", lane="codex:role", db_path=db, **host)["ok"]
+    # A later occupant of the same PID must not keep the original host's lanes.
+    monkeypatch.setattr(
+        procid,
+        "process_key",
+        lambda pid: "replacement" if pid == host_pid else real_probe(pid),
+    )
+    assert sessions.granted(["codex:role"], db_path=db) == ()
+    assert sessions.live(db_path=db) == []
 
 
 def test_additive_identity_migration_keeps_old_writers_compatible(tmp_path):

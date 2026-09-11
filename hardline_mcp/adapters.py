@@ -304,18 +304,19 @@ def _anchor() -> dict:
 
 def _compute_anchor() -> dict:
     parent = os.getppid()
+    parent_key = procid.process_key(parent)
     blank = {
         "lane": "",
         "agent": "",
         "host_pid": parent or None,
-        "host_key": procid.process_key(parent),
+        "host_key": parent_key,
     }
     if not parent:
         return blank
     chain = procid.ancestry(parent, depth=3)
     if any(_launcher_name(n) in _NESTED_LAUNCHERS for n in chain):
         return blank
-    token = procid.session_token(parent)
+    token = procid.identity_token(parent, parent_key)
     if not token:
         return blank
     name = Path.cwd().name
@@ -334,7 +335,7 @@ def _compute_anchor() -> dict:
         "lane": f"{name}.{token}" if name else token,
         "agent": agent,
         "host_pid": host_pid,
-        "host_key": procid.process_key(host_pid),
+        "host_key": parent_key if host_pid == parent else procid.process_key(host_pid),
     }
 
 

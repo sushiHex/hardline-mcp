@@ -216,6 +216,14 @@
       "tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"
     ]
   },
+  "host-anchor-token-retention": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "\"host_key\": parent_key if host_pid == parent else procid.process_key(host_pid),",
+    "after": "\"host_key\": procid.process_key(host_pid),",
+    "tests": [
+      "tests/test_identity.py::test_anchor_retains_verified_host_token_after_probe_failure"
+    ]
+  },
   "owner-completion-retention": {
     "file": "hardline_mcp/jobs.py",
     "before": "                    owner_pid,\n                    owner_key,\n                    RUNNING,",

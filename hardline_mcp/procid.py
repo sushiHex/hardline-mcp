@@ -427,12 +427,14 @@ def session_token(pid: int) -> Optional[str]:
     not inherit the previous process's identifier. Eight hex characters, to
     match the shape of the session-id prefix Claude Code supplies.
     """
-    if not pid or pid <= 0:
+    return identity_token(pid, process_key(pid))
+
+
+def identity_token(pid: int, key: Optional[str]) -> Optional[str]:
+    """Derive a lane token from an already captured process identity."""
+    if not pid or pid <= 0 or key is None:
         return None
-    token = process_key(pid)
-    if token is None:
-        return None
-    return hashlib.sha256(f"{pid}:{token}".encode()).hexdigest()[:8]
+    return hashlib.sha256(f"{pid}:{key}".encode()).hexdigest()[:8]
 
 
 def instance_alive(pid: Optional[int], expect_key: Optional[str]) -> bool:

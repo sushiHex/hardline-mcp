@@ -997,7 +997,7 @@ def test_a_nested_agent_spawn_gets_no_lane(monkeypatch):
     the same misreport the registry exists to end.
     """
     monkeypatch.setattr(adapters, "_session_anchor", [])
-    monkeypatch.setattr(procid, "session_token", lambda pid: "a1b2c3d4")
+    monkeypatch.setattr(procid, "identity_token", lambda pid, key: "a1b2c3d4")
     monkeypatch.setattr(
         procid, "ancestry", lambda pid, depth=4: ["codex.exe", "hardline-mcp.exe"]
     )
@@ -1018,7 +1018,7 @@ def test_naming_an_ancestor_stays_off_the_hot_path(monkeypatch):
     """
     scans = []
     monkeypatch.setattr(adapters, "_session_anchor", [])
-    monkeypatch.setattr(procid, "session_token", lambda pid: "a1b2c3d4")
+    monkeypatch.setattr(procid, "identity_token", lambda pid, key: "a1b2c3d4")
     monkeypatch.setattr(
         procid,
         "ancestry",
