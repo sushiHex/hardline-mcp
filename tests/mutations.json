@@ -1,4 +1,16 @@
 {
+  "admission-cancel-releases": {
+    "file": "hardline_mcp/server.py",
+    "before": "and future.cancel():",
+    "after": "and False:",
+    "tests": ["tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"]
+  },
+  "cancel-removes-prompt": {
+    "file": "hardline_mcp/dispatch.py",
+    "before": "removed = self._pending.pop(future, None)",
+    "after": "removed = self._pending.get(future)",
+    "tests": ["tests/test_dispatch.py::test_cancel_removes_prompt_and_notifies_waiters_before_worker_is_free"]
+  },
   "admission-capacity": {
     "file": "hardline_mcp/server.py",
     "before": "    if not slots.acquire(blocking=False):",
@@ -19,8 +31,8 @@
   },
   "admission-release": {
     "file": "hardline_mcp/server.py",
-    "before": "    future.add_done_callback(lambda _future: slots.release())\n",
-    "after": "",
+    "before": "        slots.release()\n\n    future.add_done_callback(finished)",
+    "after": "\n    future.add_done_callback(finished)",
     "tests": ["tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"]
   },
   "completion-transaction": {
@@ -41,8 +53,8 @@
   },
   "completion-store": {
     "file": "hardline_mcp/server.py",
-    "before": "jobs.mark_running(job_id, db_path=db_path)",
-    "after": "jobs.mark_running(job_id)",
+    "before": "if not jobs.mark_running(job_id, db_path=db_path)",
+    "after": "if not jobs.mark_running(job_id)",
     "tests": [
       "tests/test_completion.py::test_worker_retains_dispatch_store"
     ]

@@ -25,14 +25,14 @@ import os
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Literal
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 
-from . import adapters, jobs, mailbox, sessions, watch
+from . import adapters, dispatch, jobs, mailbox, sessions, watch
 
 mcp = FastMCP("hardline-mcp")
 
@@ -82,9 +82,47 @@ _NOTE_OVERHEAD = 100
 # Per-row cap on a job result inside a LISTING. job_result() returns one whole.
 _JOB_RESULT_PREVIEW_CHARS = 600
 
-_async_executor = ThreadPoolExecutor(
-    max_workers=_ASYNC_MAX_WORKERS, thread_name_prefix="hardline-async"
-)
+_async_executor = dispatch.CancellableExecutor(_ASYNC_MAX_WORKERS)
+_pending_jobs: dict[tuple[Path, str], Future] = {}
+_pending_jobs_lock = threading.Lock()
+
+
+def _track_job(db_path: Path, job_id: str, future: Future, slots) -> None:
+    key = (db_path, job_id)
+    with _pending_jobs_lock:
+        _pending_jobs[key] = future
+
+    def finished(_future):
+        with _pending_jobs_lock:
+            _pending_jobs.pop(key, None)
+        slots.release()
+
+    future.add_done_callback(finished)
+
+
+def _retire_cancelled_jobs() -> None:
+    """Reconcile queued cancellation, including requests from another MCP process.
+
+    Run on cancellation and before admission, so replacement work can always
+    reclaim cancelled slots without a background coordinator or polling thread.
+    """
+    with _pending_jobs_lock:
+        pending = list(_pending_jobs.items())
+    for (db_path, job_id), future in pending:
+        if future.running() or future.done():
+            continue
+        job = jobs.get(job_id, db_path=db_path)
+        if job and job["state"] == jobs.CANCELLED and future.cancel():
+            jobs.finish(
+                job_id,
+                db_path=db_path,
+                result={
+                    "ok": False,
+                    "job_id": job_id,
+                    "cancelled_before_start": True,
+                    "error": "job was cancelled before it started",
+                },
+            )
 
 
 def _shorten(msg: dict, cap: int) -> dict:
@@ -1089,7 +1127,14 @@ async def job_cancel(job_id: str) -> dict:
     launchers, so killing only the recorded pid leaves the real worker running
     invisibly.
     """
-    return await _in_thread(jobs.request_cancel, job_id)
+
+    def cancel():
+        db_path = mailbox._resolve_db(None).resolve()
+        result = jobs.request_cancel(job_id, db_path=db_path)
+        _retire_cancelled_jobs()
+        return result
+
+    return await _in_thread(cancel)
 
 
 @mcp.tool()
@@ -1628,6 +1673,7 @@ def _ask_async_impl(
     db_path = mailbox._resolve_db(None).resolve()
 
     slots = _async_slots
+    _retire_cancelled_jobs()
     if not slots.acquire(blocking=False):
         return {
             "ok": False,
@@ -1736,7 +1782,8 @@ def _ask_async_impl(
         if jobs.mark_running(job_id, db_path=db_path):
             jobs.finish(job_id, result=result, db_path=db_path)
         return {**result, "accepted": False, "dispatched": False, "job_id": job_id}
-    future.add_done_callback(lambda _future: slots.release())
+    _track_job(db_path, job_id, future, slots)
+    _retire_cancelled_jobs()
     job = jobs.get(job_id, db_path=db_path)
     state = job["state"]
     receipt = {

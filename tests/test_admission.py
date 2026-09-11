@@ -122,3 +122,45 @@ def test_submission_failure_releases_capacity_and_finishes_record(
     assert jobs.get(result["job_id"])["state"] == "failed"
     assert slots.acquire(blocking=False)
     slots.release()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("remote", [False, True])
+async def test_queued_cancellation_admits_replacement_while_worker_is_busy(
+    monkeypatch, tmp_path, remote
+):
+    from hardline_mcp.dispatch import CancellableExecutor
+
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setattr(server, "_async_slots", threading.BoundedSemaphore(2))
+    started, release = threading.Event(), threading.Event()
+    executed = []
+
+    def busy(*args, **kwargs):
+        started.set()
+        assert release.wait(10)
+        return {"ok": True}
+
+    with CancellableExecutor(1) as pool:
+        monkeypatch.setattr(server, "_async_executor", pool)
+        try:
+            dispatch(ask=busy)
+            assert started.wait(5)
+            queued = dispatch(
+                ask=lambda *args, **kwargs: executed.append(True) or {"ok": True}
+            )
+            assert queued["state"] == jobs.QUEUED
+            if remote:
+                jobs.request_cancel(queued["job_id"])
+            else:
+                await server.job_cancel(queued["job_id"])
+            replacement = dispatch()
+            assert replacement["accepted"] is True
+            assert replacement["state"] == jobs.QUEUED
+            assert (
+                jobs.get(queued["job_id"])["result"]["cancelled_before_start"] is True
+            )
+            assert executed == []
+        finally:
+            release.set()
+    assert executed == []
