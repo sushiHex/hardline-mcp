@@ -64,6 +64,10 @@ def _no_leaked_claims():
     from hardline_mcp import adapters
 
     adapters.reset_claimed_lanes()
+    server = sys.modules.get("hardline_mcp.server")
+    if server is not None:
+        server._last_heartbeat.clear()
+        server._registration_failure.clear()
     yield
     adapters.reset_claimed_lanes()
 

@@ -1,4 +1,16 @@
 {
+  "lane-acquisition-lock": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "            conn.execute(\"BEGIN IMMEDIATE\")\n",
+    "after": "",
+    "tests": ["tests/test_ownership.py::test_acquisition_serializes_check_and_write"]
+  },
+  "lane-consumption-grant": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "    return tuple(owned)\n",
+    "after": "    return tuple(lanes)\n",
+    "tests": ["tests/test_ownership.py::test_refused_registration_cannot_consume", "tests/test_ownership.py::test_missing_grant_cannot_be_consumed_from_local_identity"]
+  },
   "test-store-isolation": {
     "file": "tests/conftest.py",
     "before": "os.environ[\"HARDLINE_DB\"] = str(Path(_store.name) / \"mailbox.db\")",

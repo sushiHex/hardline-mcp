@@ -228,6 +228,11 @@ A claim is refused if a *live* session already holds that name. A dead holder's
 claim is ignored, so a label doesn't become unusable forever because the
 session that used it crashed.
 
+Automatic registration follows the same atomic acquisition rule. A refused
+registration reports contested lanes; `inbox` and `ack` consume qualified mail
+only with a durable grant for this process. Reads can still inspect an unowned
+lane, and unqualified mail remains shared.
+
 Two consequences worth knowing, both deliberate:
 
 - **A label is a role, not an instance.** Mail sent to `codex:construction` is
