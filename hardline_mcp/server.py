@@ -1631,12 +1631,14 @@ def _ask_async_impl(
     # owed to the session that asked for it; addressing it to bare "claude"
     # is what let another session ack it out of sight.
     recipient = adapters.lane_for(from_agent)
+    db_path = mailbox._resolve_db(None).resolve()
 
     # Durable identity BEFORE the work starts. Fire-and-forget meant a restart
     # lost the task with no record it had existed, and the only lifecycle API
     # was polling a mailbox that cannot answer "is it still running?".
     job_id = jobs.create(
         agent=agent,
+        db_path=db_path,
         requester=recipient,
         label=label,
         request={
@@ -1658,7 +1660,7 @@ def _ask_async_impl(
         # kill this pool thread silently, mailbox.send would never run, and
         # a caller polling inbox(from_agent) would wait forever with no
         # error ever surfacing anywhere.
-        if not jobs.mark_running(job_id):
+        if not jobs.mark_running(job_id, db_path=db_path):
             # The queued -> running claim failed, which means a cancel landed
             # first. Spawning anyway would run the whole expensive call while
             # the row said cancelled - the one outcome a cancel must prevent.
@@ -1673,7 +1675,7 @@ def _ask_async_impl(
             if label is not None:
                 cancelled["label"] = label
             try:
-                mailbox.send(agent, recipient, json.dumps(cancelled))
+                jobs.finish(job_id, result=cancelled, db_path=db_path)
             except Exception:  # noqa: BLE001 - notification is best effort
                 traceback.print_exc()
             return cancelled
@@ -1688,7 +1690,7 @@ def _ask_async_impl(
                 # run this process is blocked on - the dispatcher is often not
                 # the one watching it.
                 on_spawn=lambda pid: jobs.set_child_pid(
-                    job_id, pid, started_key=jobs.process_key(pid)
+                    job_id, pid, started_key=jobs.process_key(pid), db_path=db_path
                 ),
             )
             if ask_fn is _ask_claude_with_reserve_guard:
@@ -1698,7 +1700,8 @@ def _ask_async_impl(
                 # the moment the subprocess is actually launched, which may be
                 # a whole other dispatch later.
                 ask_kwargs["still_wanted"] = lambda: (
-                    (jobs.get(job_id) or {}).get("state") == jobs.RUNNING
+                    (jobs.get(job_id, db_path=db_path) or {}).get("state")
+                    == jobs.RUNNING
                 )
             if extra_ask_kwargs:
                 ask_kwargs.update(extra_ask_kwargs)
@@ -1714,37 +1717,10 @@ def _ask_async_impl(
         if label is not None:
             result["label"] = label
         result["job_id"] = job_id
-        # Terminal state recorded before delivery: the mailbox send below can
-        # fail, and a job whose result exists only in a message that never
-        # arrived is the failure this table exists to prevent.
         try:
-            jobs.finish(job_id, result=result)
-        except Exception:  # noqa: BLE001 - bookkeeping must not eat the result
+            jobs.finish(job_id, result=result, db_path=db_path)
+        except Exception:  # storage failure leaves neither a result nor a false notice
             traceback.print_exc()
-        # The delivery itself was outside the backstop above, so a failure
-        # here - lock contention, a full disk, an unserializable result -
-        # discarded an expensive completed run inside an unobserved future,
-        # leaving the caller polling an inbox that would never fill. Retry
-        # with a minimal payload, which fails only if the mailbox is
-        # unreachable entirely; then at least the traceback reaches a log.
-        try:
-            mailbox.send(agent, recipient, json.dumps(result))
-        except Exception:  # noqa: BLE001 - delivery is the last thing owed
-            traceback.print_exc()
-            try:
-                mailbox.send(
-                    agent,
-                    recipient,
-                    json.dumps(
-                        {
-                            "ok": False,
-                            "error": f"{agent} result could not be delivered",
-                            "label": label,
-                        }
-                    ),
-                )
-            except Exception:  # noqa: BLE001 - mailbox itself is unreachable
-                traceback.print_exc()
         return result
 
     future = _async_executor.submit(_run)
@@ -1805,13 +1781,11 @@ async def ask_codex_async(
 ) -> dict:
     """Dispatch a Codex task in the background; returns immediately.
 
-    Runs the same ``ask_codex`` in a background thread, then delivers the
-    result through the existing mailbox as a message from "codex" to
-    ``from_agent`` — poll it with ``inbox(agent=from_agent)``. The delivered
-    message body is the JSON-encoded ``ask_codex`` result, plus ``label`` if
-    supplied (use it to match results when firing several concurrent
-    dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
-    persisted, so a hardline-mcp restart before completion loses the task.
+    Runs ``ask_codex`` in a background thread. Poll ``inbox(agent=from_agent)``
+    for a small ``job_finished`` notice from "codex", then retrieve the full
+    answer with ``job_result(job_id=...)``. Result and notice commit together.
+    ``from_agent`` must be a known agent. The durable job survives a restart;
+    interrupted work is reported as lost.
 
     ``mode`` mirrors ``ask_codex`` — background review is exactly where
     advisory isolation is wanted, and omitting it here was a parity gap.
@@ -1922,14 +1896,12 @@ async def ask_claude_async(
 ) -> dict:
     """Dispatch a Claude task in the background; returns immediately.
 
-    Runs the same ``ask_claude`` in a background thread, then delivers the
-    result through the existing mailbox to ``from_agent`` — poll it with
-    ``inbox(agent=from_agent)``. The sender is ``claude`` when Claude runs and
-    ``codex`` when quota policy redirects the task to ChatGPT. The delivered
-    message body is the JSON-encoded ``ask_claude`` result, plus ``label`` if
-    supplied (use it to match results when firing several concurrent
-    dispatches). ``from_agent`` must be a known agent. Fire-and-forget: not
-    persisted, so a hardline-mcp restart before completion loses the task.
+    Poll ``inbox(agent=from_agent)`` for a small ``job_finished`` notice, then
+    retrieve the full answer and routing metadata with ``job_result(job_id=...)``.
+    Result and notice commit together. The sender is ``claude`` when Claude
+    runs and ``codex`` when quota policy redirects to ChatGPT. ``from_agent``
+    must be a known agent. The durable job survives a restart; interrupted
+    work is reported as lost.
 
     ``mode`` mirrors ``ask_claude`` — background review is exactly where
     advisory isolation is wanted, and omitting it here was a parity gap.

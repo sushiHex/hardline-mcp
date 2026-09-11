@@ -69,6 +69,12 @@ finishing is reported `lost` rather than vanishing; that state is resolved on
 read, because the process that would have written it is precisely the one that
 died.
 
+Completion saves the full result and a small `job_finished` inbox notice in
+one SQLite transaction. The notice contains `job_id`, terminal `state`, and
+`result_with`; call `job_result(job_id=...)` for the answer, errors, and routing
+details. Repeated completion cannot send duplicate notices. A worker keeps the
+database path captured when its job was accepted.
+
 A timeout no longer reports only `timeout after Ns`. It returns `timed_out`,
 `timeout_s`, `elapsed_s`, `timeout_layer`, `stdout_chars`/`stderr_chars`,
 `produced_output`, and the `partial_stdout`/`partial_stderr` the child had

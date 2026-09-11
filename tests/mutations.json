@@ -1,18 +1,26 @@
 {
-  "lane-grant-work-conflict": {
-    "file": "hardline_mcp/sessions.py",
-    "before": "        if _refusal(conn, lane, pid):\n            continue\n",
-    "after": "",
+  "completion-transaction": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "            if not changed.rowcount:\n",
+    "after": "            conn.commit()  # defect: result precedes notice transaction\n            if not changed.rowcount:\n",
     "tests": [
-      "tests/test_ownership.py::test_existing_grant_cannot_consume_after_foreign_work_appears"
+      "tests/test_completion.py::test_result_and_notice_commit_together"
     ]
   },
-  "lane-grant-recovery": {
-    "file": "hardline_mcp/server.py",
-    "before": "            if set(expected) - set(owned):",
-    "after": "            if False:",
+  "completion-idempotence": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "(state = ? AND result IS NULL)",
+    "after": "(state = ?)",
     "tests": [
-      "tests/test_ownership.py::test_missing_grant_recovers_without_waiting_for_heartbeat"
+      "tests/test_completion.py::test_cancelled_completion_notifies_once"
+    ]
+  },
+  "completion-store": {
+    "file": "hardline_mcp/server.py",
+    "before": "jobs.mark_running(job_id, db_path=db_path)",
+    "after": "jobs.mark_running(job_id)",
+    "tests": [
+      "tests/test_completion.py::test_worker_retains_dispatch_store"
     ]
   },
   "lane-acquisition-lock": {
@@ -46,6 +54,22 @@
     "after": "",
     "tests": [
       "tests/test_wake_codex.py::test_empty_snapshot_rearms_after_lost_reply"
+    ]
+  },
+  "lane-grant-recovery": {
+    "file": "hardline_mcp/server.py",
+    "before": "            if set(expected) - set(owned):",
+    "after": "            if False:",
+    "tests": [
+      "tests/test_ownership.py::test_missing_grant_recovers_without_waiting_for_heartbeat"
+    ]
+  },
+  "lane-grant-work-conflict": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "        if _refusal(conn, lane, pid):\n            continue\n",
+    "after": "",
+    "tests": [
+      "tests/test_ownership.py::test_existing_grant_cannot_consume_after_foreign_work_appears"
     ]
   },
   "lane-consumption-transaction": {
