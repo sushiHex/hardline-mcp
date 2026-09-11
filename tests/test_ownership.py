@@ -65,9 +65,35 @@ async def test_missing_grant_cannot_be_consumed_from_local_identity(
     server._announce_self()
     monkeypatch.setattr(server, "_last_heartbeat", [time.monotonic()])
     sessions.drop_lane("codex:shared")
+
+    def unavailable(**kwargs):
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(sessions, "register", unavailable)
     message = mailbox.send("claude", "codex:shared", "ungranted")
     assert (await server.ack(message["message_id"]))["ok"] is False
     assert (await server.inbox("codex"))["messages"][0]["acked_at"] is None
+
+
+@pytest.mark.anyio
+async def test_missing_grant_recovers_without_waiting_for_heartbeat(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+    adapters.claim_lane("shared")
+    server._announce_self()
+    monkeypatch.setattr(server, "_last_heartbeat", [time.monotonic()])
+    sessions.drop_lane("codex:shared")
+    mailbox.send("claude", "codex:shared", "one")
+    mailbox.send("claude", "codex:shared", "two")
+    first = await server.inbox("codex", limit=1)
+    assert first["messages"][0]["acked_at"] is not None
+    assert first["remaining"] == 1
+    assert "registration_warning" not in first
+    second = await server.inbox("codex", limit=1)
+    assert second["messages"][0]["acked_at"] is not None
+    assert second["remaining"] == 0
 
 
 def test_automatic_registration_respects_unregistered_work(monkeypatch, tmp_path):
