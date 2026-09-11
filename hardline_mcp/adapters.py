@@ -313,8 +313,6 @@ def _compute_anchor() -> dict:
     if any(_launcher_name(p.image) in _NESTED_LAUNCHERS for p in chain):
         return blank
     token = procid.identity_token(launcher.pid, launcher.key)
-    if not token:
-        return blank
     name = Path.cwd().name
     host = next(
         (p for p in chain if _launcher_name(p.image) in _AGENT_BY_LAUNCHER), launcher
@@ -322,7 +320,7 @@ def _compute_anchor() -> dict:
     # Preserve the parent-derived address, but bind lifetime to the actual
     # agent host when a persistent launcher sits between it and this server.
     return {
-        "lane": f"{name}.{token}" if name else token,
+        "lane": f"{name}.{token}" if name and token else token or "",
         "agent": _AGENT_BY_LAUNCHER.get(_launcher_name(host.image), ""),
         "host_pid": host.pid,
         "host_key": host.key,

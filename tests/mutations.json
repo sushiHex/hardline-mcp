@@ -240,6 +240,14 @@
       "tests/test_identity.py::test_host_selection_never_rewalks_wrappers"
     ]
   },
+  "host-independent-of-lane-token": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    host = next(\n",
+    "after": "    if not token:\n        return blank\n    host = next(\n",
+    "tests": [
+      "tests/test_identity.py::test_known_host_survives_an_unverifiable_wrapper"
+    ]
+  },
   "host-ancestry-reuse": {
     "file": "hardline_mcp/procid.py",
     "before": "if key is not None and confirmed is not None and key != confirmed:",

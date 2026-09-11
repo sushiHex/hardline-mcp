@@ -320,6 +320,22 @@ def test_missing_host_name_retains_captured_identity(monkeypatch):
     assert adapters.host_identity() == {"host_pid": 10001, "host_key": "host"}
 
 
+def test_known_host_survives_an_unverifiable_wrapper(monkeypatch):
+    monkeypatch.setattr(adapters, "_session_anchor", [])
+    monkeypatch.setattr(adapters.os, "getppid", lambda: 10001)
+    monkeypatch.setattr(
+        procid,
+        "ancestry_snapshot",
+        lambda *args, **kwargs: [
+            procid.Ancestor(10001, "wrapper", None),
+            procid.Ancestor(10002, "codex.exe", "host"),
+        ],
+    )
+    assert adapters.host_identity() == {"host_pid": 10002, "host_key": "host"}
+    assert adapters.parent_agent() == "codex"
+    assert adapters.parent_lane_suffix() == ""
+
+
 def test_additive_identity_migration_keeps_old_writers_compatible(tmp_path):
     db = tmp_path / "old.db"
     old_schema = mailbox._SCHEMA.replace("    owner_key    TEXT,\n", "").replace(
