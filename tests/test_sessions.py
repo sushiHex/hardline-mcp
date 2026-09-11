@@ -1407,7 +1407,6 @@ async def test_an_async_result_dispatched_before_a_rename_still_arrives(
     is fixed at dispatch time — an implementation that recomputed the lane at
     delivery would pass the hand-written test and fail this one.
     """
-    from concurrent.futures import TimeoutError as FuturesTimeout
 
     from hardline_mcp import server
 
@@ -1416,15 +1415,12 @@ async def test_an_async_result_dispatched_before_a_rename_still_arrives(
 
     deferred = []
 
-    class _NotYet:
-        """A future whose work has not run: the dispatch reports it running."""
-
-        def result(self, timeout=None):
-            raise FuturesTimeout()
+    from concurrent.futures import Future
 
     def defer(fn, *args, **kwargs):
-        deferred.append(lambda: fn(*args, **kwargs))
-        return _NotYet()
+        future = Future()
+        deferred.append(lambda: future.set_result(fn(*args, **kwargs)))
+        return future
 
     monkeypatch.setattr(server._async_executor, "submit", defer)
     monkeypatch.setattr(

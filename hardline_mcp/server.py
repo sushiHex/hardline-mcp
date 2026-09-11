@@ -25,15 +25,14 @@ import os
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeout
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Literal
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 
-from . import adapters, jobs, mailbox, sessions, watch
+from . import adapters, dispatch, jobs, mailbox, sessions, watch
 
 mcp = FastMCP("hardline-mcp")
 
@@ -52,11 +51,11 @@ CodexMode = Literal["default", "advisory"]
 # bounds the whole hardline-mcp process, not one request.
 _ASYNC_MAX_WORKERS = adapters.positive_int_env("HARDLINE_ASYNC_MAX_WORKERS", 4)
 
-# How long ask_*_async waits before calling a dispatch "started". Long enough
-# to catch an arrive-and-die failure (a rejected model returns in well under a
-# second), short enough that a real dispatch still returns promptly. Runs off
-# the event loop via _in_thread, so it delays only its own caller.
-_ASYNC_EARLY_FAILURE_S = 2.0
+# Bound all accepted work, including the executor's otherwise unbounded queue.
+_ASYNC_MAX_PENDING = adapters.positive_int_env(
+    "HARDLINE_ASYNC_MAX_PENDING", 4 * _ASYNC_MAX_WORKERS
+)
+_async_slots = threading.BoundedSemaphore(_ASYNC_MAX_PENDING)
 
 # Per-message body cap for a batched inbox read. Bounding the message COUNT is
 # not enough on its own: a single async result here has reached 35k characters,
@@ -83,9 +82,61 @@ _NOTE_OVERHEAD = 100
 # Per-row cap on a job result inside a LISTING. job_result() returns one whole.
 _JOB_RESULT_PREVIEW_CHARS = 600
 
-_async_executor = ThreadPoolExecutor(
-    max_workers=_ASYNC_MAX_WORKERS, thread_name_prefix="hardline-async"
-)
+_async_executor = dispatch.CancellableExecutor(_ASYNC_MAX_WORKERS)
+_pending_jobs: dict[tuple[Path, str], Future] = {}
+_pending_jobs_lock = threading.Lock()
+
+
+def _track_job(db_path: Path, job_id: str, future: Future, slots) -> None:
+    key = (db_path, job_id)
+    with _pending_jobs_lock:
+        _pending_jobs[key] = future
+
+    def finished(_future):
+        with _pending_jobs_lock:
+            _pending_jobs.pop(key, None)
+        slots.release()
+
+    future.add_done_callback(finished)
+
+
+def _cancelled_result(job_id: str, *, label=None, routing=None) -> dict:
+    """One result shape for cancellation before the adapter starts."""
+    result = {
+        "ok": False,
+        "error": "job was cancelled before it started",
+        "job_id": job_id,
+        "cancelled_before_start": True,
+    }
+    if label is not None:
+        result["label"] = label
+    if routing is not None:
+        result["routing"] = routing
+    return result
+
+
+def _retire_cancelled_jobs() -> None:
+    """Reconcile queued cancellation, including requests from another MCP process.
+
+    Run on cancellation and before admission, so replacement work can always
+    reclaim cancelled slots without a background coordinator or polling thread.
+    """
+    with _pending_jobs_lock:
+        pending = list(_pending_jobs.items())
+    for (db_path, job_id), future in pending:
+        if future.running() or future.done():
+            continue
+        job = jobs.get(job_id, db_path=db_path)
+        if job and job["state"] == jobs.CANCELLED and future.cancel():
+            jobs.finish(
+                job_id,
+                db_path=db_path,
+                result=_cancelled_result(
+                    job_id,
+                    label=job["label"],
+                    routing=(job.get("request") or {}).get("routing"),
+                ),
+            )
 
 
 def _shorten(msg: dict, cap: int) -> dict:
@@ -934,6 +985,7 @@ async def server_info() -> dict:
         },
         "timeouts_s": timeouts,
         "async_max_workers": _ASYNC_MAX_WORKERS,
+        "async_max_pending": _ASYNC_MAX_PENDING,
         "write_enabled": write_ok,
         "write_note": write_err,
         "quota_routing": {
@@ -1102,7 +1154,14 @@ async def job_cancel(job_id: str) -> dict:
     launchers, so killing only the recorded pid leaves the real worker running
     invisibly.
     """
-    return await _in_thread(jobs.request_cancel, job_id)
+
+    def cancel():
+        db_path = mailbox._resolve_db(None).resolve()
+        result = jobs.request_cancel(job_id, db_path=db_path)
+        _retire_cancelled_jobs()
+        return result
+
+    return await _in_thread(cancel)
 
 
 @mcp.tool()
@@ -1613,19 +1672,26 @@ def _ask_async_impl(
     routing: dict | None = None,
     extra_ask_kwargs: dict | None = None,
 ) -> dict:
-    """Shared body for ask_codex_async/ask_claude_async - only the adapter
-    function and the mailbox sender identity differ between agents.
-
-    Briefly waits to see whether the dispatch fails immediately, so callers
-    MUST route this through _in_thread rather than calling it directly: the
-    wait would otherwise block the event loop for every other tool, including
-    pings.
-    """
+    """Validate, reserve capacity, and publish a durable receipt without waiting."""
     known = adapters.known_agents()
     if adapters.base_agent(from_agent) not in known:
         return {
             "ok": False,
             "error": f"unknown from_agent {from_agent!r}; known: {sorted(known)}",
+            "accepted": False,
+            "dispatched": False,
+        }
+    error, workdir = adapters.validate_request(
+        agent, model=model, effort=effort, mode=mode, workdir=workdir, write=write
+    )
+    if error:
+        return {**error, "accepted": False, "dispatched": False}
+    if not prompt.strip():
+        return {
+            "ok": False,
+            "accepted": False,
+            "dispatched": False,
+            "error": "prompt must not be empty",
         }
     # Deliver back to THIS session's lane, not the shared name. A result is
     # owed to the session that asked for it; addressing it to bare "claude"
@@ -1633,24 +1699,36 @@ def _ask_async_impl(
     recipient = adapters.lane_for(from_agent)
     db_path = mailbox._resolve_db(None).resolve()
 
-    # Durable identity BEFORE the work starts. Fire-and-forget meant a restart
-    # lost the task with no record it had existed, and the only lifecycle API
-    # was polling a mailbox that cannot answer "is it still running?".
-    job_id = jobs.create(
-        agent=agent,
-        db_path=db_path,
-        requester=recipient,
-        label=label,
-        request={
-            "prompt_chars": len(prompt),
-            "model": model,
-            "effort": effort,
-            "mode": mode,
-            "workdir": workdir,
-            "write": write,
-            **({"routing": routing} if routing is not None else {}),
-        },
-    )
+    slots = _async_slots
+    _retire_cancelled_jobs()
+    if not slots.acquire(blocking=False):
+        return {
+            "ok": False,
+            "accepted": False,
+            "dispatched": False,
+            "error": "async capacity is full; retry after an accepted job finishes",
+            "retryable": True,
+            "max_pending": _ASYNC_MAX_PENDING,
+        }
+    try:
+        job_id = jobs.create(
+            agent=agent,
+            db_path=db_path,
+            requester=recipient,
+            label=label,
+            request={
+                "prompt_chars": len(prompt),
+                "model": model,
+                "effort": effort,
+                "mode": mode,
+                "workdir": workdir,
+                "write": write,
+                **({"routing": routing} if routing is not None else {}),
+            },
+        )
+    except BaseException:
+        slots.release()
+        raise
 
     def _run() -> dict:
         # ask_fn (adapters.ask_claude/ask_codex) is designed to never raise -
@@ -1664,16 +1742,7 @@ def _ask_async_impl(
             # The queued -> running claim failed, which means a cancel landed
             # first. Spawning anyway would run the whole expensive call while
             # the row said cancelled - the one outcome a cancel must prevent.
-            cancelled = {
-                "ok": False,
-                "error": "job was cancelled before it started",
-                "job_id": job_id,
-                "cancelled_before_start": True,
-            }
-            if routing is not None:
-                cancelled["routing"] = routing
-            if label is not None:
-                cancelled["label"] = label
+            cancelled = _cancelled_result(job_id, label=label, routing=routing)
             try:
                 jobs.finish(job_id, result=cancelled, db_path=db_path)
             except Exception:  # noqa: BLE001 - notification is best effort
@@ -1723,46 +1792,30 @@ def _ask_async_impl(
             traceback.print_exc()
         return result
 
-    future = _async_executor.submit(_run)
-
-    # Wait briefly to see whether this dies on arrival. The receipt used to be
-    # returned the instant the task was QUEUED, so a call that failed in under
-    # a second - a rejected model, a bad workdir - still reported
-    # {"ok": true, "dispatched": true}. Two separate sessions read that as
-    # proof work was running and waited on results that never existed; one
-    # dispatched five agents and believed all five were in flight. A receipt
-    # that cannot distinguish "started" from "already failed" is a write-only
-    # signal, so spend a moment to make it mean something.
     try:
-        early = future.result(timeout=_ASYNC_EARLY_FAILURE_S)
-    except FuturesTimeout:
-        early = None  # still running - genuinely dispatched, report it as such
-
-    if early is not None and not early.get("ok", False):
-        # Failed before we finished waiting. The mailbox copy is still written
-        # (above), so the record survives; this just refuses to call it a
-        # successful dispatch.
-        failure = {
-            "ok": False,
-            "dispatched": False,
-            "error": early.get("error", f"{agent} dispatch failed immediately"),
-            "job_id": job_id,
-            "label": label,
-            "lane": recipient,
-        }
-        if routing is not None:
-            failure["routing"] = routing
-        return failure
+        future = _async_executor.submit(_run)
+    except Exception as exc:
+        slots.release()
+        result = {"ok": False, "error": f"could not submit async job: {exc}"}
+        if jobs.mark_running(job_id, db_path=db_path):
+            jobs.finish(job_id, result=result, db_path=db_path)
+        return {**result, "accepted": False, "dispatched": False, "job_id": job_id}
+    _track_job(db_path, job_id, future, slots)
+    _retire_cancelled_jobs()
+    job = jobs.get(job_id, db_path=db_path)
+    state = job["state"]
     receipt = {
-        "ok": True,
-        "dispatched": True,
-        # The durable handle. A label is a correlation aid the caller chooses
-        # and may reuse; this identifies the run even across a restart.
+        "ok": state not in {jobs.FAILED, jobs.CANCELLED, jobs.LOST},
+        "accepted": True,
+        "state": state,
+        "dispatched": state in {jobs.RUNNING, jobs.COMPLETED},
         "job_id": job_id,
         "label": label,
         "lane": recipient,
         "track_with": f"job_status(job_id={job_id!r})",
     }
+    if job.get("error"):
+        receipt["error"] = job["error"]
     if routing is not None:
         receipt["routing"] = routing
     return receipt
@@ -1920,6 +1973,7 @@ async def ask_claude_async(
     if not plan["ok"]:
         return {
             "ok": False,
+            "accepted": False,
             "dispatched": False,
             "error": plan["error"],
             "routing": plan["routing"],

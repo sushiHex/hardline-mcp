@@ -1,4 +1,46 @@
 {
+  "cancel-retains-routing": {
+    "file": "hardline_mcp/server.py",
+    "before": "                    routing=(job.get(\"request\") or {}).get(\"routing\"),",
+    "after": "                    routing=None,",
+    "tests": ["tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"]
+  },
+  "admission-cancel-releases": {
+    "file": "hardline_mcp/server.py",
+    "before": "and future.cancel():",
+    "after": "and False:",
+    "tests": ["tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"]
+  },
+  "cancel-removes-prompt": {
+    "file": "hardline_mcp/dispatch.py",
+    "before": "removed = self._pending.pop(future, None)",
+    "after": "removed = self._pending.get(future)",
+    "tests": ["tests/test_dispatch.py::test_cancel_removes_prompt_and_notifies_waiters_before_worker_is_free"]
+  },
+  "admission-capacity": {
+    "file": "hardline_mcp/server.py",
+    "before": "    if not slots.acquire(blocking=False):",
+    "after": "    if not slots.acquire(blocking=False) and False:",
+    "tests": ["tests/test_admission.py::test_concurrent_admission_bounds_running_and_queued"]
+  },
+  "admission-validation": {
+    "file": "hardline_mcp/server.py",
+    "before": "    if error:\n        return {**error, \"accepted\": False, \"dispatched\": False}",
+    "after": "    if error and False:\n        return {**error, \"accepted\": False, \"dispatched\": False}",
+    "tests": ["tests/test_admission.py::test_invalid_request_is_rejected_before_admission"]
+  },
+  "admission-state": {
+    "file": "hardline_mcp/server.py",
+    "before": "        \"accepted\": True,\n        \"state\": state,",
+    "after": "        \"accepted\": True,\n        \"state\": jobs.RUNNING,",
+    "tests": ["tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"]
+  },
+  "admission-release": {
+    "file": "hardline_mcp/server.py",
+    "before": "        slots.release()\n\n    future.add_done_callback(finished)",
+    "after": "\n    future.add_done_callback(finished)",
+    "tests": ["tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"]
+  },
   "completion-transaction": {
     "file": "hardline_mcp/jobs.py",
     "before": "            if not changed.rowcount:\n",
@@ -17,8 +59,8 @@
   },
   "completion-store": {
     "file": "hardline_mcp/server.py",
-    "before": "jobs.mark_running(job_id, db_path=db_path)",
-    "after": "jobs.mark_running(job_id)",
+    "before": "if not jobs.mark_running(job_id, db_path=db_path)",
+    "after": "if not jobs.mark_running(job_id)",
     "tests": [
       "tests/test_completion.py::test_worker_retains_dispatch_store"
     ]

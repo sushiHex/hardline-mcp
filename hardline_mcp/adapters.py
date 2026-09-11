@@ -892,7 +892,9 @@ _AGENT_CHILD_STRIPPED_ENV = frozenset(
 )
 
 
-def _run_agent_cmd(agent: str, argv: list[str], *, env: dict | None = None, **kwargs) -> dict:
+def _run_agent_cmd(
+    agent: str, argv: list[str], *, env: dict | None = None, **kwargs
+) -> dict:
     try:
         timeout_s = _timeout_for(agent)
     except ValueError as exc:
@@ -1032,6 +1034,39 @@ def _validate_workdir_write(
     if workdir is not None:
         return None, str(Path(workdir).resolve())
     return None, None
+
+
+def validate_request(
+    agent: str,
+    *,
+    model: str | None,
+    effort: str,
+    mode: str,
+    workdir: str | None,
+    write: bool,
+) -> tuple[dict | None, str | None]:
+    """Validate invocation options without starting work; resolve its directory.
+
+    Shared by direct adapters and async admission, so invalid queued requests
+    fail before consuming capacity and direct calls retain the same rules.
+    """
+    efforts, modes = {
+        "codex": (_CODEX_EFFORTS, _CODEX_MODES),
+        "claude": (_CLAUDE_EFFORTS, _CLAUDE_MODES),
+    }[agent]
+    name = agent.title()
+    if effort not in efforts:
+        return {
+            "ok": False,
+            "error": f"unsupported {name} effort {effort!r}; expected one of {sorted(efforts)}",
+        }, None
+    if mode not in modes:
+        return {
+            "ok": False,
+            "error": f"unsupported {name} mode {mode!r}; expected one of {sorted(modes)}",
+        }, None
+    error, resolved = _validate_workdir_write(name, mode, workdir, write)
+    return error or _validate_model(name, model), resolved
 
 
 def ask(agent: str, text: str) -> dict:
@@ -1299,20 +1334,9 @@ def ask_codex(
     rather than silently behaving as disabled) - omitted, Codex stays
     read-only exactly as before.
     """
-    if effort not in _CODEX_EFFORTS:
-        return {
-            "ok": False,
-            "error": f"unsupported Codex effort {effort!r}; expected one of {sorted(_CODEX_EFFORTS)}",
-        }
-    if mode not in _CODEX_MODES:
-        return {
-            "ok": False,
-            "error": f"unsupported Codex mode {mode!r}; expected one of {sorted(_CODEX_MODES)}",
-        }
-    error, workdir = _validate_workdir_write("Codex", mode, workdir, write)
-    if error is not None:
-        return error
-    error = _validate_model("Codex", model)
+    error, workdir = validate_request(
+        "codex", model=model, effort=effort, mode=mode, workdir=workdir, write=write
+    )
     if error is not None:
         return error
     argv = _prefix_for("codex") + ["--ephemeral"]
@@ -1566,8 +1590,10 @@ def _fetch_subscription_quota() -> dict:
         argv = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RuntimeError("quota router command is not valid JSON") from exc
-    if not isinstance(argv, list) or not argv or not all(
-        isinstance(item, str) and item for item in argv
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(item, str) and item for item in argv)
     ):
         raise RuntimeError("quota router command must be a non-empty JSON argv array")
     timeout = _quota_env_float("HARDLINE_QUOTA_ROUTER_TIMEOUT", 30.0)
@@ -1634,7 +1660,9 @@ def _claude_quota_route(
         "reserve_enforced": False,
     }
     if override_claude_reserve or override_reason is not None:
-        normalized_reason = override_reason.strip() if isinstance(override_reason, str) else ""
+        normalized_reason = (
+            override_reason.strip() if isinstance(override_reason, str) else ""
+        )
         base["reserve_override"] = {
             "requested": override_claude_reserve,
             "applied": False,
@@ -1669,8 +1697,7 @@ def _claude_quota_route(
         chatgpt_remaining = _remaining_percent(chatgpt_weekly["remaining_percent"])
         remaining_values = (claude_remaining, chatgpt_remaining)
         if not all(
-            math.isfinite(value) and 0 <= value <= 100
-            for value in remaining_values
+            math.isfinite(value) and 0 <= value <= 100 for value in remaining_values
         ):
             raise ValueError(
                 "remaining_percent values must be finite percentages in [0, 100]"
@@ -1807,20 +1834,9 @@ def ask_claude(
     made before - pass ``effort`` explicitly when that matters, since an
     explicit value is honoured either way.
     """
-    if effort not in _CLAUDE_EFFORTS:
-        return {
-            "ok": False,
-            "error": f"unsupported Claude effort {effort!r}; expected one of {sorted(_CLAUDE_EFFORTS)}",
-        }
-    if mode not in _CLAUDE_MODES:
-        return {
-            "ok": False,
-            "error": f"unsupported Claude mode {mode!r}; expected one of {sorted(_CLAUDE_MODES)}",
-        }
-    error, workdir = _validate_workdir_write("Claude", mode, workdir, write)
-    if error is not None:
-        return error
-    error = _validate_model("Claude", model)
+    error, workdir = validate_request(
+        "claude", model=model, effort=effort, mode=mode, workdir=workdir, write=write
+    )
     if error is not None:
         return error
 
