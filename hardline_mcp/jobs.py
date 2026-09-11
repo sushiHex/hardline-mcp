@@ -154,6 +154,8 @@ def mark_running(
     carried on, which is worse than not supporting cancel at all.
     """
     db_path = _resolve_db(db_path)
+    owner_pid = os.getpid()
+    owner_key = process_key(owner_pid)
     with closing(_connect(db_path)) as conn:
         with conn:
             cur = conn.execute(
@@ -165,11 +167,11 @@ def mark_running(
                     RUNNING,
                     _iso(now_fn()),
                     child_pid,
-                    process_key(os.getpid()),
+                    owner_key,
                     job_id,
                     QUEUED,
-                    os.getpid(),
-                    process_key(os.getpid()),
+                    owner_pid,
+                    owner_key,
                 ),
             )
         return cur.rowcount > 0

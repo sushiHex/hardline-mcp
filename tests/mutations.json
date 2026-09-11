@@ -1,4 +1,10 @@
 {
+  "owner-token-snapshot": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "                    QUEUED,\n                    owner_pid,\n                    owner_key,",
+    "after": "                    QUEUED,\n                    owner_pid,\n                    process_key(owner_pid),",
+    "tests": ["tests/test_identity.py::test_start_uses_one_owner_token_for_assignment_and_predicate"]
+  },
   "admission-capacity": {
     "file": "hardline_mcp/server.py",
     "before": "    if not slots.acquire(blocking=False):",

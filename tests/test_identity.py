@@ -158,6 +158,24 @@ def test_legacy_refresh_keeps_host_binding(tmp_path):
     assert row["host_pid"] == pid and row["host_key"] == key
 
 
+@pytest.mark.parametrize("first_probe_known", [True, False])
+def test_start_uses_one_owner_token_for_assignment_and_predicate(
+    tmp_path, monkeypatch, first_probe_known
+):
+    db = tmp_path / "mb.db"
+    job_id = create(db)
+    key = procid.process_key(os.getpid())
+    answers = iter([key, None] if first_probe_known else [None, key])
+    monkeypatch.setattr(jobs, "process_key", lambda pid: next(answers))
+    assert jobs.mark_running(job_id, db_path=db) is first_probe_known
+    with mailbox._connect(db) as conn:
+        row = conn.execute(
+            "SELECT state, owner_key FROM jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+    assert row["owner_key"] == key
+    assert row["state"] == (jobs.RUNNING if first_probe_known else jobs.QUEUED)
+
+
 def test_registration_retains_captured_host_after_reparenting(monkeypatch, tmp_path):
     monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setenv("HARDLINE_AGENT", "codex")
