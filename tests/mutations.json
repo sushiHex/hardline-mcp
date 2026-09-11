@@ -63,5 +63,13 @@
     "tests": [
       "tests/test_ownership.py::test_missing_grant_recovers_without_waiting_for_heartbeat"
     ]
+  },
+  "lane-grant-work-conflict": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "            if _refusal(conn, lane, pid):\n                continue\n",
+    "after": "",
+    "tests": [
+      "tests/test_ownership.py::test_existing_grant_cannot_consume_after_foreign_work_appears"
+    ]
   }
 }
