@@ -1846,12 +1846,7 @@ async def test_a_derived_lane_cannot_be_released(monkeypatch, tmp_path, in_sessi
 
 @pytest.mark.anyio
 async def test_list_agents_reports_a_lane_two_sessions_both_hold(codex_session):
-    """Two live holders drain each other's mail nondeterministically.
-
-    ``claim`` refuses to create that, but a hand-set HARDLINE_AGENT_LABEL on
-    two sessions still can — so it has to be reported rather than collapsed
-    into a set where the second holder simply disappears.
-    """
+    """Report legacy conflicts and explain that current consumers refuse them."""
     from hardline_mcp import server
 
     other = os.getppid()
@@ -1861,9 +1856,8 @@ async def test_list_agents_reports_a_lane_two_sessions_both_hold(codex_session):
     await server.register_session(label="construction")
     # Written straight into the table, because `register` now REFUSES to
     # co-register a lane a live process already holds. Two holders can still
-    # arise — a process on older code writing the legacy table, or two
-    # registrations racing the same check — so the reporting still has a job,
-    # but it can no longer be reached through the front door.
+    # arise through an older writer, so reporting still has a job even though
+    # current registration acquires lanes atomically.
     with mailbox._connect(codex_session) as conn:
         with conn:
             conn.execute(
@@ -1886,7 +1880,7 @@ async def test_list_agents_reports_a_lane_two_sessions_both_hold(codex_session):
 
     listing = await server.list_agents()
     assert listing["contested_lanes"] == ["codex:construction"]
-    assert "drain each other" in listing["contested_lanes_note"]
+    assert "refuse to consume contested mail" in listing["contested_lanes_note"]
 
 
 @pytest.mark.anyio

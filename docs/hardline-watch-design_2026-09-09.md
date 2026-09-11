@@ -225,7 +225,7 @@ as project configuration.
 On `mail_pending`, the receiving session drains its own
 `inbox(agent=...)` until `remaining=0`, uses `peek` for truncated bodies,
 and applies its current instructions before acting. Setup commands and standing
-instructions live in [README.md](../README.md#inbox-signals-for-existing-sessions)
+instructions live in [inbox signal setup](inbox-signals.md)
 and [CLAUDE.md](../CLAUDE.md). Existing `AGENTS.md` is preserved.
 
 ## Verification and measured boundaries
