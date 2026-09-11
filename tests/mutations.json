@@ -1,4 +1,10 @@
 {
+  "lane-grant-recovery": {
+    "file": "hardline_mcp/server.py",
+    "before": "            if set(expected) - set(owned):",
+    "after": "            if False:",
+    "tests": ["tests/test_ownership.py::test_missing_grant_recovers_without_waiting_for_heartbeat"]
+  },
   "lane-acquisition-lock": {
     "file": "hardline_mcp/sessions.py",
     "before": "            conn.execute(\"BEGIN IMMEDIATE\")\n",
