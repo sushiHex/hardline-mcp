@@ -1,45 +1,43 @@
 {
-  "cancel-retains-routing": {
-    "file": "hardline_mcp/server.py",
-    "before": "                    routing=(job.get(\"request\") or {}).get(\"routing\"),",
-    "after": "                    routing=None,",
-    "tests": ["tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"]
-  },
-  "admission-cancel-releases": {
-    "file": "hardline_mcp/server.py",
-    "before": "and future.cancel():",
-    "after": "and False:",
-    "tests": ["tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"]
-  },
-  "cancel-removes-prompt": {
-    "file": "hardline_mcp/dispatch.py",
-    "before": "removed = self._pending.pop(future, None)",
-    "after": "removed = self._pending.get(future)",
-    "tests": ["tests/test_dispatch.py::test_cancel_removes_prompt_and_notifies_waiters_before_worker_is_free"]
+  "owner-token-snapshot": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "                    QUEUED,\n                    owner_pid,\n                    owner_key,",
+    "after": "                    QUEUED,\n                    owner_pid,\n                    process_key(owner_pid),",
+    "tests": [
+      "tests/test_identity.py::test_verified_owner_token_survives_later_probe_failure"
+    ]
   },
   "admission-capacity": {
     "file": "hardline_mcp/server.py",
     "before": "    if not slots.acquire(blocking=False):",
     "after": "    if not slots.acquire(blocking=False) and False:",
-    "tests": ["tests/test_admission.py::test_concurrent_admission_bounds_running_and_queued"]
+    "tests": [
+      "tests/test_admission.py::test_concurrent_admission_bounds_running_and_queued"
+    ]
   },
   "admission-validation": {
     "file": "hardline_mcp/server.py",
     "before": "    if error:\n        return {**error, \"accepted\": False, \"dispatched\": False}",
     "after": "    if error and False:\n        return {**error, \"accepted\": False, \"dispatched\": False}",
-    "tests": ["tests/test_admission.py::test_invalid_request_is_rejected_before_admission"]
+    "tests": [
+      "tests/test_admission.py::test_invalid_request_is_rejected_before_admission"
+    ]
   },
   "admission-state": {
     "file": "hardline_mcp/server.py",
     "before": "        \"accepted\": True,\n        \"state\": state,",
     "after": "        \"accepted\": True,\n        \"state\": jobs.RUNNING,",
-    "tests": ["tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"]
+    "tests": [
+      "tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"
+    ]
   },
   "admission-release": {
     "file": "hardline_mcp/server.py",
     "before": "        slots.release()\n\n    future.add_done_callback(finished)",
     "after": "\n    future.add_done_callback(finished)",
-    "tests": ["tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"]
+    "tests": [
+      "tests/test_admission.py::test_receipt_reports_queued_without_waiting_and_completion_releases_slot"
+    ]
   },
   "completion-transaction": {
     "file": "hardline_mcp/jobs.py",
@@ -106,6 +104,94 @@
       "tests/test_ownership.py::test_missing_grant_recovers_without_waiting_for_heartbeat"
     ]
   },
+  "owner-read-token": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "instance_state(job[\"owner_pid\"], job[\"owner_key\"])",
+    "after": "instance_state(job[\"owner_pid\"], None)",
+    "tests": [
+      "tests/test_identity.py::test_reused_owner_pid_is_lost_without_affecting_new_instance"
+    ]
+  },
+  "owner-sweep-token": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "for pid, key in owners if instance_state(pid, key) == DEAD",
+    "after": "for pid, key in owners if instance_state(pid, None) == DEAD",
+    "tests": [
+      "tests/test_identity.py::test_reused_owner_pid_is_lost_without_affecting_new_instance"
+    ]
+  },
+  "owner-finish-token": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "AND (owner_key IS NULL OR owner_key = ?) AND",
+    "after": "AND (owner_key IS NULL OR owner_key = ? OR 1) AND",
+    "tests": [
+      "tests/test_identity.py::test_previous_owner_cannot_start_attach_or_finish"
+    ]
+  },
+  "owner-work-token": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "instance_state(r[\"owner_pid\"], r[\"owner_key\"])",
+    "after": "instance_state(r[\"owner_pid\"], None)",
+    "tests": [
+      "tests/test_identity.py::test_work_owned_by_reused_pid_does_not_block_role"
+    ]
+  },
+  "owner-read-cas": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "state IN (?, ?) AND owner_pid = ? AND owner_key IS ?",
+    "after": "state IN (?, ?) AND owner_pid = ? AND (owner_key IS ? OR 1)",
+    "tests": [
+      "tests/test_identity.py::test_lost_resolution_only_updates_probed_identity"
+    ]
+  },
+  "owner-sweep-cas": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "WHERE owner_pid = ? AND owner_key IS ? AND state IN ({marks})",
+    "after": "WHERE owner_pid = ? AND (owner_key IS ? OR 1) AND state IN ({marks})",
+    "tests": [
+      "tests/test_identity.py::test_lost_resolution_only_updates_probed_identity"
+    ]
+  },
+  "host-lifetime": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "state = instance_state(row[\"host_pid\"], row[\"host_key\"])",
+    "after": "state = ALIVE",
+    "tests": [
+      "tests/test_identity.py::test_orphan_server_lifetime_follows_host"
+    ]
+  },
+  "host-prune-cas": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "AND host_pid IS ? AND host_key IS ?",
+    "after": "AND (? IS NULL OR 1) AND (? IS NULL OR 1)",
+    "tests": [
+      "tests/test_identity.py::test_prune_preserves_replaced_host_identity"
+    ]
+  },
+  "host-retention": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "host_pid = COALESCE(?, host_pid)",
+    "after": "host_pid = ?",
+    "tests": [
+      "tests/test_identity.py::test_legacy_refresh_keeps_host_binding"
+    ]
+  },
+  "admission-cancel-releases": {
+    "file": "hardline_mcp/server.py",
+    "before": "and future.cancel():",
+    "after": "and False:",
+    "tests": [
+      "tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"
+    ]
+  },
+  "cancel-removes-prompt": {
+    "file": "hardline_mcp/dispatch.py",
+    "before": "removed = self._pending.pop(future, None)",
+    "after": "removed = self._pending.get(future)",
+    "tests": [
+      "tests/test_dispatch.py::test_cancel_removes_prompt_and_notifies_waiters_before_worker_is_free"
+    ]
+  },
   "lane-grant-work-conflict": {
     "file": "hardline_mcp/sessions.py",
     "before": "        if _refusal(conn, lane, pid):\n            continue\n",
@@ -120,6 +206,94 @@
     "after": "return operation(*args, owned=owned, db_path=db_path, **kwargs)",
     "tests": [
       "tests/test_ownership.py::test_consumption_rechecks_conflict_after_preflight"
+    ]
+  },
+  "cancel-retains-routing": {
+    "file": "hardline_mcp/server.py",
+    "before": "                    routing=(job.get(\"request\") or {}).get(\"routing\"),",
+    "after": "                    routing=None,",
+    "tests": [
+      "tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"
+    ]
+  },
+  "host-anchor-token-retention": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "\"host_key\": host.key,",
+    "after": "\"host_key\": procid.process_key(host.pid),",
+    "tests": [
+      "tests/test_identity.py::test_anchor_retains_verified_host_token_after_probe_failure"
+    ]
+  },
+  "owner-completion-retention": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "                    owner_pid,\n                    owner_key,\n                    RUNNING,",
+    "after": "                    owner_pid,\n                    process_key(owner_pid),\n                    RUNNING,",
+    "tests": [
+      "tests/test_identity.py::test_verified_owner_token_survives_later_probe_failure"
+    ]
+  },
+  "host-ancestry-snapshot": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "\"host_pid\": host.pid,",
+    "after": "\"host_pid\": (procid.parent_pid_of(parent) or parent) if host.pid != parent else parent,",
+    "tests": [
+      "tests/test_identity.py::test_host_selection_never_rewalks_wrappers"
+    ]
+  },
+  "host-independent-of-lane-token": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    host = next(\n",
+    "after": "    if not token:\n        return blank\n    host = next(\n",
+    "tests": [
+      "tests/test_identity.py::test_known_host_survives_an_unverifiable_wrapper"
+    ]
+  },
+  "host-parent-edge": {
+    "file": "hardline_mcp/procid.py",
+    "before": "                parent_pid_of(child_pid) != current\n",
+    "after": "                False\n",
+    "tests": [
+      "tests/test_identity.py::test_ancestry_rejects_a_changed_parent_edge"
+    ]
+  },
+  "host-parent-birth-order": {
+    "file": "hardline_mcp/procid.py",
+    "before": "                or _created_after(captured.key, descendant_key)\n",
+    "after": "                or False\n",
+    "tests": [
+      "tests/test_identity.py::test_ancestry_rejects_a_parent_born_after_its_child"
+    ]
+  },
+  "host-ancestry-reuse": {
+    "file": "hardline_mcp/procid.py",
+    "before": "if key is not None and confirmed is not None and key != confirmed:",
+    "after": "if False:",
+    "tests": [
+      "tests/test_identity.py::test_ancestry_stops_when_a_process_changes_during_capture"
+    ]
+  },
+  "host-verified-descendant-bound": {
+    "file": "hardline_mcp/procid.py",
+    "before": "        if captured.key is not None:\n            descendant_key = captured.key\n",
+    "after": "        descendant_key = captured.key\n",
+    "tests": [
+      "tests/test_identity.py::test_unknown_wrapper_retains_verified_descendant_creation_bound"
+    ]
+  },
+  "host-missing-token-is-unknown": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "    return UNKNOWN if row[\"host_key\"] is None and state == ALIVE else state\n",
+    "after": "    return state\n",
+    "tests": [
+      "tests/test_identity.py::test_unverified_host_remains_unknown_until_confirmed_dead"
+    ]
+  },
+  "host-initial-parent-edge": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "parent, depth=3, child=procid.current_identity()",
+    "after": "parent, depth=3",
+    "tests": [
+      "tests/test_identity.py::test_anchor_rejects_a_reused_initial_parent_pid"
     ]
   }
 }

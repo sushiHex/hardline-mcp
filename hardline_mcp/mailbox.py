@@ -43,7 +43,7 @@ def _resolve_db(db_path: Optional[Path]) -> Path:
 # Bumped when a table is added or a column's meaning changes. Recorded in
 # `meta` so a running server can report what store it is talking to rather
 # than leaving "is this the new schema?" to be inferred from behaviour.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     result       TEXT,
     error        TEXT,
     owner_pid    INTEGER NOT NULL,
+    owner_key    TEXT,
     child_pid    INTEGER,
     -- Process-identity token for child_pid (creation time). A pid alone is
     -- not an identity: a finished child's pid can be reused, and cancelling
@@ -123,6 +124,8 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     -- Creation-time token for pid. A pid is not an identity: without this, a
     -- reused pid would inherit the previous session's lane and its mail.
     process_key TEXT,
+    host_pid    INTEGER,
+    host_key    TEXT,
     cwd         TEXT,
     started_at  TEXT NOT NULL,
     last_seen   TEXT NOT NULL,
@@ -199,7 +202,8 @@ def _iso(dt: datetime) -> str:
 # NOT EXISTS cannot add them, so a store created by an earlier version keeps
 # the old shape and every write naming the new column fails.
 _ADDED_COLUMNS = {
-    "jobs": {"child_key": "TEXT"},
+    "jobs": {"child_key": "TEXT", "owner_key": "TEXT"},
+    "agent_sessions": {"host_pid": "INTEGER", "host_key": "TEXT"},
 }
 
 

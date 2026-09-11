@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from typing import Optional
+from typing import NamedTuple, Optional
 
 _SYNCHRONIZE = 0x00100000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -32,6 +32,24 @@ _WAIT_OBJECT_0 = 0x00000000
 _ERROR_INVALID_PARAMETER = 87
 _ERROR_ACCESS_DENIED = 5
 _kernel32_cache: list = []
+_current_identity: tuple[int, str] | None = None
+
+
+def current_identity() -> tuple[int, Optional[str]]:
+    """Retain our first verified creation token; a live process cannot reuse its PID.
+
+    Foreign processes still need fresh probes. A fork changes our PID and gets
+    a new identity. Failed probes are not cached, so an initially unknown token
+    can become known, but a later failure cannot erase a verified token.
+    """
+    global _current_identity
+    pid = os.getpid()
+    if _current_identity is None or _current_identity[0] != pid:
+        token = process_key(pid)
+        if token is not None:
+            _current_identity = (pid, token)
+    known = _current_identity
+    return known if known is not None and known[0] == pid else (pid, None)
 
 
 def _kernel32():
@@ -197,7 +215,9 @@ def process_key(pid: int) -> Optional[str]:
                 kernel32.CloseHandle(handle)
         # Linux: field 22 of /proc/<pid>/stat is starttime in clock ticks.
         try:
-            with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace") as fh:
+            with open(
+                f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace"
+            ) as fh:
                 data = fh.read()
         except (OSError, ValueError):
             return None
@@ -383,21 +403,79 @@ def _windows_parent(pid: int) -> Optional[int]:
         kernel32.CloseHandle(snapshot)
 
 
-def ancestry(pid: Optional[int] = None, depth: int = 4) -> list[str]:
-    """Image names walking up from ``pid``, nearest ancestor first."""
+class Ancestor(NamedTuple):
+    pid: int
+    image: str
+    key: Optional[str]
+
+
+def _created_after(parent_key: Optional[str], child_key: Optional[str]) -> bool:
+    """A reused parent PID cannot have been created after its living child.
+
+    Linux tokens are start ticks; Windows tokens are FILETIME high:low words.
+    Unknown tokens cannot establish creation order.
+    """
+
+    def stamp(key):
+        high, separator, low = key.partition(":")
+        return (int(high) << 32) + int(low) if separator else int(high)
+
+    try:
+        return stamp(parent_key) > stamp(child_key)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def ancestry_snapshot(
+    pid: Optional[int] = None,
+    depth: int = 4,
+    *,
+    child: tuple[int, Optional[str]] | None = None,
+) -> list[Ancestor]:
+    """Capture names and identities in one bounded parent walk.
+
+    Each parent must still be linked to its child and cannot be younger than
+    a verified descendant. Pass ``child`` to validate the first edge too.
+    Confirmed identity changes end the walk; failed later probes retain
+    already captured identity.
+    """
     current = os.getppid() if pid is None else pid
-    names: list[str] = []
+    ancestors: list[Ancestor] = []
     seen: set[int] = set()
+    descendant_key = child[1] if child is not None else None
     for _ in range(depth):
         if not current or current in seen:
             break
         seen.add(current)
-        name = image_name(current)
-        if not name:
-            break
-        names.append(name)
-        current = parent_pid_of(current) or 0
-    return names
+        key = process_key(current)
+        name = image_name(current) or ""
+        parent = (parent_pid_of(current) or 0) if name else 0
+        confirmed = process_key(current)
+        if key is not None and confirmed is not None and key != confirmed:
+            name, parent = "", 0
+        captured = Ancestor(current, name, key if key is not None else confirmed)
+        if child is not None:
+            child_pid, child_key = child
+            if (
+                parent_pid_of(child_pid) != current
+                or instance_state(child_pid, child_key) == DEAD
+                or _created_after(captured.key, descendant_key)
+            ):
+                break
+        ancestors.append(captured)
+        child = (captured.pid, captured.key)
+        # An unreadable wrapper must not erase the age bound learned below it.
+        if captured.key is not None:
+            descendant_key = captured.key
+        current = parent
+    return ancestors
+
+
+def ancestry(pid: Optional[int] = None, depth: int = 4) -> list[str]:
+    """Image names walking up from ``pid``, nearest ancestor first."""
+    return [
+        ancestor.image for ancestor in ancestry_snapshot(pid, depth) if ancestor.image
+    ]
 
 
 def session_token(pid: int) -> Optional[str]:
@@ -407,12 +485,14 @@ def session_token(pid: int) -> Optional[str]:
     not inherit the previous process's identifier. Eight hex characters, to
     match the shape of the session-id prefix Claude Code supplies.
     """
-    if not pid or pid <= 0:
+    return identity_token(pid, process_key(pid))
+
+
+def identity_token(pid: int, key: Optional[str]) -> Optional[str]:
+    """Derive a lane token from an already captured process identity."""
+    if not pid or pid <= 0 or key is None:
         return None
-    token = process_key(pid)
-    if token is None:
-        return None
-    return hashlib.sha256(f"{pid}:{token}".encode()).hexdigest()[:8]
+    return hashlib.sha256(f"{pid}:{key}".encode()).hexdigest()[:8]
 
 
 def instance_alive(pid: Optional[int], expect_key: Optional[str]) -> bool:

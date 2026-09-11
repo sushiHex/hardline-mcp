@@ -75,7 +75,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from .mailbox import _connect, _default_now, _iso, _resolve_db
-from .procid import DEAD, instance_state, process_key
+from .procid import ALIVE, DEAD, UNKNOWN, current_identity, instance_state, process_key
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -84,6 +84,9 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         "agent": row["agent"],
         "label": row["label"],
         "pid": row["pid"],
+        "process_key": row["process_key"],
+        "host_pid": row["host_pid"] if "host_pid" in row.keys() else None,
+        "host_key": row["host_key"] if "host_key" in row.keys() else None,
         "cwd": row["cwd"],
         "started_at": row["started_at"],
         "last_seen": row["last_seen"],
@@ -98,7 +101,21 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 
 def _state(row: sqlite3.Row) -> str:
     """``ALIVE`` / ``DEAD`` / ``UNKNOWN`` for the process behind this row."""
-    return instance_state(row["pid"], row["process_key"])
+    state = instance_state(row["pid"], row["process_key"])
+    if state == DEAD:
+        return state
+    host = host_state(row)
+    if host == DEAD:
+        return DEAD
+    return UNKNOWN if UNKNOWN in (state, host) else state
+
+
+def host_state(row: sqlite3.Row) -> str:
+    """Legacy rows are unbound; a bound host needs a token to be verified alive."""
+    if "host_pid" not in row.keys() or row["host_pid"] is None:
+        return ALIVE
+    state = instance_state(row["host_pid"], row["host_key"])
+    return UNKNOWN if row["host_key"] is None and state == ALIVE else state
 
 
 def _is_live(row: sqlite3.Row) -> bool:
@@ -125,18 +142,22 @@ def _prune_dead(conn: sqlite3.Connection) -> None:
     a liveness decision made about its predecessor. Matching the token we
     actually probed makes the delete a compare-and-swap.
     """
-    rows = conn.execute("SELECT pid, lane, process_key FROM agent_sessions").fetchall()
+    rows = conn.execute("SELECT * FROM agent_sessions").fetchall()
     # DEAD only, never merely not-ALIVE. Deleting on an inconclusive probe is
     # how a live session gets unregistered and then has its name claimed by
     # someone else - and the deletion also destroys the evidence that it was
     # ever there.
-    dead = [(r["pid"], r["lane"], r["process_key"]) for r in rows if _state(r) == DEAD]
+    dead = [
+        (r["pid"], r["lane"], r["process_key"], r["host_pid"], r["host_key"])
+        for r in rows
+        if _state(r) == DEAD
+    ]
     if not dead:
         return
     with conn:
         conn.executemany(
             "DELETE FROM agent_sessions WHERE pid = ? AND lane = ?"
-            " AND process_key IS ?",
+            " AND process_key IS ? AND host_pid IS ? AND host_key IS ?",
             dead,
         )
 
@@ -157,7 +178,7 @@ def _live_work(conn: sqlite3.Connection, lane: str) -> list[dict]:
     name.
     """
     rows = conn.execute(
-        "SELECT job_id, owner_pid, state, label FROM jobs"
+        "SELECT job_id, owner_pid, owner_key, state, label FROM jobs"
         " WHERE requester = ? AND state IN ('queued', 'running')",
         (lane,),
     ).fetchall()
@@ -169,7 +190,7 @@ def _live_work(conn: sqlite3.Connection, lane: str) -> list[dict]:
             "label": r["label"],
         }
         for r in rows
-        if instance_state(r["owner_pid"], None) != DEAD
+        if instance_state(r["owner_pid"], r["owner_key"]) != DEAD
     ]
 
 
@@ -200,7 +221,9 @@ def drop_lane(
         return cur.rowcount > 0
 
 
-def _upsert(conn, *, pid, lane, agent, label, key, cwd, stamp) -> None:
+def _upsert(
+    conn, *, pid, lane, agent, label, key, cwd, stamp, host_pid, host_key
+) -> None:
     """Write one (process, lane) row, creating it only if not already there.
 
     UPDATE-then-INSERT rather than INSERT OR REPLACE, so ``started_at`` and
@@ -222,8 +245,10 @@ def _upsert(conn, *, pid, lane, agent, label, key, cwd, stamp) -> None:
     # advertising it with no label at all.
     cur = conn.execute(
         "UPDATE agent_sessions SET agent = ?, label = COALESCE(?, label),"
-        " process_key = ?, cwd = ?, last_seen = ? WHERE pid = ? AND lane = ?",
-        (agent, label, key, cwd, stamp, pid, lane),
+        " process_key = ?, cwd = ?, last_seen = ?, host_pid = COALESCE(?, host_pid),"
+        " host_key = CASE WHEN ? IS NULL THEN host_key ELSE ? END"
+        " WHERE pid = ? AND lane = ?",
+        (agent, label, key, cwd, stamp, host_pid, host_pid, host_key, pid, lane),
     )
     if cur.rowcount == 0:
         # `seq`, not the timestamp, is what orders a session's names. Stored
@@ -233,10 +258,23 @@ def _upsert(conn, *, pid, lane, agent, label, key, cwd, stamp) -> None:
         # last. A per-process counter cannot tie.
         conn.execute(
             "INSERT INTO agent_sessions (pid, lane, agent, label, process_key, cwd,"
-            " started_at, last_seen, claimed_at, seq)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
+            " started_at, last_seen, claimed_at, host_pid, host_key, seq)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
             " (SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_sessions WHERE pid = ?))",
-            (pid, lane, agent, label, key, cwd, stamp, stamp, stamp, pid),
+            (
+                pid,
+                lane,
+                agent,
+                label,
+                key,
+                cwd,
+                stamp,
+                stamp,
+                stamp,
+                host_pid,
+                host_key,
+                pid,
+            ),
         )
 
 
@@ -295,11 +333,30 @@ def _refusal(conn, lane: str, pid: int) -> dict | None:
 
 
 def _acquire(
-    *, agent, lanes, label, primary, pid, cwd, db_path, now_fn, atomic: bool
+    *,
+    agent,
+    lanes,
+    label,
+    primary,
+    pid,
+    cwd,
+    db_path,
+    now_fn,
+    atomic: bool,
+    host_pid,
+    host_key,
 ) -> dict:
     pid = os.getpid() if pid is None else pid
     requested = tuple(dict.fromkeys(lanes))
-    stamp, key = _iso(now_fn()), process_key(pid)
+    if host_pid is not None and instance_state(host_pid, host_key) == DEAD:
+        return {
+            "ok": False,
+            "error": "launching host exited or its PID was reused",
+            "lanes": [],
+            "contested": list(requested),
+        }
+    stamp = _iso(now_fn())
+    key = current_identity()[1] if pid == os.getpid() else process_key(pid)
     accepted, refused = [], []
     inherited = 0
     with closing(_connect(_resolve_db(db_path))) as conn:
@@ -313,6 +370,11 @@ def _acquire(
                         return refusal
                     refused.append(lane)
                     continue
+                if not accepted and key is not None:
+                    conn.execute(
+                        "DELETE FROM agent_sessions WHERE pid = ? AND process_key IS NOT ?",
+                        (pid, key),
+                    )
                 if lane == primary:
                     inherited = _unread_for(conn, lane)
                 conn.execute(
@@ -328,6 +390,8 @@ def _acquire(
                     key=key,
                     cwd=cwd if cwd is not None else str(Path.cwd()),
                     stamp=stamp,
+                    host_pid=host_pid,
+                    host_key=host_key,
                 )
                 accepted.append(lane)
     return {
@@ -350,6 +414,8 @@ def register(
     label: Optional[str] = None,
     pid: Optional[int] = None,
     cwd: Optional[str] = None,
+    host_pid: Optional[int] = None,
+    host_key: Optional[str] = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> dict:
@@ -368,6 +434,8 @@ def register(
         cwd=cwd,
         db_path=db_path,
         now_fn=now_fn,
+        host_pid=host_pid,
+        host_key=host_key,
         atomic=False,
     )
 
@@ -383,7 +451,7 @@ def granted(
         with closing(_connect(_resolve_db(db_path))) as snapshot:
             snapshot.execute("BEGIN")
             return granted(lanes, conn=snapshot)
-    pid, key = os.getpid(), process_key(os.getpid())
+    pid, key = current_identity()
     owned = []
     for lane in lanes:
         if _refusal(conn, lane, pid):
@@ -488,6 +556,8 @@ def claim(
     lanes: Iterable[str] = (),
     pid: Optional[int] = None,
     cwd: Optional[str] = None,
+    host_pid: Optional[int] = None,
+    host_key: Optional[str] = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> dict:
@@ -506,6 +576,8 @@ def claim(
         cwd=cwd,
         db_path=db_path,
         now_fn=now_fn,
+        host_pid=host_pid,
+        host_key=host_key,
         atomic=True,
     )
 

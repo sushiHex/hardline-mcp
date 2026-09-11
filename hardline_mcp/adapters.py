@@ -303,21 +303,34 @@ def _anchor() -> dict:
 
 
 def _compute_anchor() -> dict:
-    blank = {"lane": "", "agent": ""}
     parent = os.getppid()
-    if not parent:
+    chain = procid.ancestry_snapshot(parent, depth=3, child=procid.current_identity())
+    blank = {"lane": "", "agent": "", "host_pid": None, "host_key": None}
+    if not chain:
         return blank
-    chain = procid.ancestry(parent, depth=3)
-    if any(_launcher_name(n) in _NESTED_LAUNCHERS for n in chain):
+    launcher = chain[0]
+    blank.update(host_pid=launcher.pid, host_key=launcher.key)
+    if any(_launcher_name(p.image) in _NESTED_LAUNCHERS for p in chain):
         return blank
-    token = procid.session_token(parent)
-    if not token:
-        return blank
+    token = procid.identity_token(launcher.pid, launcher.key)
     name = Path.cwd().name
-    agent = next(
-        (a for n in chain if (a := _AGENT_BY_LAUNCHER.get(_launcher_name(n)))), ""
+    host = next(
+        (p for p in chain if _launcher_name(p.image) in _AGENT_BY_LAUNCHER), launcher
     )
-    return {"lane": f"{name}.{token}" if name else token, "agent": agent}
+    # Preserve the parent-derived address, but bind lifetime to the actual
+    # agent host when a persistent launcher sits between it and this server.
+    return {
+        "lane": f"{name}.{token}" if name and token else token or "",
+        "agent": _AGENT_BY_LAUNCHER.get(_launcher_name(host.image), ""),
+        "host_pid": host.pid,
+        "host_key": host.key,
+    }
+
+
+def host_identity() -> dict:
+    """The launching host captured with the session anchor, never re-parented."""
+    anchor = _anchor()
+    return {"host_pid": anchor.get("host_pid"), "host_key": anchor.get("host_key")}
 
 
 def _launcher_name(image: str) -> str:
