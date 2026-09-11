@@ -100,6 +100,21 @@ def _track_job(db_path: Path, job_id: str, future: Future, slots) -> None:
     future.add_done_callback(finished)
 
 
+def _cancelled_result(job_id: str, *, label=None, routing=None) -> dict:
+    """One result shape for cancellation before the adapter starts."""
+    result = {
+        "ok": False,
+        "error": "job was cancelled before it started",
+        "job_id": job_id,
+        "cancelled_before_start": True,
+    }
+    if label is not None:
+        result["label"] = label
+    if routing is not None:
+        result["routing"] = routing
+    return result
+
+
 def _retire_cancelled_jobs() -> None:
     """Reconcile queued cancellation, including requests from another MCP process.
 
@@ -116,12 +131,11 @@ def _retire_cancelled_jobs() -> None:
             jobs.finish(
                 job_id,
                 db_path=db_path,
-                result={
-                    "ok": False,
-                    "job_id": job_id,
-                    "cancelled_before_start": True,
-                    "error": "job was cancelled before it started",
-                },
+                result=_cancelled_result(
+                    job_id,
+                    label=job["label"],
+                    routing=(job.get("request") or {}).get("routing"),
+                ),
             )
 
 
@@ -1733,16 +1747,7 @@ def _ask_async_impl(
             # The queued -> running claim failed, which means a cancel landed
             # first. Spawning anyway would run the whole expensive call while
             # the row said cancelled - the one outcome a cancel must prevent.
-            cancelled = {
-                "ok": False,
-                "error": "job was cancelled before it started",
-                "job_id": job_id,
-                "cancelled_before_start": True,
-            }
-            if routing is not None:
-                cancelled["routing"] = routing
-            if label is not None:
-                cancelled["label"] = label
+            cancelled = _cancelled_result(job_id, label=label, routing=routing)
             try:
                 jobs.finish(job_id, result=cancelled, db_path=db_path)
             except Exception:  # noqa: BLE001 - notification is best effort

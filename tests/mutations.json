@@ -3,7 +3,9 @@
     "file": "hardline_mcp/jobs.py",
     "before": "                    QUEUED,\n                    owner_pid,\n                    owner_key,",
     "after": "                    QUEUED,\n                    owner_pid,\n                    process_key(owner_pid),",
-    "tests": ["tests/test_identity.py::test_start_uses_one_owner_token_for_assignment_and_predicate"]
+    "tests": [
+      "tests/test_identity.py::test_start_uses_one_owner_token_for_assignment_and_predicate"
+    ]
   },
   "admission-capacity": {
     "file": "hardline_mcp/server.py",
@@ -204,6 +206,14 @@
     "after": "return operation(*args, owned=owned, db_path=db_path, **kwargs)",
     "tests": [
       "tests/test_ownership.py::test_consumption_rechecks_conflict_after_preflight"
+    ]
+  },
+  "cancel-retains-routing": {
+    "file": "hardline_mcp/server.py",
+    "before": "                    routing=(job.get(\"request\") or {}).get(\"routing\"),",
+    "after": "                    routing=None,",
+    "tests": [
+      "tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"
     ]
   }
 }
