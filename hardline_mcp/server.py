@@ -505,7 +505,20 @@ def _consume(operation, *args, **kwargs):
         except Exception as exc:
             _registration_failure[:] = [f"{type(exc).__name__}: {exc}"]
             owned = ()
-        return operation(*args, owned=owned, db_path=db_path, **kwargs)
+
+        def verify(conn):
+            try:
+                granted = sessions.granted(adapters.owned_recipients(), conn=conn)
+                if set(adapters.owned_recipients()) - set(granted):
+                    _registration_failure[:] = [
+                        "lane ownership is contested or unavailable"
+                    ]
+                return granted
+            except Exception as exc:
+                _registration_failure[:] = [f"{type(exc).__name__}: {exc}"]
+                return ()
+
+        return operation(*args, owned=verify, db_path=db_path, **kwargs)
 
 
 @mcp.tool()

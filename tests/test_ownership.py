@@ -56,6 +56,43 @@ async def test_refused_registration_cannot_consume(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["ack", "inbox"])
+async def test_consumption_rechecks_conflict_after_preflight(
+    monkeypatch, tmp_path, operation
+):
+    from hardline_mcp import jobs
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setenv("HARDLINE_DB", str(db))
+    monkeypatch.setenv("HARDLINE_AGENT", "codex")
+    monkeypatch.setenv("HARDLINE_AGENT_LABEL", "shared")
+    monkeypatch.setattr(sessions, "instance_state", lambda *args: "alive")
+    server._announce_self()
+    message = mailbox.send("claude", "codex:shared", "waiting")
+    original = getattr(mailbox, operation)
+
+    def introduce_conflict(*args, **kwargs):
+        job_id = jobs.create(
+            agent="claude", requester="codex:shared", label=None, request={}
+        )
+        with mailbox._connect(db) as conn:
+            conn.execute(
+                "UPDATE jobs SET owner_pid = ? WHERE job_id = ?",
+                (os.getpid() + 10000, job_id),
+            )
+            conn.commit()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mailbox, operation, introduce_conflict)
+    if operation == "ack":
+        assert (await server.ack(message["message_id"]))["ok"] is False
+    else:
+        result = await server.inbox("codex")
+        assert result["messages"][0]["acked_at"] is None
+        assert "registration_warning" in result
+
+
+@pytest.mark.anyio
 async def test_missing_grant_cannot_be_consumed_from_local_identity(
     monkeypatch, tmp_path
 ):

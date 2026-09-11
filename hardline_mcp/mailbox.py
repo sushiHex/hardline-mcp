@@ -429,7 +429,7 @@ def inbox(
     unread_only: bool = True,
     limit: int = DEFAULT_INBOX_LIMIT,
     auto_ack: bool = True,
-    owned: LaneSpec = None,
+    owned: LaneSpec | Callable[[sqlite3.Connection], LaneSpec] = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> tuple[list[dict], int]:
@@ -457,7 +457,11 @@ def inbox(
     the same oldest batch forever and it never sees a new message again.
     Consuming server-side advances the cursor per poll, so a backlog drains.
 
-    Consuming honours ``lane_suffix`` exactly as ``ack`` does, so reading a
+    ``owned`` accepts trusted lane names or a resolver called inside this
+    transaction. MCP uses a resolver so ownership and acknowledgement share
+    the same snapshot and writer reservation.
+
+    Consuming honours ownership exactly as ``ack`` does, so reading a
     lane you do not own shows you the messages but does NOT consume them.
     It is also ignored unless ``unread_only`` - see ``consuming`` below.
 
@@ -472,7 +476,7 @@ def inbox(
     # remaining count, so normalizing at each use would exhaust a one-shot
     # iterator after the first message - and a bare string would be iterated
     # character by character, producing a placeholder per letter.
-    owned = _lanes(owned)
+    owned = owned if callable(owned) else _lanes(owned)
     try:
         limit = int(limit)
     except (TypeError, ValueError):
@@ -527,6 +531,9 @@ def inbox(
         try:
             if consuming:
                 conn.execute("BEGIN IMMEDIATE")
+            elif callable(owned):
+                conn.execute("BEGIN")
+            owned = _lanes(owned(conn)) if callable(owned) else owned
             rows = conn.execute(sql, (*agents, limit)).fetchall()
             messages = [_row_to_dict(r) for r in rows]
 
@@ -635,7 +642,7 @@ def peek(message_id: int, *, db_path: Optional[Path] = None) -> Optional[dict]:
 def ack(
     message_id: int,
     *,
-    owned: LaneSpec = None,
+    owned: LaneSpec | Callable[[sqlite3.Connection], LaneSpec] = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> dict:
@@ -660,11 +667,17 @@ def ack(
     already in flight to it must stay consumable.
     """
     db_path = _resolve_db(db_path)
-    clause, lane_params = _lane_clause(_lanes(owned))
-    sql = "UPDATE messages SET acked_at = ? WHERE id = ? AND acked_at IS NULL" + clause
-    params: tuple = (_iso(now_fn()), message_id) + lane_params
     with closing(_connect(db_path)) as conn:
-        with conn:  # transaction: commit on success, rollback on error
+        with conn:
+            if callable(owned):
+                conn.execute("BEGIN IMMEDIATE")
+                owned = owned(conn)
+            clause, lane_params = _lane_clause(_lanes(owned))
+            sql = (
+                "UPDATE messages SET acked_at = ? WHERE id = ? AND acked_at IS NULL"
+                + clause
+            )
+            params = (_iso(now_fn()), message_id) + lane_params
             cur = conn.execute(sql, params)
         return {"ok": cur.rowcount > 0}
 
