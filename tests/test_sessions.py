@@ -733,7 +733,7 @@ def test_a_renamed_sessions_old_lane_still_reports_a_holder(monkeypatch, tmp_pat
     from hardline_mcp import server
 
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     monkeypatch.setenv("HARDLINE_AGENT", "codex")
 
     assert sessions.claim(agent="codex", label="first", db_path=db)["ok"] is True
@@ -970,7 +970,7 @@ async def test_a_codex_session_is_addressable_without_being_asked(
     from hardline_mcp import server
 
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
 
     assert adapters.self_agent() == "codex"
     assert adapters.lane_for("codex") == f"codex:{spawned_by_codex}"
@@ -1248,7 +1248,7 @@ def test_release_is_serialised_against_the_heartbeat(monkeypatch, tmp_path):
     """
     from hardline_mcp import server
 
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(
         adapters, "_session_anchor", [{"lane": "construction.a1", "agent": "codex"}]
     )
@@ -1331,7 +1331,7 @@ def anyio_backend():
 def codex_session(monkeypatch, tmp_path):
     """A Codex session: knows which agent it is, holds no lane of its own."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     monkeypatch.setenv("HARDLINE_AGENT", "codex")
     return db
 
@@ -1380,7 +1380,7 @@ async def test_inbox_still_collects_mail_addressed_before_a_rename(
     from hardline_mcp import server
 
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
 
     mailbox.send("codex", f"claude:{in_session}", "dispatched earlier", db_path=db)
     claimed = await server.register_session(label="construction")
@@ -1412,7 +1412,7 @@ async def test_an_async_result_dispatched_before_a_rename_still_arrives(
     from hardline_mcp import server
 
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
 
     deferred = []
 
@@ -1465,7 +1465,7 @@ async def test_an_explicitly_declared_agent_is_remembered_for_ownership(
     from hardline_mcp import server
 
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     assert adapters.self_agent() is None, "nothing in the env identifies this session"
 
     ok = await server.register_session(label="construction", agent="codex")
@@ -1494,7 +1494,7 @@ async def test_a_process_that_knows_what_it_is_cannot_redeclare_itself(
     """
     from hardline_mcp import server
 
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     assert adapters.self_agent() == "claude"
 
     result = await server.register_session(label="construction", agent="codex")
@@ -1523,7 +1523,7 @@ async def test_a_derived_lane_is_not_labelled_by_a_later_claim(
     from hardline_mcp import server
 
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
 
     assert (await server.register_session(label="construction"))["ok"] is True
 
@@ -1688,7 +1688,7 @@ async def test_list_agents_marks_every_held_lane_live(monkeypatch, tmp_path):
     from hardline_mcp import server
 
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     monkeypatch.setenv("HARDLINE_AGENT", "codex")
 
     await server.register_session(label="first")
@@ -1818,7 +1818,7 @@ async def test_a_derived_lane_cannot_be_released(monkeypatch, tmp_path, in_sessi
     """It is not a claim; it is what this process IS."""
     from hardline_mcp import server
 
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     refused = await server.release_session(label=in_session)
     assert refused["ok"] is False
     assert "derived lane" in refused["error"]
@@ -1906,7 +1906,7 @@ async def test_register_session_rejects_a_bad_label(codex_session):
 async def test_register_session_needs_an_agent_it_cannot_infer(monkeypatch, tmp_path):
     from hardline_mcp import server
 
-    monkeypatch.setattr(mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     result = await server.register_session(label="construction")
     assert result["ok"] is False
     assert "cannot tell which agent" in result["error"]

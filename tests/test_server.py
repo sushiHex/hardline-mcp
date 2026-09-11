@@ -56,7 +56,7 @@ async def test_async_result_goes_to_this_sessions_lane(
 ):
     """The defect this exists for: two sessions dispatched work, results were
     addressed to the shared "claude", and one session acked the other's."""
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     monkeypatch.setattr(
         server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
@@ -86,7 +86,7 @@ async def test_inbox_sees_own_lane_and_broadcasts_but_not_other_sessions(
     monkeypatch, tmp_path, in_session
 ):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     server.mailbox.send("codex", f"claude:{in_session}", "mine", db_path=db)
     server.mailbox.send("codex", "claude:other.9999zzzz", "not mine", db_path=db)
     server.mailbox.send("hermes", "claude", "broadcast", db_path=db)
@@ -98,7 +98,7 @@ async def test_inbox_sees_own_lane_and_broadcasts_but_not_other_sessions(
 @pytest.mark.anyio
 async def test_ack_refuses_another_sessions_message(monkeypatch, tmp_path, in_session):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     theirs = server.mailbox.send("codex", "claude:other.9999zzzz", "x", db_path=db)
     mine = server.mailbox.send("codex", f"claude:{in_session}", "y", db_path=db)
     shared = server.mailbox.send("codex", "claude", "z", db_path=db)
@@ -121,7 +121,7 @@ async def test_history_still_finds_lane_messages(monkeypatch, tmp_path, in_sessi
     lane-addressed async results the moment lanes shipped, breaking the one
     way to retrieve a result another session had already acked."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     server.mailbox.send("codex", f"claude:{in_session}", "lane result", db_path=db)
     server.mailbox.send("hermes", "claude", "broadcast", db_path=db)
 
@@ -134,7 +134,7 @@ async def test_history_survives_an_ack_by_another_session(
     monkeypatch, tmp_path, in_session
 ):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     # A message to the SHARED name, which any session may ack - this is the
     # real incident: five results were addressed to bare "claude" and another
     # session acked them before their owner read them.
@@ -154,7 +154,7 @@ async def test_explicit_lane_reads_only_that_lane(monkeypatch, tmp_path, in_sess
     """Documented as reading only that lane; it also unioned in the caller's
     OWN lane, so inbox("claude:other") leaked this session's messages."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     server.mailbox.send("codex", f"claude:{in_session}", "mine", db_path=db)
     server.mailbox.send("codex", "claude:other.9999zzzz", "theirs", db_path=db)
 
@@ -169,7 +169,7 @@ async def test_async_delivery_failure_falls_back_to_a_minimal_payload(
     """The delivery itself sat outside the exception backstop, so a failure
     there discarded an expensive completed run inside an unobserved future
     while the caller polled an inbox that would never fill."""
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     monkeypatch.setattr(
         server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
@@ -205,7 +205,7 @@ async def test_slow_dispatch_still_reports_dispatched(monkeypatch, tmp_path):
     completes instantly, so it cannot exercise this branch."""
     import time
 
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(server, "_ASYNC_EARLY_FAILURE_S", 0.2)
 
     # The worker blocks on an event the TEST releases, rather than sleeping a
@@ -285,7 +285,7 @@ async def test_deliver_to_a_lane_pushes_to_the_real_cli(monkeypatch, tmp_path):
     """send(to_agent="claude:lane", deliver=True) persisted but then failed
     delivery: the full lane name was handed to a dispatcher that matches the
     roster exactly, so the send half-succeeded."""
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     seen = {}
 
     def fake_deliver(agent, notice):
@@ -309,7 +309,7 @@ async def test_deliver_to_a_lane_pushes_to_the_real_cli(monkeypatch, tmp_path):
 async def test_send_accepts_lane_qualified_names_but_still_rejects_typos(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     ok = server._send_impl("claude", "claude:fonts.1a2b3c4d", "hi", deliver=False)
     assert ok["ok"] is True
     typo = server._send_impl("claude", "clod:fonts.1a2b3c4d", "hi", deliver=False)
@@ -787,7 +787,7 @@ async def test_async_reserve_override_reaches_final_guard_and_job_audit(
     monkeypatch, tmp_path
 ):
     calls = []
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "state.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "state.db"))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     monkeypatch.setattr(server.adapters, "_quota_router_configured", lambda: True)
 
@@ -846,7 +846,7 @@ async def test_async_reserve_override_reaches_final_guard_and_job_audit(
 
 def test_send_impl_persists_without_deliver(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     called = []
     monkeypatch.setattr(
         server.adapters, "deliver", lambda *a, **k: called.append(a) or {"ok": True}
@@ -860,7 +860,7 @@ def test_send_impl_persists_without_deliver(monkeypatch, tmp_path):
 
 def test_send_impl_invokes_deliver_when_flagged(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     captured = {}
 
     def fake_deliver(agent, notice):
@@ -883,7 +883,7 @@ def anyio_backend():
 
 def test_send_impl_rejects_unknown_agent(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     r = server._send_impl("claude", "bob", "hi", deliver=False)
     assert r["ok"] is False and "unknown" in r["error"].lower()
     assert server.mailbox.history(db_path=db) == []  # nothing persisted
@@ -891,13 +891,13 @@ def test_send_impl_rejects_unknown_agent(monkeypatch, tmp_path):
 
 def test_send_impl_success_has_ok_true(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     r = server._send_impl("claude", "hermes", "hi", deliver=False)
     assert r["ok"] is True and isinstance(r["message_id"], int)
 
 
 def test_ask_codex_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     r = server._ask_async_impl(
         "codex",
         server.adapters.ask_codex,
@@ -915,7 +915,7 @@ def test_ask_codex_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
 
 @pytest.mark.anyio
 async def test_ask_codex_async_delivers_result_via_mailbox(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
     def fake_ask_codex(
@@ -958,7 +958,7 @@ async def test_ask_codex_async_survives_adapter_exception(monkeypatch, tmp_path)
     # did, the dispatch must still notify the caller via mailbox rather than
     # dying silently on the pool thread - a caller polling inbox() would
     # otherwise wait forever with no error surfaced anywhere.
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
     def raising_ask_codex(
@@ -998,7 +998,7 @@ async def test_ask_codex_async_survives_adapter_exception(monkeypatch, tmp_path)
 
 @pytest.mark.anyio
 async def test_ask_codex_async_omits_label_when_not_supplied(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     monkeypatch.setattr(
         server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
@@ -1013,7 +1013,7 @@ async def test_ask_codex_async_omits_label_when_not_supplied(monkeypatch, tmp_pa
 
 
 def test_ask_claude_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     r = server._ask_async_impl(
         "claude",
         server.adapters.ask_claude,
@@ -1031,7 +1031,7 @@ def test_ask_claude_async_rejects_unknown_from_agent(monkeypatch, tmp_path):
 
 @pytest.mark.anyio
 async def test_ask_claude_async_delivers_result_via_mailbox(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
     def fake_ask_claude(
@@ -1069,7 +1069,7 @@ async def test_ask_claude_async_delivers_result_via_mailbox(monkeypatch, tmp_pat
 async def test_ask_claude_async_reports_chatgpt_as_sender_after_redirect(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     _enable_quota_decision(monkeypatch, "chatgpt", reason="ChatGPT has more headroom")
     codex_calls = []
@@ -1153,7 +1153,7 @@ async def test_quota_policy_block_creates_no_async_job(monkeypatch):
 
 @pytest.mark.anyio
 async def test_ask_claude_async_omits_label_when_not_supplied(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     monkeypatch.setattr(
         server.adapters, "ask_claude", lambda prompt, **k: {"ok": True, "reply": "done"}
@@ -1180,7 +1180,7 @@ async def test_auto_ack_cannot_consume_another_sessions_lane(
     and reachable through the plain default now that reads consume.
     """
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     server.mailbox.send("codex", "claude:other.9999zzzz", "theirs", db_path=db)
 
     got = await server.inbox(agent="claude:other.9999zzzz")
@@ -1202,7 +1202,7 @@ async def test_inbox_truncates_oversized_bodies_and_peek_returns_them_whole(
     in the real mailbox reached 35k characters, so a small batch of them still
     lands tens of thousands of tokens in the caller's context."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     big = "x" * (server._MAX_BODY_CHARS + 5000)
     sent = server.mailbox.send("codex", "hermes", big, db_path=db)
     server.mailbox.send("codex", "hermes", "small", db_path=db)
@@ -1226,7 +1226,7 @@ async def test_inbox_truncates_oversized_bodies_and_peek_returns_them_whole(
 
 @pytest.mark.anyio
 async def test_peek_reports_a_missing_message(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     got = await server.peek(message_id=999999)
     assert got["ok"] is False and "999999" in got["error"]
 
@@ -1237,7 +1237,7 @@ async def test_whole_inbox_response_is_bounded_not_just_each_body(monkeypatch, t
     host then truncated itself - so the response was cut anyway and the
     `truncated` flag understated it."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     for i in range(25):
         server.mailbox.send("codex", "hermes", f"{i}:" + "x" * 20_000, db_path=db)
 
@@ -1259,7 +1259,7 @@ async def test_a_maximal_batch_stays_within_the_advertised_worst_case(
     floor a maximal batch necessarily exceeds the target budget. That ceiling
     is real and advertised rather than hidden behind the target."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     for i in range(server.mailbox.MAX_INBOX_LIMIT):
         server.mailbox.send("codex", "hermes", f"{i}:" + "z" * 5_000, db_path=db)
 
@@ -1278,7 +1278,7 @@ async def test_consuming_read_returns_a_recovery_cursor(monkeypatch, tmp_path):
     """The ack commits before the response can reach the caller, so the ids
     of what was consumed are what make a lost response recoverable."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     ids = [
         server.mailbox.send("codex", "hermes", f"m{i}", db_path=db)["message_id"]
         for i in range(4)
@@ -1297,7 +1297,7 @@ async def test_consuming_read_returns_a_recovery_cursor(monkeypatch, tmp_path):
 @pytest.mark.anyio
 async def test_history_caps_the_whole_page_and_hands_back_a_cursor(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     for i in range(60):
         server.mailbox.send("codex", "hermes", f"{i}:" + "y" * 8_000, db_path=db)
 
@@ -1325,7 +1325,7 @@ async def test_history_explains_an_unknown_agent_instead_of_returning_silence(
     actually meant 'wrong name' - an agent searched its display name for a
     while before learning its mailbox identity was 'hermes'."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     server.mailbox.send("claude", "hermes", "real traffic", db_path=db)
 
     got = await server.history(agent="MrAnderson")
@@ -1343,7 +1343,7 @@ async def test_list_agents_reports_roster_observed_names_and_own_identity(
     monkeypatch, tmp_path, in_session
 ):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     server.mailbox.send("claude", "hermes", "a", db_path=db)
     server.mailbox.send("codex", f"claude:{in_session}", "b", db_path=db)
 
@@ -1358,7 +1358,7 @@ async def test_list_agents_reports_roster_observed_names_and_own_identity(
 
 @pytest.mark.anyio
 async def test_server_info_reports_version_limits_and_timeouts(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setenv("HARDLINE_QUOTA_ROUTER_COMMAND_JSON", '["quota-router"]')
     monkeypatch.setenv("HARDLINE_CLAUDE_WEEKLY_RESERVE_PERCENT", "7")
     got = await server.server_info()
@@ -1392,7 +1392,7 @@ async def test_dispatch_returns_a_durable_handle_and_records_the_job(
     monkeypatch, tmp_path
 ):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     monkeypatch.setattr(
         server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
@@ -1418,7 +1418,7 @@ async def test_job_result_survives_the_mailbox_being_consumed(monkeypatch, tmp_p
     """The durability claim: a result recorded against the job is retrievable
     even after the delivered message has been consumed by a reading session."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     monkeypatch.setattr(
         server.adapters,
@@ -1440,7 +1440,7 @@ async def test_job_result_survives_the_mailbox_being_consumed(monkeypatch, tmp_p
 @pytest.mark.anyio
 async def test_job_result_refuses_an_unfinished_job(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     job_id = server.jobs.create(
         agent="codex", requester="claude", label=None, request={}, db_path=db
     )
@@ -1453,7 +1453,7 @@ async def test_a_job_orphaned_by_a_restart_is_visible_as_lost(monkeypatch, tmp_p
     """What a restart used to do silently: the task vanished with no record.
     Now the row survives and reports why it never finished."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     job_id = server.jobs.create(
         agent="claude", requester="hermes", label="long-review", request={}, db_path=db
     )
@@ -1472,7 +1472,7 @@ async def test_a_job_orphaned_by_a_restart_is_visible_as_lost(monkeypatch, tmp_p
 
 @pytest.mark.anyio
 async def test_job_status_and_result_report_an_unknown_id(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     assert (await server.job_status(job_id="job_nope"))["ok"] is False
     assert (await server.job_result(job_id="job_nope"))["ok"] is False
 
@@ -1480,7 +1480,7 @@ async def test_job_status_and_result_report_an_unknown_id(monkeypatch, tmp_path)
 @pytest.mark.anyio
 async def test_list_jobs_summarizes_and_filters(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
     monkeypatch.setattr(
         server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "a"}
@@ -1508,7 +1508,7 @@ async def test_a_job_cancelled_before_start_never_spawns(monkeypatch, tmp_path):
     """End to end at the tool boundary: a cancel that lands before the worker
     claims the job must stop the agent from being invoked at all."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
 
     spawned = []
 
@@ -1549,7 +1549,7 @@ async def test_a_child_spawned_into_a_cancelled_job_is_killed_locally(
     on_spawn's return value has to be honoured.
     """
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
 
     killed = []
@@ -1615,7 +1615,7 @@ async def test_list_jobs_summarizes_a_huge_result_instead_of_inlining_it(
     """A listing that embedded 200 full agent replies would be the same
     context flood this package spent a release bounding everywhere else."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     job_id = server.jobs.create(
         agent="codex", requester="claude", label=None, request={}, db_path=db
     )
@@ -1636,7 +1636,7 @@ async def test_list_jobs_summarizes_a_huge_result_instead_of_inlining_it(
 @pytest.mark.anyio
 async def test_job_cancel_stops_a_running_job(monkeypatch, tmp_path):
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     job_id = server.jobs.create(
         agent="codex", requester="claude", label=None, request={}, db_path=db
     )
@@ -1660,7 +1660,7 @@ async def test_inbox_drains_a_backlog_across_polls(monkeypatch, tmp_path):
     """End-to-end at the tool boundary: the backlog that overflowed a real
     agent's context must drain in bounded batches rather than arrive at once."""
     db = tmp_path / "mb.db"
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", db)
+    monkeypatch.setenv("HARDLINE_DB", str(db))
     for i in range(30):
         server.mailbox.send("codex", "hermes", f"m{i}", db_path=db)
 
@@ -1685,7 +1685,7 @@ async def test_inbox_drains_a_backlog_across_polls(monkeypatch, tmp_path):
 async def test_async_tools_round_trip(monkeypatch, tmp_path):
     # Exercise the actual async MCP tool wrappers (through _in_thread), not just
     # the sync _send_impl: send -> inbox -> ack -> inbox -> history end to end.
-    monkeypatch.setattr(server.mailbox, "_DEFAULT_PATH", tmp_path / "mb.db")
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
 
     sent = await server.send(from_agent="claude", to_agent="hermes", message="hi there")
     assert sent["ok"] is True and isinstance(sent["message_id"], int)

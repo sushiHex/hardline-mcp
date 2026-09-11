@@ -1,0 +1,14 @@
+{
+  "test-store-isolation": {
+    "file": "tests/conftest.py",
+    "before": "os.environ[\"HARDLINE_DB\"] = str(Path(_store.name) / \"mailbox.db\")",
+    "after": "pass  # defect: inherit the operator's configured store",
+    "tests": ["tests/test_test_isolation.py::test_collection_and_late_workers_use_temporary_store"]
+  },
+  "wake-empty-rearms": {
+    "file": "hardline_mcp/wake_codex.py",
+    "before": "        if not pending:\n            self.uncertain_until = 0.0\n",
+    "after": "",
+    "tests": ["tests/test_wake_codex.py::test_empty_snapshot_rearms_after_lost_reply"]
+  }
+}
