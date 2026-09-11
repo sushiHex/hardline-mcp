@@ -452,17 +452,10 @@ def _register_session_impl(label: str, agent: str | None) -> dict:
 
 
 def _lane_advice(to_agent: str) -> str | None:
-    """Warn when a lane-qualified send has no live session to receive it.
+    """Report missing registered holders without rejecting durable mail.
 
-    A lane-qualified message is consumable ONLY by the process holding that
-    lane, so addressing one nobody holds does not mean "delivered late" - it
-    means never. That is how 51 messages accumulated across 11 dead lanes.
-
-    A warning rather than a rejection, deliberately: a Claude lane is keyed on
-    the session id and survives a ``/mcp`` reconnect, so a session that is
-    momentarily between hardline processes will legitimately come back to the
-    same lane and collect its mail. Refusing would break that. The message
-    still persists either way; the caller is simply told what it just did.
+    A returning holder or later successful claimant can consume the backlog.
+    Missing registration is not proof of death and does not grant ownership.
     """
     if ":" not in to_agent:
         return None
@@ -475,12 +468,10 @@ def _lane_advice(to_agent: str) -> str | None:
     known = ", ".join(sorted(live)) if live else "none"
     return (
         f"no REGISTERED holder was found for {to_agent!r}. That is not proof "
-        "nobody is reading it: a session running older code never registers, "
-        "one whose announcement failed is absent, and a liveness probe that "
-        "cannot answer looks the same as a process that exited. The message is "
-        "stored either way. If the lane really is gone, only that exact name "
-        "coming back can consume it (a Claude lane survives a /mcp reconnect; "
-        f"a claimed one does not outlive its process). Registered lanes for "
+        "nobody is reading it: older servers or failed registrations may be "
+        "absent. Unknown liveness is retained and blocks takeover. The message "
+        "is stored; a returning holder or successful claimant of that exact "
+        "name can consume it. Registered lanes for "
         f"{adapters.base_agent(to_agent)!r}: {known}. Call list_agents() to see "
         "every registered session."
     )
@@ -531,12 +522,13 @@ async def send(
 ) -> dict:
     """Send a message from one agent to another.
 
-    Always persists to the durable mailbox. If ``deliver`` is true, also pushes
-    a one-shot notice to the recipient via its native mechanism (hermes chat /
-    codex exec / claude -p) so it sees the message without polling.
+    Valid messages persist to the durable mailbox. ``deliver=True`` also starts
+    a separate native CLI invocation (hermes chat / codex exec / claude -p);
+    it does not wake an existing conversation. Use an inbox watcher for that.
 
-    ``from_agent``/``to_agent`` are one of: claude, hermes, codex; an unknown
-    agent is rejected. Returns ``{"ok": true, "message_id", "created_at"}``
+    Addresses use claude, hermes, or codex, optionally qualified as agent:lane.
+    Bare mail is shared; use a qualified recipient for one session. Unknown
+    base agents are rejected. Returns ``{"ok": true, "message_id", "created_at"}``
     (plus ``delivery`` when ``deliver`` set), or ``{"ok": false, "error"}``.
     """
     return await _in_thread(_send_impl, from_agent, to_agent, message, deliver)
@@ -586,11 +578,11 @@ async def inbox(
 ) -> dict:
     """Read messages addressed to ``agent``, oldest first — one bounded batch.
 
-    Reads this session's own lane AND the shared unqualified name, so
-    ``inbox(agent="claude")`` returns results dispatched by THIS session plus
-    anything broadcast to every claude — without seeing other sessions'
-    results. Nothing to opt into: the lane comes from the session that spawned
-    this server. An already lane-qualified ``agent`` reads ONLY that lane.
+    Reads this session's held lanes AND the shared unqualified name. Bare mail
+    has one consumable copy shared by all readers; use a qualified recipient
+    for a particular session. Background jobs post completion notices here;
+    retrieve their full answers with ``job_result``. An already lane-qualified
+    ``agent`` reads ONLY that lane.
 
     ``unread_only`` (default true) hides messages already ack'd.
 
@@ -676,21 +668,15 @@ async def inbox(
 async def list_agents() -> dict:
     """Who can be addressed, what names carry traffic, and who YOU are.
 
-    Agent identity was undiscoverable by inspection: ``history`` filtered by a
-    name that carries no traffic returns an empty list, which reads as "no
-    messages" rather than "wrong name" — one agent searched its own display
-    name before learning its mailbox identity was ``hermes``.
+    ``agents`` lists supported names. ``you`` describes this server's identity;
+    use its bare agent name as ``from_agent`` for background jobs.
+    ``live_sessions`` includes registered sessions not known to be dead. Check
+    each entry's ``liveness``: unknown means a probe could not verify identity
+    and blocks takeover. ``observed_recipients`` and ``observed_senders`` are
+    message history, not proof that a session is available.
 
-    ``agents`` is the dispatchable roster. ``live_sessions`` is who is actually
-    running right now and can therefore receive lane-qualified mail.
-    ``observed`` is every recipient the mailbox has ever seen, which is a
-    HISTORY and not a destination list — each lane-qualified entry is marked
-    ``live`` so the two are not confused. They were, for a long time: a dead
-    session's lane looks exactly like a live one in the mailbox, so 11 of them
-    were presented as places to send mail and 51 messages went there.
-
-    ``you`` is this process's own identity — the answer to "what do I pass as
-    from_agent", and now also "am I addressable individually".
+    Check ``registration_warning`` and ``contested_lanes`` before relying on a
+    lane. Qualified mail requires an uncontested durable grant to consume.
     """
     await _in_thread(_announce_self)
     observed = await _in_thread(mailbox.recipients)
@@ -719,10 +705,8 @@ async def list_agents() -> dict:
         if not entry["registered_holder"] and entry.get("unread"):
             unheld += 1
 
-    # Two live sessions answering to one name drain each other's mail
-    # nondeterministically. `claim` refuses to create that, but a hand-set
-    # HARDLINE_AGENT_LABEL on two sessions still can, so say so rather than
-    # collapsing them into a set and losing the count.
+    # Older revisions can leave conflicting holders. Report them explicitly;
+    # current acquisition and consumption both refuse contested grants.
     contested = sorted(lane for lane, n in live_lanes.items() if n > 1)
 
     suffix = adapters.lane_suffix()
@@ -734,8 +718,8 @@ async def list_agents() -> dict:
         "lane_for_claude": adapters.lane_for("claude"),
         "held_lanes": list(held),
         "note": (
-            "Pass a bare roster name as from_agent; results are delivered "
-            "to your lane automatically."
+            "Pass your bare agent name as from_agent for background jobs; "
+            "completion notices go to your lane. Use job_result for the answer."
         ),
     }
     if not agent:
@@ -763,28 +747,28 @@ async def list_agents() -> dict:
         "observed_recipients": observed,
         "observed_senders": seen_senders,
         "recipient_syntax": (
-            "'<agent>' addresses everyone with that name; '<agent>:<lane>' "
-            "addresses one session. inbox('<agent>') reads the bare name AND "
-            "every lane you hold. Only a lane's holder may consume a "
-            "lane-qualified message, so a lane whose holder is really gone can "
-            "be read by nobody but that same name returning. 'No registered "
-            "holder' is not proof of that: a session on older code never "
-            "registers at all."
+            "'<agent>' is a shared mailbox with one consumable copy per message; "
+            "'<agent>:<lane>' addresses a particular lane. inbox('<agent>') reads "
+            "the bare name and your held lanes. Qualified mail can be inspected "
+            "without ownership, but only an uncontested durable holder may "
+            "consume it. A later successful claimant inherits that name's backlog."
         ),
     }
     if unheld:
         result["unheld_lanes_note"] = (
-            f"{unheld} lane(s) below hold unread mail and have no REGISTERED "
-            "holder. That is not the same as nobody reading them - an older "
-            "hardline never registers, and a probe that cannot answer looks "
-            "like an exit. Only that exact name can consume them."
+            f"{unheld} lane(s) below hold unread mail and have no registered "
+            "holder. Older servers or failed registrations may be absent. "
+            "Unknown liveness is retained and blocks takeover; absence alone "
+            "does not grant ownership. Only a holder of that exact lane may "
+            "consume its mail."
         )
     if contested:
         result["contested_lanes"] = contested
         result["contested_lanes_note"] = (
-            "More than one live session is registered as holding each of these. "
-            "They will drain each other's mail nondeterministically. Usually a "
-            "hand-set HARDLINE_AGENT_LABEL shared by two sessions."
+            "Multiple potentially live holders are registered for these lanes. "
+            "Current servers refuse to consume contested mail; older revisions "
+            "may lack that guard. Resolve conflicting registrations or choose "
+            "a distinct label."
         )
     if failure := _last_registration_failure():
         result["registration_warning"] = failure
@@ -854,23 +838,17 @@ async def release_session(label: str) -> dict:
 async def register_session(label: str, agent: str | None = None) -> dict:
     """Claim ``label`` as this session's name, so mail can be aimed at it.
 
-    Answers the question a static MCP registration cannot: a Codex or Hermes
-    config supplies ONE env block to every session it launches, so
-    ``HARDLINE_AGENT_LABEL`` cannot give two of them different names, and
-    without a name every Codex session shares the unqualified identity
-    ``codex``. Claiming one at runtime is per-session by construction.
+    Check ``ok`` before using the returned lane, such as ``codex:review``.
+    ``agent`` may be omitted when inferred from a recognized Claude, Codex, or
+    Hermes host or declared through ``HARDLINE_AGENT``. Otherwise pass it.
 
-    After this, ``send(to_agent="codex:construction", ...)`` reaches THIS
-    session and only this session, and ``list_agents`` reports it as live.
+    A live or unverifiable foreign holder blocks acquisition, as does unfinished
+    work for the lane owned by a potentially live foreign process. Automatic
+    registration follows the same ownership rule.
 
-    ``agent`` may be omitted where it is inferable (a Claude Code session, or
-    ``HARDLINE_AGENT`` set in the registration); Codex and Hermes must pass it.
-
-    The previous lane is kept, not surrendered: results already dispatched
-    under it were addressed when the job started and must stay consumable.
-    Renaming therefore never strands mail. Refused if a LIVE session already
-    holds the name — a dead holder's claim is ignored, so a label does not
-    become unusable forever because the session that used it crashed.
+    Earlier lanes remain held until explicitly released, so replies addressed
+    before a rename remain reachable. Reclaim runtime names after reconnect;
+    a successful later claimant inherits the name's unread backlog.
     """
     return await _in_thread(
         _register_session_impl, label, agent, limiter=_REGISTER_LIMITER
@@ -1124,10 +1102,9 @@ async def job_status(job_id: str) -> dict:
 async def job_result(job_id: str) -> dict:
     """The terminal result of a finished job, in full and never truncated.
 
-    Survives the mailbox entirely: even if the delivered message was consumed
-    by another read, lost with an interrupted response, or never sent because
-    delivery itself failed, the result is recorded against the job before
-    delivery is attempted.
+    Completion stores the result and a small mailbox notice in one transaction.
+    Reading or acknowledging that notice does not remove the result. Lost or
+    cancelled jobs may have no result; inspect the returned state and error.
     """
     job = await _in_thread(jobs.get, job_id)
     if job is None:
@@ -1151,13 +1128,12 @@ async def job_result(job_id: str) -> dict:
 
 @mcp.tool()
 async def job_cancel(job_id: str) -> dict:
-    """Stop a running dispatch and mark it cancelled.
+    """Cancel queued or running work, including jobs owned by another server.
 
-    Works across processes: cancellation goes through the child's recorded
-    pid, not an in-process handle, so a session can stop a job another session
-    started. The whole child tree is killed — ``claude``/``codex`` are
-    launchers, so killing only the recorded pid leaves the real worker running
-    invisibly.
+    Queued cancellations release capacity in the owning process, with remote
+    requests reconciled before its next admission. Running cancellations try
+    to stop the recorded child tree. Check ``child_killed``, ``kill_error``,
+    ``identity_verified``, and any ``warning`` before assuming it stopped.
     """
 
     def cancel():
