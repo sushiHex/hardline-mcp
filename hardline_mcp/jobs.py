@@ -17,7 +17,7 @@ place rather than two.
 States
 ------
 ``queued``    accepted, not yet started
-``running``   child process spawned
+``running``   worker claimed the job (may be waiting for dispatch policy)
 ``completed`` finished; ``result`` holds the adapter's reply
 ``failed``    finished with an error (including timeouts)
 ``cancelled`` cancelled by request

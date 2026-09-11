@@ -1,5 +1,7 @@
 """Server wiring smoke tests — import, tool registration, send/deliver glue."""
 
+from concurrent.futures import Future
+
 import json
 import os
 import sys
@@ -8,16 +10,6 @@ import threading
 import pytest
 
 from hardline_mcp import server
-
-
-class _ImmediateFuture:
-    """Minimal Future stand-in: the work already ran, so result() is instant."""
-
-    def __init__(self, value):
-        self._value = value
-
-    def result(self, timeout=None):
-        return self._value
 
 
 def _immediate_submit(fn, *args, **kwargs):
@@ -29,7 +21,9 @@ def _immediate_submit(fn, *args, **kwargs):
     a bare None here meant every async test exercised a code path the real
     executor never takes.
     """
-    return _ImmediateFuture(fn(*args, **kwargs))
+    future = Future()
+    future.set_result(fn(*args, **kwargs))
+    return future
 
 
 def _enable_quota_decision(monkeypatch, selected_provider, *, reason="quota policy"):
@@ -171,7 +165,6 @@ async def test_slow_dispatch_still_reports_dispatched(monkeypatch, tmp_path):
     import time
 
     monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
-    monkeypatch.setattr(server, "_ASYNC_EARLY_FAILURE_S", 0.2)
 
     # The worker blocks on an event the TEST releases, rather than sleeping a
     # fixed duration. The old version slept 1.0s and asserted `started.is_set()`
@@ -197,7 +190,8 @@ async def test_slow_dispatch_still_reports_dispatched(monkeypatch, tmp_path):
 
     try:
         assert dispatched["ok"] is True
-        assert dispatched["dispatched"] is True
+        assert dispatched["accepted"] is True
+        assert dispatched["state"] in {"queued", "running"}
         # Wait for the worker instead of assuming it was scheduled promptly.
         assert started.wait(timeout=30), "the task never started"
         # The real property: the dispatch returned while the task was STILL

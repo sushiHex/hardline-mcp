@@ -56,11 +56,14 @@ def test_cancelled_completion_notifies_once(tmp_path):
 def test_worker_retains_dispatch_store(monkeypatch, tmp_path, cancelled):
     original, later = tmp_path / "dispatch.db", tmp_path / "later.db"
     monkeypatch.setenv("HARDLINE_DB", str(original))
-    monkeypatch.setattr(server, "_ASYNC_EARLY_FAILURE_S", 0)
     pending = []
-    monkeypatch.setattr(
-        server._async_executor, "submit", lambda fn: pending.append(fn) or Future()
-    )
+
+    def defer(fn):
+        future = Future()
+        pending.append(lambda: future.set_result(fn()))
+        return future
+
+    monkeypatch.setattr(server._async_executor, "submit", defer)
 
     def ask(prompt, **kwargs):
         assert kwargs["on_spawn"](os.getpid())

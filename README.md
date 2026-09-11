@@ -344,12 +344,18 @@ HARDLINE_CODEX_TIMEOUT_S=14400
 
 An invalid or non-positive value fails the tool call before spawning the agent.
 
-`ask_*_async` dispatch through a small fixed-size background thread pool
-(default 4 workers) rather than an unbounded thread per call, so repeated or
-concurrent dispatches queue instead of piling up unlimited agent subprocesses.
-Override the pool size with `HARDLINE_ASYNC_MAX_WORKERS` — validated the same
-way as the timeouts above, except that this one is read once at startup, so an
-invalid value fails the server at launch rather than a single tool call.
+`ask_*_async` uses a background pool with 4 workers by default. Set
+`HARDLINE_ASYNC_MAX_WORKERS` to change concurrency and `HARDLINE_ASYNC_MAX_PENDING`
+to cap all accepted work, running plus queued (default: four times the worker
+count). Both are positive integers read at startup, scoped to each MCP server.
+Invalid requests are rejected before admission. A full pool returns
+`accepted=false, retryable=true` without creating a job.
+
+Receipts return immediately with `accepted` and the durable `state` snapshot.
+`queued` means waiting for a worker; `running` means a worker claimed the job,
+including time spent awaiting dispatch policy. The compatibility `dispatched`
+field is true only for `running` or `completed`. Follow `track_with` for updates;
+acceptance alone does not promise that an agent process has started.
 
 At shutdown, dispatches still queued are dropped rather than run; one already
 in flight is awaited, since its agent subprocess can't be interrupted safely
