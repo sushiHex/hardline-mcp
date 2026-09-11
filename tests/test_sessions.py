@@ -999,13 +999,21 @@ def test_a_nested_agent_spawn_gets_no_lane(monkeypatch):
     monkeypatch.setattr(adapters, "_session_anchor", [])
     monkeypatch.setattr(procid, "identity_token", lambda pid, key: "a1b2c3d4")
     monkeypatch.setattr(
-        procid, "ancestry", lambda pid, depth=4: ["codex.exe", "hardline-mcp.exe"]
+        procid, "ancestry_snapshot", lambda pid, depth=4: [
+            procid.Ancestor(pid, "codex.exe", "host"),
+            procid.Ancestor(pid + 1, "hardline-mcp.exe", "outer"),
+        ]
     )
     assert adapters.derived_lane_suffix() == ""
 
     # The same session, launched from a shell instead, is a real one.
     monkeypatch.setattr(adapters, "_session_anchor", [])
-    monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4: ["codex.exe", "pwsh.exe"])
+    monkeypatch.setattr(
+        procid, "ancestry_snapshot", lambda pid, depth=4: [
+            procid.Ancestor(pid, "codex.exe", "host"),
+            procid.Ancestor(pid + 1, "pwsh.exe", "outer"),
+        ]
+    )
     assert adapters.derived_lane_suffix().endswith(".a1b2c3d4")
 
 
@@ -1021,8 +1029,11 @@ def test_naming_an_ancestor_stays_off_the_hot_path(monkeypatch):
     monkeypatch.setattr(procid, "identity_token", lambda pid, key: "a1b2c3d4")
     monkeypatch.setattr(
         procid,
-        "ancestry",
-        lambda pid, depth=4: (scans.append(pid), ["codex.exe", "pwsh.exe"])[1],
+        "ancestry_snapshot",
+        lambda pid, depth=4: (scans.append(pid), [
+            procid.Ancestor(pid, "codex.exe", "host"),
+            procid.Ancestor(pid + 1, "pwsh.exe", "outer"),
+        ])[1],
     )
 
     for _ in range(5):
@@ -1068,11 +1079,20 @@ def test_the_parent_names_the_agent(monkeypatch):
         ("hermes.exe", "hermes"),
     ]:
         monkeypatch.setattr(adapters, "_session_anchor", [])
-        monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4, _l=launcher: [_l])
+        monkeypatch.setattr(
+            procid, "ancestry_snapshot", lambda pid, depth=4, _l=launcher: [
+                procid.Ancestor(pid, _l, "host")
+            ]
+        )
         assert adapters.parent_agent() == expected
 
     monkeypatch.setattr(adapters, "_session_anchor", [])
-    monkeypatch.setattr(procid, "ancestry", lambda pid, depth=4: ["pwsh.exe", "explorer.exe"])
+    monkeypatch.setattr(
+        procid, "ancestry_snapshot", lambda pid, depth=4: [
+            procid.Ancestor(pid, "pwsh.exe", "host"),
+            procid.Ancestor(pid + 1, "explorer.exe", "outer"),
+        ]
+    )
     assert adapters.parent_agent() is None, "an unrecognised launcher is not a guess"
 
     # Names that only EXACT matching rejects. Substring matching accepted all
@@ -1081,7 +1101,9 @@ def test_the_parent_names_the_agent(monkeypatch):
     for impostor in ("claude-backup.exe", "notcodex.exe", "hermes-monitor.exe"):
         monkeypatch.setattr(adapters, "_session_anchor", [])
         monkeypatch.setattr(
-            procid, "ancestry", lambda pid, depth=4, _i=impostor: [_i]
+            procid, "ancestry_snapshot", lambda pid, depth=4, _i=impostor: [
+                procid.Ancestor(pid, _i, "host")
+            ]
         )
         assert adapters.parent_agent() is None, (
             f"{impostor} merely CONTAINS an agent name; it is not that agent"

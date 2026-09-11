@@ -218,8 +218,8 @@
   },
   "host-anchor-token-retention": {
     "file": "hardline_mcp/adapters.py",
-    "before": "\"host_key\": parent_key if host_pid == parent else procid.process_key(host_pid),",
-    "after": "\"host_key\": procid.process_key(host_pid),",
+    "before": "\"host_key\": host.key,",
+    "after": "\"host_key\": procid.process_key(host.pid),",
     "tests": [
       "tests/test_identity.py::test_anchor_retains_verified_host_token_after_probe_failure"
     ]
@@ -230,6 +230,22 @@
     "after": "                    owner_pid,\n                    process_key(owner_pid),\n                    RUNNING,",
     "tests": [
       "tests/test_identity.py::test_verified_owner_token_survives_later_probe_failure"
+    ]
+  },
+  "host-ancestry-snapshot": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "\"host_pid\": host.pid,",
+    "after": "\"host_pid\": (procid.parent_pid_of(parent) or parent) if host.pid != parent else parent,",
+    "tests": [
+      "tests/test_identity.py::test_host_selection_never_rewalks_wrappers"
+    ]
+  },
+  "host-ancestry-reuse": {
+    "file": "hardline_mcp/procid.py",
+    "before": "if key is not None and confirmed is not None and key != confirmed:",
+    "after": "if False:",
+    "tests": [
+      "tests/test_identity.py::test_ancestry_stops_when_a_process_changes_during_capture"
     ]
   }
 }

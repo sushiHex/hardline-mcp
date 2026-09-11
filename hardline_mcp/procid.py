@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from typing import Optional
+from typing import NamedTuple, Optional
 
 _SYNCHRONIZE = 0x00100000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -403,21 +403,42 @@ def _windows_parent(pid: int) -> Optional[int]:
         kernel32.CloseHandle(snapshot)
 
 
-def ancestry(pid: Optional[int] = None, depth: int = 4) -> list[str]:
-    """Image names walking up from ``pid``, nearest ancestor first."""
+class Ancestor(NamedTuple):
+    pid: int
+    image: str
+    key: Optional[str]
+
+
+def ancestry_snapshot(pid: Optional[int] = None, depth: int = 4) -> list[Ancestor]:
+    """Capture names and identities in one bounded parent walk.
+
+    A confirmed identity change during a read ends the walk. A failed later
+    probe cannot erase an identity already captured for the same process.
+    """
     current = os.getppid() if pid is None else pid
-    names: list[str] = []
+    ancestors: list[Ancestor] = []
     seen: set[int] = set()
     for _ in range(depth):
         if not current or current in seen:
             break
         seen.add(current)
-        name = image_name(current)
-        if not name:
+        key = process_key(current)
+        name = image_name(current) or ""
+        parent = (parent_pid_of(current) or 0) if name else 0
+        confirmed = process_key(current)
+        if key is not None and confirmed is not None and key != confirmed:
+            ancestors.append(Ancestor(current, "", key))
             break
-        names.append(name)
-        current = parent_pid_of(current) or 0
-    return names
+        ancestors.append(Ancestor(current, name, key if key is not None else confirmed))
+        current = parent
+    return ancestors
+
+
+def ancestry(pid: Optional[int] = None, depth: int = 4) -> list[str]:
+    """Image names walking up from ``pid``, nearest ancestor first."""
+    return [
+        ancestor.image for ancestor in ancestry_snapshot(pid, depth) if ancestor.image
+    ]
 
 
 def session_token(pid: int) -> Optional[str]:
