@@ -193,63 +193,59 @@ def finish(
     result: Optional[dict],
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
-) -> None:
-    """Record the terminal state, inferring it from the adapter's result.
+) -> bool:
+    """Commit a terminal result and its completion notice together, exactly once.
 
-    A cancelled job stays cancelled: the child was killed deliberately, so the
-    non-zero exit that follows is the expected consequence, not a new failure.
-
-    This is a compare-and-swap, not a blind write. ``state != CANCELLED``
-    alone was far too wide: it also permitted completed -> failed, failed ->
-    completed, and even queued -> completed by a caller that never claimed the
-    job at all. A result may only be recorded from ``running`` (the normal
-    path) or from ``lost``, and only by the process that owns the row.
-
-    ``lost`` is superseded because it is a heuristic derived from "the owner's
-    pid is not alive", and a terminal result from that same owner is direct
-    evidence it was wrong - a slow reap or a probe racing the finish should
-    not permanently discard a result that genuinely existed. Restricting it to
-    the OWNING pid is what keeps that from becoming a general resurrection:
-    a genuinely lost job's owner is dead and cannot call this.
+    Only the owning worker may finish running/lost work. Cancellation wins
+    over its result, but still records that result and notifies the requester.
+    The mailbox carries a small reference; job_result retains the full reply.
     """
-    db_path = _resolve_db(db_path)
     ok = bool(result and result.get("ok"))
-    state = COMPLETED if ok else FAILED
-    error = None if ok else (result or {}).get("error")
-    with closing(_connect(db_path)) as conn:
+    stamp = _iso(now_fn())
+    with closing(_connect(_resolve_db(db_path))) as conn:
         with conn:
-            conn.execute(
-                "UPDATE jobs SET state = ?, result = ?, error = ?, finished_at = ?,"
-                # A finished child's pid must not stay on the row: it is the
-                # stale identity a later cancel could kill something else with.
+            changed = conn.execute(
+                "UPDATE jobs SET state = CASE WHEN state = ? THEN state ELSE ? END,"
+                " result = ?, error = CASE WHEN state = ? THEN error ELSE ? END,"
+                " finished_at = CASE WHEN state = ? THEN COALESCE(finished_at, ?) ELSE ? END,"
                 " child_pid = NULL, child_key = NULL"
-                " WHERE job_id = ? AND state IN (?, ?) AND owner_pid = ?",
+                " WHERE job_id = ? AND owner_pid = ? AND"
+                " (state IN (?, ?) OR (state = ? AND result IS NULL))",
                 (
-                    state,
-                    json.dumps(result, default=str) if result is not None else None,
-                    error,
-                    _iso(now_fn()),
+                    CANCELLED,
+                    COMPLETED if ok else FAILED,
+                    json.dumps(result, default=str),
+                    CANCELLED,
+                    None if ok else (result or {}).get("error"),
+                    CANCELLED,
+                    stamp,
+                    stamp,
                     job_id,
+                    os.getpid(),
                     RUNNING,
                     LOST,
-                    os.getpid(),
-                ),
-            )
-            # A cancelled job still records what the killed run produced.
-            # Owner-scoped like the main CAS above. Without it any caller could
-            # populate the result of a cancelled job it never ran.
-            conn.execute(
-                "UPDATE jobs SET result = COALESCE(result, ?), finished_at ="
-                " COALESCE(finished_at, ?)"
-                " WHERE job_id = ? AND state = ? AND owner_pid = ?",
-                (
-                    json.dumps(result, default=str) if result is not None else None,
-                    _iso(now_fn()),
-                    job_id,
                     CANCELLED,
-                    os.getpid(),
                 ),
             )
+            if not changed.rowcount:
+                return False
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            notice = {
+                "type": "job_finished",
+                "job_id": job_id,
+                "state": row["state"],
+                "ok": row["state"] == COMPLETED,
+                "result_with": f"job_result(job_id={job_id!r})",
+            }
+            if row["label"] is not None:
+                notice["label"] = row["label"][:160]
+            conn.execute(
+                "INSERT INTO messages (sender, recipient, body, created_at) VALUES (?, ?, ?, ?)",
+                (row["agent"], row["requester"], json.dumps(notice), stamp),
+            )
+    return True
 
 
 def _resolve_lost(conn, row, now_fn: Callable[[], datetime]) -> dict:
@@ -625,7 +621,9 @@ def counts(
     db_path = _resolve_db(db_path)
     with closing(_connect(db_path)) as conn:
         _sweep_lost(conn, now_fn)
-        rows = conn.execute("SELECT state, COUNT(*) FROM jobs GROUP BY state").fetchall()
+        rows = conn.execute(
+            "SELECT state, COUNT(*) FROM jobs GROUP BY state"
+        ).fetchall()
     return {r[0]: r[1] for r in rows}
 
 

@@ -1,4 +1,22 @@
 {
+  "completion-transaction": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "            if not changed.rowcount:\n",
+    "after": "            conn.commit()  # defect: result precedes notice transaction\n            if not changed.rowcount:\n",
+    "tests": ["tests/test_completion.py::test_result_and_notice_commit_together"]
+  },
+  "completion-idempotence": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "(state = ? AND result IS NULL)",
+    "after": "(state = ?)",
+    "tests": ["tests/test_completion.py::test_cancelled_completion_notifies_once"]
+  },
+  "completion-store": {
+    "file": "hardline_mcp/server.py",
+    "before": "jobs.mark_running(job_id, db_path=db_path)",
+    "after": "jobs.mark_running(job_id)",
+    "tests": ["tests/test_completion.py::test_worker_retains_dispatch_store"]
+  },
   "lane-acquisition-lock": {
     "file": "hardline_mcp/sessions.py",
     "before": "            conn.execute(\"BEGIN IMMEDIATE\")\n",
