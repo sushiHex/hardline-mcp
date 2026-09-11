@@ -102,10 +102,18 @@
   },
   "lane-grant-work-conflict": {
     "file": "hardline_mcp/sessions.py",
-    "before": "            if _refusal(conn, lane, pid):\n                continue\n",
+    "before": "        if _refusal(conn, lane, pid):\n            continue\n",
     "after": "",
     "tests": [
       "tests/test_ownership.py::test_existing_grant_cannot_consume_after_foreign_work_appears"
+    ]
+  },
+  "lane-consumption-transaction": {
+    "file": "hardline_mcp/server.py",
+    "before": "return operation(*args, owned=verify, db_path=db_path, **kwargs)",
+    "after": "return operation(*args, owned=owned, db_path=db_path, **kwargs)",
+    "tests": [
+      "tests/test_ownership.py::test_consumption_rechecks_conflict_after_preflight"
     ]
   }
 }
