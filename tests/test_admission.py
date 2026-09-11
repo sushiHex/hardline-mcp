@@ -147,7 +147,9 @@ async def test_queued_cancellation_admits_replacement_while_worker_is_busy(
             dispatch(ask=busy)
             assert started.wait(5)
             queued = dispatch(
-                ask=lambda *args, **kwargs: executed.append(True) or {"ok": True}
+                label="cancelled review",
+                routing={"selected_provider": "chatgpt", "override_reason": "audit"},
+                ask=lambda *args, **kwargs: executed.append(True) or {"ok": True},
             )
             assert queued["state"] == jobs.QUEUED
             if remote:
@@ -160,6 +162,12 @@ async def test_queued_cancellation_admits_replacement_while_worker_is_busy(
             assert (
                 jobs.get(queued["job_id"])["result"]["cancelled_before_start"] is True
             )
+            result = jobs.get(queued["job_id"])["result"]
+            assert result.get("label") == "cancelled review"
+            assert result.get("routing") == {
+                "selected_provider": "chatgpt",
+                "override_reason": "audit",
+            }
             assert executed == []
         finally:
             release.set()

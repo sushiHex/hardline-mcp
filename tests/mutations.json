@@ -1,4 +1,10 @@
 {
+  "cancel-retains-routing": {
+    "file": "hardline_mcp/server.py",
+    "before": "                    routing=(job.get(\"request\") or {}).get(\"routing\"),",
+    "after": "                    routing=None,",
+    "tests": ["tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"]
+  },
   "admission-cancel-releases": {
     "file": "hardline_mcp/server.py",
     "before": "and future.cancel():",
