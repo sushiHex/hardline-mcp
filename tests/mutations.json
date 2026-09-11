@@ -1,4 +1,10 @@
 {
+  "lane-grant-work-conflict": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "            if _refusal(conn, lane, pid):\n                continue\n",
+    "after": "",
+    "tests": ["tests/test_ownership.py::test_existing_grant_cannot_consume_after_foreign_work_appears"]
+  },
   "lane-grant-recovery": {
     "file": "hardline_mcp/server.py",
     "before": "            if set(expected) - set(owned):",
