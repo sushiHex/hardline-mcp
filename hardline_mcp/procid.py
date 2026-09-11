@@ -434,13 +434,15 @@ def ancestry_snapshot(
 ) -> list[Ancestor]:
     """Capture names and identities in one bounded parent walk.
 
-    Each captured parent must still be linked to its verified child and cannot
-    be younger than it. A confirmed identity change ends the walk; a failed
-    later probe cannot erase identity already captured for the same process.
+    Each parent must still be linked to its child and cannot be younger than
+    a verified descendant. Pass ``child`` to validate the first edge too.
+    Confirmed identity changes end the walk; failed later probes retain
+    already captured identity.
     """
     current = os.getppid() if pid is None else pid
     ancestors: list[Ancestor] = []
     seen: set[int] = set()
+    descendant_key = child[1] if child is not None else None
     for _ in range(depth):
         if not current or current in seen:
             break
@@ -457,11 +459,14 @@ def ancestry_snapshot(
             if (
                 parent_pid_of(child_pid) != current
                 or instance_state(child_pid, child_key) == DEAD
-                or _created_after(captured.key, child_key)
+                or _created_after(captured.key, descendant_key)
             ):
                 break
         ancestors.append(captured)
         child = (captured.pid, captured.key)
+        # An unreadable wrapper must not erase the age bound learned below it.
+        if captured.key is not None:
+            descendant_key = captured.key
         current = parent
     return ancestors
 

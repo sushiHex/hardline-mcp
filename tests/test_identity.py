@@ -409,6 +409,29 @@ def test_anchor_rejects_a_reused_initial_parent_pid(monkeypatch):
     assert adapters.parent_lane_suffix() == ""
 
 
+@pytest.mark.parametrize("host_key,expected_agent", [("50", "codex"), ("200", None)])
+def test_unknown_wrapper_retains_verified_descendant_creation_bound(
+    monkeypatch, host_key, expected_agent
+):
+    child = os.getpid()
+    monkeypatch.setattr(adapters, "_session_anchor", [])
+    monkeypatch.setattr(adapters.os, "getppid", lambda: 10001)
+    monkeypatch.setattr(procid, "current_identity", lambda: (child, "100"))
+    monkeypatch.setattr(
+        procid, "parent_pid_of", lambda pid: {child: 10001, 10001: 10002}.get(pid)
+    )
+    monkeypatch.setattr(
+        procid, "image_name", lambda pid: "wrapper" if pid == 10001 else "codex.exe"
+    )
+    monkeypatch.setattr(
+        procid, "process_key", lambda pid: {child: "100", 10002: host_key}.get(pid)
+    )
+    monkeypatch.setattr(procid, "_pid_state", lambda pid: procid.ALIVE)
+    assert adapters.parent_agent() == expected_agent
+    expected_pid = 10002 if expected_agent else 10001
+    assert adapters.host_identity()["host_pid"] == expected_pid
+
+
 def test_additive_identity_migration_keeps_old_writers_compatible(tmp_path):
     db = tmp_path / "old.db"
     old_schema = mailbox._SCHEMA.replace("    owner_key    TEXT,\n", "").replace(

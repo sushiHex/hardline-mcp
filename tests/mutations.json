@@ -258,7 +258,7 @@
   },
   "host-parent-birth-order": {
     "file": "hardline_mcp/procid.py",
-    "before": "                or _created_after(captured.key, child_key)\n",
+    "before": "                or _created_after(captured.key, descendant_key)\n",
     "after": "                or False\n",
     "tests": [
       "tests/test_identity.py::test_ancestry_rejects_a_parent_born_after_its_child"
@@ -270,6 +270,14 @@
     "after": "if False:",
     "tests": [
       "tests/test_identity.py::test_ancestry_stops_when_a_process_changes_during_capture"
+    ]
+  },
+  "host-verified-descendant-bound": {
+    "file": "hardline_mcp/procid.py",
+    "before": "        if captured.key is not None:\n            descendant_key = captured.key\n",
+    "after": "        descendant_key = captured.key\n",
+    "tests": [
+      "tests/test_identity.py::test_unknown_wrapper_retains_verified_descendant_creation_bound"
     ]
   },
   "host-initial-parent-edge": {
