@@ -295,5 +295,13 @@
     "tests": [
       "tests/test_identity.py::test_anchor_rejects_a_reused_initial_parent_pid"
     ]
+  },
+  "codex-path-precedence": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        exe = shutil.which(default_exe) or _discover_codex()",
+    "after": "        exe = _discover_codex() or shutil.which(default_exe)",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_shells_codex_exec"
+    ]
   }
 }

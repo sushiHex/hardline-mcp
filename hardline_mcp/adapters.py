@@ -27,10 +27,10 @@ Executable resolution, in precedence order, per agent:
 
 1. ``HARDLINE_{HERMES,CODEX,CLAUDE}_CMD`` env var — an explicit path override,
    for a binary that isn't on PATH (e.g. ``hermes`` in its bundled venv).
-2. A per-agent discovery hook (only ``codex`` has one — its install dir is
-   hash-named and rotates on every Codex update, so a pinned path rots;
-   discovery finds the newest ``codex.exe`` so the tool self-heals).
-3. The bare command name, resolved on PATH (the normal case for ``claude``).
+2. The command resolved on ``PATH``.
+3. A per-agent discovery hook (only ``codex`` has one — its legacy install dir
+   is hash-named and rotates on every Codex update, so a pinned path rots).
+4. The bare command name when neither resolution method finds an executable.
 
 Only the executable is resolved this way; the fixed subcommand
 (``chat -Q -q`` / ``exec`` / ``-p``) is always appended.
@@ -203,12 +203,12 @@ _CLAUDE_ADVISORY_SYSTEM_PROMPT = (
 
 def _prefix_for(agent: str) -> list[str]:
     default_exe, subcmd, env_var = _DISPATCH[agent]
-    # Precedence: explicit env override > per-agent discovery > bare name (PATH).
-    # Only codex needs discovery — its install dir is hash-named and rotates on
-    # every update, so a pinned path rots.
+    # Precedence: explicit env override > resolved PATH > legacy discovery >
+    # bare name. PATH is the current Codex install channel; discovery retains
+    # compatibility with its older hash-named Windows install directories.
     exe = os.environ.get(env_var)
     if not exe and agent == "codex":
-        exe = _discover_codex()
+        exe = shutil.which(default_exe) or _discover_codex()
     return [exe or default_exe, *subcmd]
 
 

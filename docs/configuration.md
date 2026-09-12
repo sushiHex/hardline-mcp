@@ -14,7 +14,7 @@ and watcher command. Check `code_revision` when confirming an update is loaded.
 | --- | --- |
 | `HARDLINE_DB` | `~/.cache/hardline-mcp/mailbox.db`; clients must use the same file to exchange messages. |
 | `HARDLINE_CLAUDE_CMD` | Override the Claude executable path. |
-| `HARDLINE_CODEX_CMD` | Override Codex executable discovery. |
+| `HARDLINE_CODEX_CMD` | Override the Codex executable path. |
 | `HARDLINE_HERMES_CMD` | Override the Hermes executable path. |
 | `HARDLINE_AGENT` | Declare `claude`, `codex`, or `hermes` when needed. |
 | `HARDLINE_AGENT_LABEL` | Select a fixed session role; see [ownership and reconnects](messaging.md#name-a-session). |
@@ -23,9 +23,25 @@ Executable overrides are paths, without arguments: Hardline appends `-p` for
 Claude, `exec` for Codex, or `chat -Q -q` for Hermes. For example,
 `HARDLINE_HERMES_CMD=C:/Users/you/AppData/Local/hermes/hermes-agent/venv/Scripts/hermes.exe`.
 
-Resolution prefers the explicit override, then Codex auto-discovery, then the
-bare CLI command on `PATH`. Codex discovery handles changing Windows install
-directories; avoid pinning a versioned executable path unless necessary.
+Explicit overrides take precedence. Codex then uses the executable on `PATH`,
+falling back to legacy Windows install discovery only when it is absent. This
+lets the current CLI's maintained launcher take precedence over older bundled
+binaries. Claude and Hermes use their bare commands on `PATH` without discovery.
+When pinning Codex, prefer its maintained launcher over a versioned release path.
+
+### Codex compatibility errors
+
+If Codex says a model needs a newer client, check the executable selected by
+`HARDLINE_CODEX_CMD` or the MCP server's `PATH` with `--version`. Updating a
+different Codex installation will not change that selection. Reconnect the MCP
+server after a Hardline update; restart its host if it inherited an old `PATH`.
+
+Use `codex debug models` on the selected current CLI to inspect its model catalog
+without starting a task. Pass an exact supported identifier, such as
+`gpt-5.6-sol` or `gpt-5.6-terra`, rather than guessing a family name. Availability
+also depends on sign-in and rollout; see the [official model guide](https://learn.chatgpt.com/docs/models).
+Hardline preserves the requested model and reports errors without substituting
+a fallback.
 
 ## Limits
 
