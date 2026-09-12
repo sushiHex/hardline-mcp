@@ -113,16 +113,18 @@ def test_ask_hermes_shells_hermes_chat(monkeypatch):
 
 
 def test_ask_codex_shells_codex_exec(monkeypatch):
-    # isolate from this machine's real codex install: no env, no discovery,
-    # so it falls to the bare "codex" on PATH.
+    # A current PATH install must win over a stale legacy app installation.
     monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
-    monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
+    monkeypatch.setattr(adapters.shutil, "which", lambda _: "C:/path/codex.exe")
+    monkeypatch.setattr(
+        adapters, "_discover_codex", lambda: "C:/legacy/codex.exe"
+    )
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
     out = adapters.ask("codex", "summarize")
     assert out["ok"] is True
     assert out["reply"] == "codex reply"
     argv = calls[0]["cmd"]
-    assert argv[0] == "codex" and "exec" in argv
+    assert argv[0] == "C:/path/codex.exe" and "exec" in argv
     # Omitted model -> no --model flag at all; Codex's own configured default
     # applies, same posture ask_hermes already has toward Hermes's default.
     assert "--model" not in argv
@@ -132,6 +134,7 @@ def test_ask_codex_shells_codex_exec(monkeypatch):
 
 def test_deliver_to_codex_defers_to_codex_own_default(monkeypatch):
     monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
+    monkeypatch.setattr(adapters.shutil, "which", lambda _: None)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="delivered"))
 
@@ -256,6 +259,7 @@ def _codex_stream(*events):
 
 def test_ask_codex_routes_model_effort_and_reports_json_telemetry(monkeypatch):
     monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
+    monkeypatch.setattr(adapters.shutil, "which", lambda _: None)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
     stdout = _codex_stream(
         {"type": "thread.started", "thread_id": "thread-123"},
@@ -296,6 +300,7 @@ def test_ask_codex_routes_model_effort_and_reports_json_telemetry(monkeypatch):
 
 def test_ask_codex_allows_deep_multi_hour_reviews_by_default(monkeypatch):
     monkeypatch.delenv("HARDLINE_CODEX_TIMEOUT_S", raising=False)
+    monkeypatch.setattr(adapters.shutil, "which", lambda _: None)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="reply"))
 
@@ -307,6 +312,7 @@ def test_ask_codex_allows_deep_multi_hour_reviews_by_default(monkeypatch):
 
 def test_ask_codex_uses_configurable_long_timeout(monkeypatch):
     monkeypatch.setenv("HARDLINE_CODEX_TIMEOUT_S", "1200")
+    monkeypatch.setattr(adapters.shutil, "which", lambda _: None)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="reply"))
 
@@ -552,6 +558,7 @@ def test_ask_codex_default_pins_the_read_only_sandbox(monkeypatch):
     guarantee has to come from the flag we pass.
     """
     monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
+    monkeypatch.setattr(adapters.shutil, "which", lambda _: None)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
 
@@ -1702,15 +1709,21 @@ def test_codex_discovery_returns_none_when_absent(monkeypatch, tmp_path):
     assert adapters._discover_codex() is None
 
 
-def test_prefix_precedence_env_over_discovery_over_default(monkeypatch):
-    # 1. env override wins
+def test_codex_prefix_override_and_fallback_precedence(monkeypatch):
+    monkeypatch.setattr(adapters.shutil, "which", lambda _: "C:/path/codex.exe")
+    monkeypatch.setattr(adapters, "_discover_codex", lambda: "C:/legacy/codex.exe")
+
+    # The operator's explicit override remains authoritative.
     monkeypatch.setenv("HARDLINE_CODEX_CMD", "C:/pinned/codex.exe")
-    monkeypatch.setattr(adapters, "_discover_codex", lambda: "C:/found/codex.exe")
     assert adapters._prefix_for("codex")[0] == "C:/pinned/codex.exe"
-    # 2. no env -> discovery
+
+    # PATH is the preferred automatic resolution channel.
     monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
-    assert adapters._prefix_for("codex")[0] == "C:/found/codex.exe"
-    # 3. no env, discovery fails -> bare default (PATH)
+    assert adapters._prefix_for("codex")[0] == "C:/path/codex.exe"
+
+    # Legacy discovery and then the bare command remain fallbacks.
+    monkeypatch.setattr(adapters.shutil, "which", lambda _: None)
+    assert adapters._prefix_for("codex")[0] == "C:/legacy/codex.exe"
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
     assert adapters._prefix_for("codex")[0] == "codex"
 
