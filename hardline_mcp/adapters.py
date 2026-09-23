@@ -1082,6 +1082,192 @@ def validate_request(
     return error or _validate_model(name, model), resolved
 
 
+# A letters-only Codex model names a FAMILY ("astra"), never a pinned model:
+# every Codex identifier carries a generation ("gpt-6-astra", "gpt-5.6-sol").
+# Anything else is an identifier and passes through untouched, as before.
+_CODEX_FAMILY = re.compile(r"[A-Za-z]+")
+# The one shape a family resolves to: <prefix>-<generation>-<family>. Variants
+# ("gpt-7-astra-mini"), dated snapshots ("gpt-6-astra-2026-01-01") and
+# unversioned names are other models, not newer members of the family.
+_CODEX_FAMILY_SLUG = re.compile(r"([a-z]+)-(\d+(?:\.\d+)*)-([a-z]+)")
+# Codex answers from its own cache in ~0.05s, or refreshes in ~0.35s (both
+# measured); the bound is for a refresh that hangs.
+_CODEX_CATALOG_TIMEOUT_S = 60
+
+
+def _strip_codex_api_overrides(env: dict[str, str]) -> None:
+    for name in tuple(env):
+        if name in _CODEX_AUTH_OVERRIDE_ENV or name.startswith(("OPENAI_", "AZURE_OPENAI_")):
+            env.pop(name, None)
+
+
+def _prepare_codex_advisory() -> tuple[dict | None, dict | None, str | None]:
+    """An isolated advisory context: ``(error, env, neutral_root)``.
+
+    ChatGPT auth only, API-provider overrides stripped, and a temporary
+    CODEX_HOME holding nothing but ``auth.json``, beside an empty
+    ``workspace``. The caller removes ``neutral_root``.
+    """
+    env = dict(os.environ)
+    if _codex_auth_mode(env) != "chatgpt":
+        return {
+            "ok": False,
+            "error": "Codex advisory mode requires ChatGPT account authentication",
+            "subscription_configured": False,
+            "subscription_verified": None,
+        }, None, None
+    _strip_codex_api_overrides(env)
+    source_home = Path(env.get("CODEX_HOME") or (Path.home() / ".codex"))
+    neutral_root = None
+    try:
+        neutral_root = tempfile.mkdtemp(prefix="hardline-mcp-codex-")
+        isolated_home = Path(neutral_root) / "codex-home"
+        isolated_home.mkdir()
+        (Path(neutral_root) / "workspace").mkdir()
+        isolated_auth = isolated_home / "auth.json"
+        shutil.copyfile(source_home / "auth.json", isolated_auth)
+        try:
+            isolated_auth.chmod(0o600)
+        except OSError:
+            pass
+    except OSError as exc:
+        if neutral_root:
+            shutil.rmtree(neutral_root, ignore_errors=True)
+        return {
+            "ok": False,
+            "error": f"failed to prepare isolated Codex advisory home: {exc}",
+        }, None, None
+    env["CODEX_HOME"] = str(isolated_home)
+    return None, env, neutral_root
+
+
+def _codex_catalog(mode: str, workdir: str | None) -> tuple[list | None, str | None]:
+    """The model catalog of the Codex that ``ask_codex`` would launch.
+
+    Deliberately NOT ``--bundled``: the catalog shipped in the binary is stale
+    and account-blind. Measured on 0.155.1, it lacked gpt-6-sol and gpt-6-luna
+    while the refreshed one - keyed to the signed-in account - listed both.
+
+    Run the way the call will run: same executable, same environment, same
+    working directory. Advisory runs in a fresh isolated home, because user
+    configuration can supply its own catalog (``model_catalog_json``) that the
+    advisory call will not see. Measured: an auth-only home refreshes the full
+    account catalog in ~0.35s.
+    """
+    neutral_root = None
+    if mode == "advisory":
+        error, env, neutral_root = _prepare_codex_advisory()
+        if error is not None:
+            return None, error["error"]
+        cwd = str(Path(neutral_root) / "workspace")
+    else:
+        env, cwd = dict(os.environ), workdir
+    for name in _AGENT_CHILD_STRIPPED_ENV:
+        env.pop(name, None)
+    try:
+        run = _run_cmd(
+            [_prefix_for("codex")[0], "debug", "models"],
+            env=env,
+            cwd=cwd,
+            timeout_s=_CODEX_CATALOG_TIMEOUT_S,
+        )
+    finally:
+        if neutral_root:
+            shutil.rmtree(neutral_root, ignore_errors=True)
+    if not run.get("ok"):
+        return None, f"`codex debug models` failed: {run.get('error')}"
+    try:
+        models = json.loads(run.get("reply", "")).get("models")
+    except (json.JSONDecodeError, AttributeError) as exc:
+        return None, f"`codex debug models` returned an unreadable catalog: {exc}"
+    if not isinstance(models, list):
+        return None, "`codex debug models` returned a catalog with no model list"
+    return [m for m in models if isinstance(m, dict) and isinstance(m.get("slug"), str)], None
+
+
+def _family_member(model: dict) -> tuple[str, tuple[int, ...], str] | None:
+    """``(prefix, generation, family)`` of a selectable model, else None.
+
+    Selectable means listed (not hidden, and not an unknown visibility) and
+    not retiring: any ``upgrade`` at all, even an empty one, names a
+    successor. Generations compare numerically, so 5.10 outranks 5.9, and a
+    trailing ``.0`` is dropped so 6 and 6.0 tie instead of one silently
+    outranking the other.
+    """
+    match = _CODEX_FAMILY_SLUG.fullmatch(model["slug"])
+    if not match or model.get("visibility") != "list" or model.get("upgrade") is not None:
+        return None
+    parts = [int(part) for part in match.group(2).split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return match.group(1), tuple(parts), match.group(3)
+
+
+def _select_codex_family(family: str, models: list[dict]) -> tuple[str | None, str | None, list]:
+    """Newest selectable model named ``<prefix>-<generation>-<family>``.
+
+    Returns ``(slug, reason, considered)``; ``reason`` explains a None slug.
+    Generations are comparable only under one prefix, and a tie has no
+    answer: expanding a name nobody wrote is safe only when exactly one
+    model fits.
+    """
+    members = [(m, _family_member(m)) for m in models]
+    members = [(m["slug"], parsed) for m, parsed in members if parsed]
+    candidates = [(slug, parsed) for slug, parsed in members if parsed[2] == family]
+    considered = [slug for slug, _ in candidates]
+    if not candidates:
+        known = sorted({parsed[2] for _, parsed in members})
+        return None, f"no current listed Codex model is in family {family!r}; families: {known}", []
+    prefixes = sorted({parsed[0] for _, parsed in candidates})
+    if len(prefixes) > 1:
+        return None, f"Codex family {family!r} spans prefixes {prefixes}: {considered}", considered
+    top = max(parsed[1] for _, parsed in candidates)
+    newest = [slug for slug, parsed in candidates if parsed[1] == top]
+    if len(newest) > 1:
+        return None, f"Codex family {family!r} is ambiguous: {newest}", considered
+    return newest[0], None, considered
+
+
+def resolve_codex_model(
+    model: str | None, *, mode: str = "default", workdir: str | None = None
+) -> tuple[str | None, dict | None]:
+    """Expand a Codex family name to the newest model the catalog lists.
+
+    Returns ``(model, resolution)``: what to pass as ``--model``, and a record
+    of the lookup, which is None when none happened (an omitted model or a
+    full identifier) or the catalog lists the name as an identifier itself.
+
+    Never an error. A family that cannot be resolved - no catalog, no match,
+    a tie - passes through LITERALLY, exactly as before this existed, with
+    ``resolved: None`` and the reason. A letters-only name may be a model of a
+    custom provider this catalog knows nothing about, and refusing it here
+    would break a call that used to work. Codex judges the literal as it
+    always did; nothing is substituted by guesswork.
+    """
+    if model is None or not _CODEX_FAMILY.fullmatch(model):
+        return model, None
+    models, reason = _codex_catalog(mode, workdir)
+    considered = []
+    if models is not None:
+        if any(m["slug"] == model for m in models):
+            return model, None
+        slug, reason, considered = _select_codex_family(model.lower(), models)
+        if slug is not None:
+            return slug, {
+                "requested": model,
+                "resolved": slug,
+                "considered": considered,
+                "source": "codex debug models",
+            }
+    return model, {
+        "requested": model,
+        "resolved": None,
+        "reason": f"{reason}; passed to Codex unchanged",
+        "considered": considered,
+        "source": "codex debug models",
+    }
+
+
 def ask(agent: str, text: str) -> dict:
     """Run ``text`` through ``agent``'s native CLI and return its output.
 
@@ -1325,16 +1511,20 @@ def ask_codex(
     workdir: str | None = None,
     write: bool = False,
     on_spawn: "Callable[[int], None] | None" = None,
+    resolve_model: bool = True,
 ) -> dict:
     """Query Codex with explicit routing and optional structured telemetry.
 
     Omitting ``model`` passes no ``--model`` flag at all, so Codex's own
     configured default applies - the same posture ``ask_hermes`` already has
-    toward Hermes's default; hardline does not second-guess it. When given,
-    ``model`` must be Codex's full model identifier (e.g. ``"gpt-5.6-sol"``,
-    ``"gpt-5.6-terra"``), not a shorthand like ``"sol"`` - hardline does not
-    validate or expand it against any alias table (see ``_validate_model``),
-    so an unrecognized value is rejected by Codex itself at execution time.
+    toward Hermes's default; hardline does not second-guess it. A full
+    identifier (e.g. ``"gpt-5.6-sol"``) passes through unexpanded, so an
+    unrecognized one is rejected by Codex itself at execution time. A
+    letters-only family name (``"astra"``) is resolved against Codex's own
+    catalog to its newest listed model (see ``resolve_codex_model``) and the
+    result carries ``model_resolution``; an unresolvable one is passed to
+    Codex literally, as before. ``resolve_model=False`` skips the lookup for a
+    model an async admission already resolved, so the worker cannot re-decide.
 
     ``write=True`` opts into a workspace-write sandbox with approvals
     disabled (unattended - stdin is DEVNULL, so any approval prompt would
@@ -1352,6 +1542,40 @@ def ask_codex(
     )
     if error is not None:
         return error
+    resolution = None
+    if resolve_model:
+        model, resolution = resolve_codex_model(model, mode=mode, workdir=workdir)
+    result = _ask_codex_validated(
+        prompt,
+        model=model,
+        effort=effort,
+        mode=mode,
+        workdir=workdir,
+        write=write,
+        on_spawn=on_spawn,
+    )
+    if resolution is not None:
+        # On failure too: "Codex rejected gpt-6-astra" needs to say that the
+        # caller wrote "astra", or the mismatch is unexplainable.
+        result["model_resolution"] = resolution
+    return result
+
+
+def is_codex_family(model: str | None) -> bool:
+    """Whether ``resolve_codex_model`` would consult the catalog for this."""
+    return model is not None and bool(_CODEX_FAMILY.fullmatch(model))
+
+
+def _ask_codex_validated(
+    prompt: str,
+    *,
+    model: str | None,
+    effort: str,
+    mode: str,
+    workdir: str | None,
+    write: bool,
+    on_spawn: "Callable[[int], None] | None",
+) -> dict:
     argv = _prefix_for("codex") + ["--ephemeral"]
     if _is_plain_call(model, effort, mode, workdir, write):
         return _run_agent_cmd(
@@ -1384,41 +1608,11 @@ def ask_codex(
         # the flag we pass, not from the operator's config happening to agree.
         argv += _CODEX_READONLY_SANDBOX
     if mode == "advisory":
-        child_env = dict(os.environ)
-        if _codex_auth_mode(child_env) != "chatgpt":
-            return {
-                "ok": False,
-                "error": "Codex advisory mode requires ChatGPT account authentication",
-                "subscription_configured": False,
-                "subscription_verified": None,
-            }
+        error, child_env, neutral_root = _prepare_codex_advisory()
+        if error is not None:
+            return error
         subscription_configured = True
-        for name in tuple(child_env):
-            if name in _CODEX_AUTH_OVERRIDE_ENV or name.startswith(
-                ("OPENAI_", "AZURE_OPENAI_")
-            ):
-                child_env.pop(name, None)
-        source_home = Path(child_env.get("CODEX_HOME") or (Path.home() / ".codex"))
-        try:
-            neutral_root = tempfile.mkdtemp(prefix="hardline-mcp-codex-")
-            isolated_home = Path(neutral_root) / "codex-home"
-            isolated_cwd = Path(neutral_root) / "workspace"
-            isolated_home.mkdir()
-            isolated_cwd.mkdir()
-            isolated_auth = isolated_home / "auth.json"
-            shutil.copyfile(source_home / "auth.json", isolated_auth)
-            try:
-                isolated_auth.chmod(0o600)
-            except OSError:
-                pass
-        except OSError as exc:
-            if neutral_root:
-                shutil.rmtree(neutral_root, ignore_errors=True)
-            return {
-                "ok": False,
-                "error": f"failed to prepare isolated Codex advisory home: {exc}",
-            }
-        child_env["CODEX_HOME"] = str(isolated_home)
+        run_cwd = str(Path(neutral_root) / "workspace")
         argv += [
             "--ignore-user-config",
             "--ignore-rules",
@@ -1426,12 +1620,11 @@ def ask_codex(
             "--sandbox",
             "read-only",
             "-C",
-            str(isolated_cwd),
+            run_cwd,
             "-c",
             "developer_instructions="
             + json.dumps(_CODEX_ADVISORY_DEVELOPER_INSTRUCTIONS),
         ]
-        run_cwd = str(isolated_cwd)
     try:
         run = _run_agent_cmd(
             "codex",
