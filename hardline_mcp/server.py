@@ -100,7 +100,9 @@ def _track_job(db_path: Path, job_id: str, future: Future, slots) -> None:
     future.add_done_callback(finished)
 
 
-def _cancelled_result(job_id: str, *, label=None, routing=None) -> dict:
+def _cancelled_result(
+    job_id: str, *, label=None, routing=None, model_resolution=None
+) -> dict:
     """One result shape for cancellation before the adapter starts."""
     result = {
         "ok": False,
@@ -112,6 +114,8 @@ def _cancelled_result(job_id: str, *, label=None, routing=None) -> dict:
         result["label"] = label
     if routing is not None:
         result["routing"] = routing
+    if model_resolution:
+        result["model_resolution"] = model_resolution
     return result
 
 
@@ -128,13 +132,15 @@ def _retire_cancelled_jobs() -> None:
             continue
         job = jobs.get(job_id, db_path=db_path)
         if job and job["state"] == jobs.CANCELLED and future.cancel():
+            request = job.get("request") or {}
             jobs.finish(
                 job_id,
                 db_path=db_path,
                 result=_cancelled_result(
                     job_id,
                     label=job["label"],
-                    routing=(job.get("request") or {}).get("routing"),
+                    routing=request.get("routing"),
+                    model_resolution=request.get("model_resolution"),
                 ),
             )
 
@@ -1213,11 +1219,13 @@ async def ask_codex(
     """Ask Codex a question and wait for its reply.
 
     Spawns an ephemeral ``codex exec``. Omitting ``model`` passes no
-    ``--model`` flag, so Codex's own configured default applies. When set,
-    ``model`` must be Codex's full model identifier (e.g. ``gpt-5.6-sol``,
-    ``gpt-5.6-terra``) — not a shorthand like ``"sol"``. hardline does not
-    validate or expand it; an unrecognized value is rejected by Codex itself
-    with a clear error rather than silently substituted. Optional
+    ``--model`` flag, so Codex's own configured default applies. A full
+    identifier (e.g. ``gpt-5.6-sol``) is passed through unexpanded; an
+    unrecognized one is rejected by Codex itself rather than substituted. A
+    letters-only family name (``"astra"``, ``"sol"``) resolves to the newest
+    current model Codex's catalog lists as ``<prefix>-<generation>-<family>``,
+    reported under ``model_resolution``. An unknown or ambiguous family is
+    passed to Codex literally, and ``model_resolution`` says why. Optional
     model/effort selection enables JSONL usage/thread telemetry.
     Advisory mode uses ChatGPT auth preflight, a temporary auth-only CODEX_HOME,
     a neutral read-only directory, ignored user/project configuration, and
@@ -1691,7 +1699,17 @@ def _ask_async_impl(
             "retryable": True,
             "max_pending": _ASYNC_MAX_PENDING,
         }
+    resolution = None
     try:
+        if agent == "codex" and adapters.is_codex_family(model):
+            # At admission, not in the worker, so the receipt and the durable
+            # request name the model that will run; and after the slot, so a
+            # full pool spawns no lookups. The worker is told not to look
+            # again: a catalog that changed in between must not re-decide.
+            model, resolution = adapters.resolve_codex_model(
+                model, mode=mode, workdir=workdir
+            )
+            extra_ask_kwargs = {**(extra_ask_kwargs or {}), "resolve_model": False}
         job_id = jobs.create(
             agent=agent,
             db_path=db_path,
@@ -1705,6 +1723,7 @@ def _ask_async_impl(
                 "workdir": workdir,
                 "write": write,
                 **({"routing": routing} if routing is not None else {}),
+                **({"model_resolution": resolution} if resolution else {}),
             },
         )
     except BaseException:
@@ -1723,7 +1742,9 @@ def _ask_async_impl(
             # The queued -> running claim failed, which means a cancel landed
             # first. Spawning anyway would run the whole expensive call while
             # the row said cancelled - the one outcome a cancel must prevent.
-            cancelled = _cancelled_result(job_id, label=label, routing=routing)
+            cancelled = _cancelled_result(
+                job_id, label=label, routing=routing, model_resolution=resolution
+            )
             try:
                 jobs.finish(job_id, result=cancelled, db_path=db_path)
             except Exception:  # noqa: BLE001 - notification is best effort
@@ -1764,6 +1785,8 @@ def _ask_async_impl(
             }
         if routing is not None and "routing" not in result:
             result["routing"] = routing
+        if resolution and "model_resolution" not in result:
+            result["model_resolution"] = resolution
         if label is not None:
             result["label"] = label
         result["job_id"] = job_id
@@ -1778,6 +1801,8 @@ def _ask_async_impl(
     except Exception as exc:
         slots.release()
         result = {"ok": False, "error": f"could not submit async job: {exc}"}
+        if resolution:
+            result["model_resolution"] = resolution
         if jobs.mark_running(job_id, db_path=db_path):
             jobs.finish(job_id, result=result, db_path=db_path)
         return {**result, "accepted": False, "dispatched": False, "job_id": job_id}
@@ -1799,6 +1824,8 @@ def _ask_async_impl(
         receipt["error"] = job["error"]
     if routing is not None:
         receipt["routing"] = routing
+    if resolution:
+        receipt["model_resolution"] = resolution
     return receipt
 
 
@@ -1823,6 +1850,8 @@ async def ask_codex_async(
 
     ``mode`` mirrors ``ask_codex`` — background review is exactly where
     advisory isolation is wanted, and omitting it here was a parity gap.
+    A family name in ``model`` (``"astra"``) is resolved once, at admission, so
+    the receipt's ``model_resolution`` names the model that will run.
     """
     return await _in_thread(
         _ask_async_impl,
