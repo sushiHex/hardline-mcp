@@ -1,8 +1,59 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # hardline-mcp — working notes
 
 The README explains what this is. This file is for working **on** it: the
 conventions, the gotchas that cost real time, and the rules the code already
 follows so new code follows them too.
+
+## Commands
+
+```
+python -m pip install -e ".[dev,codex-watch]"   # codex-watch un-skips the Codex wake tests
+python -m pytest tests/test_sessions.py -q      # one module
+python -m pytest "tests/test_identity.py::test_verified_owner_token_survives_later_probe_failure" -q
+python -m pytest -q -rs                         # full suite, as CI runs it
+python scripts/mutate.py [case ...]             # regression mutations (tests/mutations.json)
+```
+
+No linter or formatter is configured. CI (`.github/workflows/ci.yml`) runs
+Ubuntu + Windows on Python 3.10 and 3.13, then runs the mutation catalog on
+Ubuntu/3.13 only, then imports `hardline_mcp.server` to check that the tools
+register. Don't run `hardline-mcp` by hand to test it. It is a stdio server and
+blocks waiting for input.
+
+## Module map
+
+Dependencies point one way: `procid` <- `mailbox` <- `jobs`/`sessions` <-
+`watch` <- `server`.
+
+- `cli.py` picks the subcommand (serve / `watch` / `watch-codex`) *before*
+  importing anything heavy, so the watchers never load `mcp` or `websockets`
+  unless they need them.
+- `server.py` is **the only module that imports `mcp`**. Everything else is pure
+  logic that takes an injectable `db_path`/`now_fn`, so tests can drive it
+  directly. Every tool is `async def` and runs its blocking body through
+  `_in_thread` (`anyio.to_thread`). A sync tool would block the event loop,
+  pings included. `mcp` is pinned `<2.0.0`: 2.x removed `mcp.server.fastmcp`.
+- `mailbox.py` owns the SQLite connection, WAL, the `messages` table, and
+  `SCHEMA_VERSION`. `jobs.py` (`jobs` table) and `sessions.py`
+  (`agent_sessions`) reuse its `_connect`/`_resolve_db`. All three tables are in
+  one file on purpose, so a job's result and its inbox notice can commit in one
+  transaction.
+- `procid.py` handles liveness (`ALIVE`/`DEAD`/`UNKNOWN`) and creation-time
+  process keys, Windows included.
+- `adapters.py` spawns the agent CLIs (`hermes chat`, `codex exec`,
+  `claude -p`). It resolves the executables, sets sandbox/read controls, and
+  decodes output. `dispatch.py` is the cancellable executor behind `ask_*_async`.
+- `watch.py` is a read-only, level-triggered observer of unread mail (what
+  Claude's Monitor uses). `wake_codex.py` forwards the same observations to a
+  bound Codex app-server thread.
+
+Design rationale is in `docs/architecture.md`. The tool contracts are in
+`docs/messaging.md`, env vars (`HARDLINE_*`) in `docs/configuration.md`, and
+contributor conventions (commit prefixes `feat:`/`fix:`/`docs:`) in `AGENTS.md`.
 
 ## The deployment this code actually lives in
 
@@ -94,6 +145,13 @@ Run `python scripts/mutate.py` for all committed cases, or pass case names
 from `tests/mutations.json`. Each case runs a passing baseline, applies one
 exact replacement in a temporary source copy, and requires a regression
 assertion failure. Skips, empty selections, and execution errors do not count.
+
+To register a fix, add a case to `tests/mutations.json` keyed by name:
+`{"file": ..., "before": <fixed text>, "after": <original defect>, "tests":
+[<node ids that must fail>]}`. `before` must appear exactly once in `file`,
+and a mutation only counts as caught when an assertion fails (`assert`,
+`AssertionError`, `DID NOT RAISE`). A mutation that makes the test crash, say
+with a `NameError`, is reported as not caught.
 
 ### Watch the skip count
 
