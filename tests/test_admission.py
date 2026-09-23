@@ -1,4 +1,5 @@
 from concurrent.futures import Future, ThreadPoolExecutor
+import json
 import threading
 
 import pytest
@@ -133,6 +134,12 @@ async def test_queued_cancellation_admits_replacement_while_worker_is_busy(
 
     monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     monkeypatch.setattr(server, "_async_slots", threading.BoundedSemaphore(2))
+    catalog = {"models": [{"slug": "gpt-6-sol", "visibility": "list", "upgrade": None}]}
+    monkeypatch.setattr(
+        server.adapters,
+        "_run_cmd",
+        lambda argv, **kwargs: {"ok": True, "reply": json.dumps(catalog)},
+    )
     started, release = threading.Event(), threading.Event()
     executed = []
 
@@ -148,6 +155,7 @@ async def test_queued_cancellation_admits_replacement_while_worker_is_busy(
             assert started.wait(5)
             queued = dispatch(
                 label="cancelled review",
+                model="sol",
                 routing={"selected_provider": "chatgpt", "override_reason": "audit"},
                 ask=lambda *args, **kwargs: executed.append(True) or {"ok": True},
             )
@@ -168,6 +176,8 @@ async def test_queued_cancellation_admits_replacement_while_worker_is_busy(
                 "selected_provider": "chatgpt",
                 "override_reason": "audit",
             }
+            resolution = result.get("model_resolution") or {}
+            assert resolution.get("resolved") == "gpt-6-sol"
             assert executed == []
         finally:
             release.set()

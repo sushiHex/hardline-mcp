@@ -958,6 +958,84 @@ async def test_ask_codex_async_survives_adapter_exception(monkeypatch, tmp_path)
     assert "traceback" in body
 
 
+def _fake_catalog(monkeypatch, *slugs):
+    reply = json.dumps(
+        {"models": [{"slug": s, "visibility": "list", "upgrade": None} for s in slugs]}
+    )
+    monkeypatch.setattr(
+        server.adapters, "_run_cmd", lambda argv, **k: {"ok": True, "reply": reply}
+    )
+
+
+@pytest.mark.anyio
+async def test_ask_codex_async_resolves_a_family_at_admission(monkeypatch, tmp_path):
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    _fake_catalog(monkeypatch, "gpt-5.6-sol", "gpt-6-sol")
+    ran_with = []
+
+    def fake_ask_codex(prompt, *, model=None, **kwargs):
+        ran_with.append((model, kwargs.get("resolve_model", True)))
+        return {"ok": True, "reply": "done"}
+
+    monkeypatch.setattr(server.adapters, "ask_codex", fake_ask_codex)
+
+    receipt = await server.ask_codex_async(prompt="go", from_agent="claude", model="sol")
+
+    assert receipt["accepted"] is True
+    assert receipt["model_resolution"]["resolved"] == "gpt-6-sol"
+    # The worker runs the model the receipt names, and does not look again.
+    assert ran_with == [("gpt-6-sol", False)]
+    job = server.jobs.get(receipt["job_id"])
+    assert job["request"]["model"] == "gpt-6-sol"
+    assert job["request"]["model_resolution"]["requested"] == "sol"
+    assert job["result"]["model_resolution"]["resolved"] == "gpt-6-sol"
+
+
+@pytest.mark.anyio
+async def test_ask_codex_async_worker_cannot_re_decide_the_model(monkeypatch, tmp_path):
+    # Admission sees "nova" listed as an identifier; by the time the worker
+    # runs, the catalog lists only gpt-7-nova. The job must run what it recorded.
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setenv("HARDLINE_CODEX_CMD", "codex-under-test")
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    catalogs = [["nova"], ["gpt-7-nova"]]
+    execs = []
+
+    def run(argv, **kwargs):
+        if argv[1:3] == ["debug", "models"]:
+            slugs = catalogs.pop(0) if len(catalogs) > 1 else catalogs[0]
+            models = [{"slug": s, "visibility": "list", "upgrade": None} for s in slugs]
+            return {"ok": True, "reply": json.dumps({"models": models})}
+        execs.append(argv)
+        return {"ok": False, "error": "exit 1: stop here"}
+
+    monkeypatch.setattr(server.adapters, "_run_cmd", run)
+
+    receipt = await server.ask_codex_async(prompt="go", from_agent="claude", model="nova")
+
+    assert receipt["accepted"] is True
+    (argv,) = execs
+    assert argv[argv.index("--model") + 1] == "nova"
+    assert server.jobs.get(receipt["job_id"])["request"]["model"] == "nova"
+
+
+@pytest.mark.anyio
+async def test_ask_codex_async_full_pool_spawns_no_lookup(monkeypatch, tmp_path):
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setattr(server, "_async_slots", threading.BoundedSemaphore(1))
+    assert server._async_slots.acquire(blocking=False)  # the pool is now full
+    lookups = []
+    monkeypatch.setattr(
+        server.adapters, "_run_cmd", lambda argv, **k: lookups.append(argv) or {"ok": False}
+    )
+
+    receipt = await server.ask_codex_async(prompt="go", from_agent="claude", model="astra")
+
+    assert receipt["accepted"] is False and receipt["retryable"] is True
+    assert lookups == []
+
+
 @pytest.mark.anyio
 async def test_ask_codex_async_omits_label_when_not_supplied(monkeypatch, tmp_path):
     monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))

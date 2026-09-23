@@ -210,7 +210,7 @@
   },
   "cancel-retains-routing": {
     "file": "hardline_mcp/server.py",
-    "before": "                    routing=(job.get(\"request\") or {}).get(\"routing\"),",
+    "before": "                    routing=request.get(\"routing\"),",
     "after": "                    routing=None,",
     "tests": [
       "tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"
@@ -302,6 +302,190 @@
     "after": "        exe = _discover_codex() or shutil.which(default_exe)",
     "tests": [
       "tests/test_adapters.py::test_ask_codex_shells_codex_exec"
+    ]
+  },
+  "codex-family-trigger": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "_CODEX_FAMILY = re.compile(r\"[A-Za-z]+\")",
+    "after": "_CODEX_FAMILY = re.compile(r\"[A-Za-z0-9]+\")",
+    "tests": [
+      "tests/test_model_resolution.py::test_identifiers_pass_through_without_a_lookup"
+    ]
+  },
+  "codex-family-slug-shape": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "_CODEX_FAMILY_SLUG = re.compile(r\"([a-z]+)-(\\d+(?:\\.\\d+)*)-([a-z]+)\")",
+    "after": "_CODEX_FAMILY_SLUG = re.compile(r\"([a-z]+)-(\\d+(?:\\.\\d+)*)-([a-z]+)(?:-.*)?\")",
+    "tests": [
+      "tests/test_model_resolution.py::test_only_prefix_generation_family_slugs_qualify"
+    ]
+  },
+  "codex-family-substring": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "if parsed[2] == family]",
+    "after": "if family in parsed[2]]",
+    "tests": [
+      "tests/test_model_resolution.py::test_family_is_the_final_segment_not_a_substring"
+    ]
+  },
+  "codex-family-numeric-generation": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "parts = [int(part) for part in match.group(2).split(\".\")]",
+    "after": "parts = match.group(2).split(\".\")",
+    "tests": [
+      "tests/test_model_resolution.py::test_generations_compare_numerically"
+    ]
+  },
+  "codex-family-trailing-zero": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    while len(parts) > 1 and parts[-1] == 0:\n        parts.pop()\n",
+    "after": "",
+    "tests": [
+      "tests/test_model_resolution.py::test_an_unresolvable_family_passes_through_literally"
+    ]
+  },
+  "codex-family-visibility": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "model.get(\"visibility\") != \"list\"",
+    "after": "model.get(\"visibility\") == \"hide\"",
+    "tests": [
+      "tests/test_model_resolution.py::test_only_listed_models_are_offered"
+    ]
+  },
+  "codex-family-retiring": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "model.get(\"upgrade\") is not None",
+    "after": "model.get(\"upgrade\")",
+    "tests": [
+      "tests/test_model_resolution.py::test_any_upgrade_marks_a_model_retiring"
+    ]
+  },
+  "codex-family-prefix": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if len(prefixes) > 1:",
+    "after": "    if False:",
+    "tests": [
+      "tests/test_model_resolution.py::test_an_unresolvable_family_passes_through_literally"
+    ]
+  },
+  "codex-family-tie": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if len(newest) > 1:",
+    "after": "    if False:",
+    "tests": [
+      "tests/test_model_resolution.py::test_an_unresolvable_family_passes_through_literally"
+    ]
+  },
+  "codex-family-exact-identifier": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if any(m[\"slug\"] == model for m in models):\n            return model, None",
+    "after": "        if False:\n            return model, None",
+    "tests": [
+      "tests/test_model_resolution.py::test_a_letters_only_identifier_the_catalog_lists_is_kept"
+    ]
+  },
+  "codex-family-case": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "_select_codex_family(model.lower(), models)",
+    "after": "_select_codex_family(model, models)",
+    "tests": [
+      "tests/test_model_resolution.py::test_family_names_are_case_insensitive"
+    ]
+  },
+  "codex-family-literal-fallback": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    return model, {\n        \"requested\": model,\n        \"resolved\": None,",
+    "after": "    return None, {\n        \"requested\": model,\n        \"resolved\": None,",
+    "tests": [
+      "tests/test_model_resolution.py::test_unavailable_catalog_passes_through_literally"
+    ]
+  },
+  "codex-catalog-refreshed": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "[_prefix_for(\"codex\")[0], \"debug\", \"models\"],",
+    "after": "[_prefix_for(\"codex\")[0], \"debug\", \"models\", \"--bundled\"],",
+    "tests": [
+      "tests/test_model_resolution.py::test_catalog_is_the_refreshed_one_from_the_launched_codex"
+    ]
+  },
+  "codex-catalog-workdir": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        env, cwd = dict(os.environ), workdir",
+    "after": "        env, cwd = dict(os.environ), None",
+    "tests": [
+      "tests/test_model_resolution.py::test_catalog_is_the_refreshed_one_from_the_launched_codex"
+    ]
+  },
+  "codex-catalog-stripped-env": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    for name in _AGENT_CHILD_STRIPPED_ENV:\n        env.pop(name, None)\n    try:\n        run = _run_cmd(",
+    "after": "    try:\n        run = _run_cmd(",
+    "tests": [
+      "tests/test_model_resolution.py::test_lookup_strips_what_every_spawned_codex_loses"
+    ]
+  },
+  "codex-catalog-advisory-home": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        error, env, neutral_root = _prepare_codex_advisory()\n        if error is not None:\n            return None, error[\"error\"]\n        cwd = str(Path(neutral_root) / \"workspace\")",
+    "after": "        env, cwd = dict(os.environ), None\n        _strip_codex_api_overrides(env)",
+    "tests": [
+      "tests/test_model_resolution.py::test_advisory_lookup_runs_in_an_isolated_home"
+    ]
+  },
+  "codex-catalog-advisory-cleanup": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    finally:\n        if neutral_root:\n            shutil.rmtree(neutral_root, ignore_errors=True)\n    if not run.get(\"ok\"):",
+    "after": "    finally:\n        pass\n    if not run.get(\"ok\"):",
+    "tests": [
+      "tests/test_model_resolution.py::test_advisory_lookup_runs_in_an_isolated_home"
+    ]
+  },
+  "codex-resolve-model-flag": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if resolve_model:\n        model, resolution",
+    "after": "    if True:\n        model, resolution",
+    "tests": [
+      "tests/test_model_resolution.py::test_resolve_model_false_skips_the_lookup"
+    ]
+  },
+  "codex-resolution-on-failure": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if resolution is not None:\n        # On failure too",
+    "after": "    if resolution is not None and result.get(\"ok\"):\n        # On failure too",
+    "tests": [
+      "tests/test_model_resolution.py::test_resolution_is_reported_when_codex_rejects_the_model"
+    ]
+  },
+  "codex-async-runs-resolved-model": {
+    "file": "hardline_mcp/server.py",
+    "before": "            model, resolution = adapters.resolve_codex_model(",
+    "after": "            _resolved, resolution = adapters.resolve_codex_model(",
+    "tests": [
+      "tests/test_server.py::test_ask_codex_async_resolves_a_family_at_admission"
+    ]
+  },
+  "codex-async-frozen-model": {
+    "file": "hardline_mcp/server.py",
+    "before": "            extra_ask_kwargs = {**(extra_ask_kwargs or {}), \"resolve_model\": False}",
+    "after": "            pass",
+    "tests": [
+      "tests/test_server.py::test_ask_codex_async_worker_cannot_re_decide_the_model"
+    ]
+  },
+  "codex-async-lookup-after-slot": {
+    "file": "hardline_mcp/server.py",
+    "before": "    slots = _async_slots\n",
+    "after": "    adapters.resolve_codex_model(model, mode=mode, workdir=workdir)\n    slots = _async_slots\n",
+    "tests": [
+      "tests/test_server.py::test_ask_codex_async_full_pool_spawns_no_lookup"
+    ]
+  },
+  "codex-async-cancel-keeps-resolution": {
+    "file": "hardline_mcp/server.py",
+    "before": "                    model_resolution=request.get(\"model_resolution\"),\n",
+    "after": "",
+    "tests": [
+      "tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"
     ]
   }
 }

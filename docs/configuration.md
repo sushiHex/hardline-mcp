@@ -38,7 +38,8 @@ server after a Hardline update; restart its host if it inherited an old `PATH`.
 
 Use `codex debug models` on the selected current CLI to inspect its model catalog
 without starting a task. Pass an exact supported identifier, such as
-`gpt-5.6-sol` or `gpt-5.6-terra`, rather than guessing a family name. Availability
+`gpt-5.6-sol` or `gpt-5.6-terra`, or a family name that Hardline resolves from
+that catalog (see [models](#models-effort-and-results)). Availability
 also depends on sign-in and rollout; see the [official model guide](https://learn.chatgpt.com/docs/models).
 Hardline preserves the requested model and reports errors without substituting
 a fallback.
@@ -67,7 +68,24 @@ execution and telemetry. `ask_hermes` accepts only `prompt` and uses Hermes's
 own defaults.
 
 Omitting `model` passes no model flag. Hardline passes identifiers through
-without expanding aliases; use an identifier supported by the selected CLI.
+unchanged; use an identifier supported by the selected CLI. Claude Code accepts
+its own aliases, such as `opus`.
+
+For Codex, a letters-only family name such as `astra` or `sol` resolves to the
+newest current model in that family, read from `codex debug models` on the
+selected executable: `astra` becomes `gpt-6-astra`, and `sol` becomes
+`gpt-6-sol` rather than `gpt-5.6-sol`. Only identifiers shaped
+`<prefix>-<generation>-<family>` qualify, so variants such as `-mini` and dated
+snapshots never stand in for the family. Hidden and retiring models (any
+`upgrade`) are skipped, and generations compare numerically. Advisory calls read
+the catalog from the same isolated home they run in.
+
+A name the catalog lists as an identifier is used as is. A family that cannot
+be resolved (an unavailable catalog, no match, or a tie) is passed to Codex
+unchanged, as before, so custom-provider model names keep working. Results,
+async receipts, and job requests report the lookup under `model_resolution`,
+with `resolved: null` and a `reason` when nothing was substituted. Async jobs
+resolve once at admission; the worker runs exactly the recorded model.
 Claude read calls discard user settings, so their omitted model and effort use
 the CLI's built-in defaults. Pass them explicitly when that distinction matters.
 
