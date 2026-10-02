@@ -506,8 +506,8 @@
   },
   "pending-claim-release-cancels": {
     "file": "hardline_mcp/server.py",
-    "before": "        if agent is not None:\n            adapters.cancel_pending(label)\n",
-    "after": "        if agent is not None:\n            pass\n",
+    "before": "    if waited_as is not None:\n        adapters.cancel_pending(label)\n",
+    "after": "    if waited_as is not None:\n        pass\n",
     "tests": [
       "tests/test_continuity.py::test_release_cancels_a_waiting_claim"
     ]
@@ -534,6 +534,70 @@
     "after": "            due = due[:BATCH]\n",
     "tests": [
       "tests/test_channel.py::test_a_lane_this_process_lists_but_does_not_hold_is_not_pushed"
+    ]
+  },
+  "push-startup-isolated": {
+    "file": "hardline_mcp/channel.py",
+    "before": "            declared = False\n",
+    "after": "            await anyio.to_thread.run_sync(self.declare)\n            declared = True\n",
+    "tests": [
+      "tests/test_channel.py::test_a_startup_fault_never_stops_the_tools"
+    ]
+  },
+  "push-tap-tolerates-malformed": {
+    "file": "hardline_mcp/channel.py",
+    "before": "                info = params.get(\"clientInfo\") if isinstance(params, dict) else None\n                name = info.get(\"name\") if isinstance(info, dict) else None\n",
+    "after": "                info = (params or {}).get(\"clientInfo\") or {}\n                name = info.get(\"name\")\n",
+    "tests": [
+      "tests/test_channel.py::test_a_malformed_initialize_is_answered_not_fatal"
+    ]
+  },
+  "push-failed-write-taken-back": {
+    "file": "hardline_mcp/channel.py",
+    "before": "                            await anyio.to_thread.run_sync(self.unsent, ids, nonce, built)\n",
+    "after": "",
+    "tests": [
+      "tests/test_channel.py::test_a_failed_write_is_taken_back_and_retried"
+    ]
+  },
+  "push-send-bounded": {
+    "file": "hardline_mcp/channel.py",
+    "before": "                            with anyio.fail_after(SEND_TIMEOUT_S):\n",
+    "after": "                            with contextlib.nullcontext():\n",
+    "tests": [
+      "tests/test_channel.py::test_a_failed_write_is_taken_back_and_retried"
+    ]
+  },
+  "push-unsent-restores-last-push": {
+    "file": "hardline_mcp/channel.py",
+    "before": "            self.facts[\"last_push_at\"] = max(filter(None, written), default=None)\n",
+    "after": "",
+    "tests": [
+      "tests/test_channel.py::test_a_failed_write_is_taken_back_and_retried"
+    ]
+  },
+  "push-scan-pages": {
+    "file": "hardline_mcp/channel.py",
+    "before": "    for _ in range(_PAGES):\n",
+    "after": "    for _ in range(1):\n",
+    "tests": [
+      "tests/test_channel.py::test_mail_left_unread_at_the_front_never_starves_later_mail"
+    ]
+  },
+  "push-state-never-waits-on-io": {
+    "file": "hardline_mcp/channel.py",
+    "before": "            if not self.facts.get(\"oldest_unreceipted_at\"):\n                self.facts[\"oldest_unreceipted_at\"] = now\n            snapshot = self._snapshot()\n        self._write(snapshot)\n",
+    "after": "            if not self.facts.get(\"oldest_unreceipted_at\"):\n                self.facts[\"oldest_unreceipted_at\"] = now\n            snapshot = self._snapshot()\n            self._write(snapshot)\n",
+    "tests": [
+      "tests/test_channel.py::test_reading_delivery_state_never_waits_on_a_fact_write"
+    ]
+  },
+  "release-serialized-against-fulfilment": {
+    "file": "hardline_mcp/server.py",
+    "before": "    with _claim_mutex:\n        return _release_or_cancel(label)\n",
+    "after": "    return _release_or_cancel(label)\n",
+    "tests": [
+      "tests/test_continuity.py::test_release_is_serialized_against_fulfilment"
     ]
   },
   "push-drives-pending-claims": {

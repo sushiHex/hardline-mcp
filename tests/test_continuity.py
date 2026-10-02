@@ -132,6 +132,27 @@ async def test_release_cancels_a_waiting_claim(codex_session, holder):
     assert "construction" not in adapters.held_lanes()
 
 
+def test_release_is_serialized_against_fulfilment(codex_session):
+    """A fulfilment re-claims every held lane together with the awaited one.
+
+    A release landing between its snapshot and its write would see the
+    released lane written back - held durably, unread, and unclaimable.
+    """
+    import threading
+
+    from hardline_mcp import server
+
+    done = threading.Event()
+    with server._claim_mutex:  # a fulfilment in progress
+        t = threading.Thread(
+            target=lambda: (server._release_session_impl("anything"), done.set())
+        )
+        t.start()
+        assert not done.wait(0.3), "release ran while a fulfilment held the mutex"
+    t.join(5)
+    assert done.is_set()
+
+
 @pytest.mark.anyio
 async def test_the_heartbeat_fulfils_a_waiting_claim(codex_session, holder):
     """Fulfilment has to happen without anyone asking again.

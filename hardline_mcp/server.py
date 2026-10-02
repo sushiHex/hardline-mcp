@@ -918,18 +918,6 @@ def _release_locked(label: str, lane: str | None) -> None:
             sessions.drop_lane(lane)
 
 
-def _cancel_pending_locked(label: str) -> str | None:
-    """Stop waiting for ``label``; return the agent it was awaited as, or None.
-
-    Under ``_claim_mutex``, so it cannot interleave with a fulfilment that is
-    granting the same name: either the wait is cancelled first, or the name is
-    already held by the time this looks and is released as a held name.
-    """
-    with _claim_mutex:
-        agent = adapters.pending_claims().get(label)
-        if agent is not None:
-            adapters.cancel_pending(label)
-        return agent
 
 
 @mcp.tool()
@@ -949,9 +937,24 @@ async def release_session(label: str) -> dict:
     it is what this process IS. A pending claim (``register_session(wait=True)``)
     is cancelled instead.
     """
-    label = (label or "").strip()
-    waited_as = await _in_thread(_cancel_pending_locked, label)
-    if waited_as:
+    return await _in_thread(_release_session_impl, (label or "").strip())
+
+
+def _release_session_impl(label: str) -> dict:
+    """Release or cancel, as one step against fulfilment.
+
+    Whole, under ``_claim_mutex``: a fulfilment snapshots every held lane and
+    re-claims them together with the awaited one, so a release landing between
+    that snapshot and its write would see the released lane written back.
+    """
+    with _claim_mutex:
+        return _release_or_cancel(label)
+
+
+def _release_or_cancel(label: str) -> dict:
+    waited_as = adapters.pending_claims().get(label)
+    if waited_as is not None:
+        adapters.cancel_pending(label)
         return {
             "ok": True,
             "cancelled": f"{waited_as}:{label}",
@@ -975,7 +978,7 @@ async def release_session(label: str) -> dict:
             ),
         }
     lane = f"{agent}:{label}" if agent else None
-    await _in_thread(_release_locked, label, lane)
+    _release_locked(label, lane)
     return {
         "ok": True,
         "released": lane or label,

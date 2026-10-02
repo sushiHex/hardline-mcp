@@ -29,7 +29,8 @@ Declaring and pushing is harmless where unused: the host drops pushes for sessio
 
 - **Scope.** Unread mail for lanes this process holds. Bare mail is excluded twice: `owned_recipients()` holds qualified lanes only, and the per-batch check filters anything ungranted. Grants are revalidated for every non-empty batch, as consumption revalidates them, so a lane lost to a contest is not advertised.
 - **Schedule.** Per message, in memory. A new id is pushed in the next batch. Unread pushed mail is re-announced 5 m, 15 m, then every 60 m after its own last push, so new arrivals never postpone an old reminder. Mail read by anyone (including `inbox(auto_ack=true)` or a later holder) leaves the schedule.
-- **Payload.** Ids, senders, 200-character previews; `meta` carries `message_ids`, `count`, `lanes`, `receipt`. Pushing never acks. A batch is stamped and recorded when it is built, before the write. That way a receipt can never arrive for an unknown nonce, and a write that fails leaves an unreceipted push behind, which is the truth about a push the host never read.
+- **Payload.** Ids, senders, 200-character previews; `meta` carries `message_ids`, `count`, `lanes`, `receipt`. Pushing never acks. A batch is stamped and recorded when it is built, before the write, so a receipt can never arrive for an unknown nonce. A write that fails or times out (5 s) is taken back: its nonce is dropped and its messages are due again. Otherwise a later push's receipt would cover mail the model never saw.
+- **Scan.** Unread ids are paged (500 per page, at most 20 pages), so mail left unread at the front never starves later mail. Bodies are fetched only for the batch being pushed.
 - **Pending claims.** The pusher also drives pending claims ([session continuity](session-continuity.md)) every 15 s. A granted name is announced in the next push, followed by its backlog.
 
 ## Delivery state: receipts, not inference
@@ -53,6 +54,18 @@ A receipt echoed by a subagent proves the nonce was seen inside the conversation
 - **Detecting tables instead of trusting `meta.schema_version`.**
 - **`ack` keeps `message_id` and adds `message_ids`.**
 - **No "confirmed if recent" grace clause.** Pushes every nine minutes would have kept a dead channel "confirmed" forever.
+
+**Implementation review (round 3), each with a test and a mutation case:**
+- **A startup fault escaped isolation.** `declare()` ran outside the guarded loop.
+- **The event loop could block on SQLite.** `state()` shared a lock that was held across fact writes. The lock now guards memory only, and writes are ordered by a version.
+- **A malformed `clientInfo` crashed the tap** before the SDK could reject it.
+- **A release could be resurrected by a concurrent fulfilment.** The whole release is now serialized under `_claim_mutex`.
+- **A later receipt certified an earlier push whose write had failed.** A failed write is now taken back, and its messages are due again.
+- **Mail left unread at the front starved everything after the first 500.** The scan is now paged by id.
+
+**Accepted as known limits:**
+- **Shutdown can wait on the SDK's own stdout writer and on an in-flight SQLite call**, up to the 10 s busy timeout. That's the same as FastMCP.
+- **Revalidation is not atomic with the send.** A notification in flight may describe a lane that was lost a moment earlier; consumption still enforces ownership.
 
 **Found by mutation testing:**
 - **The grant revalidation had no test of its own.** Bare-mail exclusion masked it.

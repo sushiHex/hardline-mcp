@@ -97,11 +97,11 @@ def is_push(msg):
     return msg.get("method") == channel.METHOD
 
 
-async def serving(tg, pusher):
+async def serving(tg, pusher, buffer=32):
     from hardline_mcp import server
 
     c2s_send, c2s_recv = anyio.create_memory_object_stream(32)
-    s2c_send, s2c_recv = anyio.create_memory_object_stream(32)
+    s2c_send, s2c_recv = anyio.create_memory_object_stream(buffer)
     tg.start_soon(lambda: channel.run(server.mcp, c2s_recv, s2c_send, pusher=pusher))
     return Wire(c2s_send, s2c_recv)
 
@@ -368,6 +368,118 @@ async def test_a_sender_sees_whether_the_recipient_is_receiving_pushes(store):
         result = await server.send(from_agent="codex", to_agent=LANE, message="second")
         assert result["recipient_delivery"] == "awaiting_receipt"
         tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_a_startup_fault_never_stops_the_tools(store, monkeypatch):
+    real = channel.Pusher.declare
+    calls = {"n": 0}
+
+    def flaky(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("store locked at startup")
+        return real(self)
+
+    monkeypatch.setattr(channel.Pusher, "declare", flaky)
+    try:
+        async with anyio.create_task_group() as tg:
+            wire = await serving(tg, channel.Pusher(poll_s=0.02))
+            await wire.handshake()
+            mailbox.send("codex", LANE, "after a bad start", db_path=store)
+            await wire.next(is_push)
+            assert calls["n"] == 2
+            tg.cancel_scope.cancel()
+    except Exception as exc:
+        raise AssertionError(f"a startup fault escaped into the server: {exc!r}") from exc
+
+
+@pytest.mark.anyio
+async def test_a_malformed_initialize_is_answered_not_fatal(store):
+    """The tap only observes. The SDK must still be the one to reject bad input."""
+    try:
+        async with anyio.create_task_group() as tg:
+            wire = await serving(tg, channel.Pusher(poll_s=0.02))
+            await wire.send({
+                "jsonrpc": "2.0", "id": 0, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                           "clientInfo": "oops"},
+            })
+            reply = await wire.next(lambda m: m.get("id") == 0)
+            assert "error" in reply
+            result = await wire.handshake()
+            assert result["capabilities"]["experimental"] == {channel.CAPABILITY: {}}
+            tg.cancel_scope.cancel()
+    except Exception as exc:
+        raise AssertionError(f"a malformed message stopped serving: {exc!r}") from exc
+
+
+@pytest.mark.anyio
+async def test_a_failed_write_is_taken_back_and_retried(store, monkeypatch):
+    """A push the host never read must not be covered by a later receipt."""
+    monkeypatch.setattr(channel, "SEND_TIMEOUT_S", 0.1)
+    failures = []
+    monkeypatch.setattr(channel, "_log", failures.append)
+    pusher = channel.Pusher(poll_s=0.02)
+    async with anyio.create_task_group() as tg:
+        wire = await serving(tg, pusher, buffer=0)
+        await wire.handshake()
+        sent = mailbox.send("codex", LANE, "while nobody reads", db_path=store)
+        # Nobody reads the server's output, so every attempt times out. Between
+        # attempts, nothing of the unwritten push may remain on the books.
+        settled = False
+        with anyio.move_on_after(3):
+            while not settled:
+                await anyio.sleep(0.005)
+                settled = (
+                    any("TimeoutError" in f for f in failures)
+                    and pusher.receipts == {}
+                    and pusher.state() == "declared"
+                )
+        assert settled, f"unwritten push left on the books: {pusher.receipts}, {pusher.state()}"
+        push = await wire.next(is_push)  # reading again: it goes out now
+        assert push["params"]["meta"]["message_ids"] == str(sent["message_id"])
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_mail_left_unread_at_the_front_never_starves_later_mail(store, monkeypatch):
+    monkeypatch.setattr(channel, "_SCAN", 2)
+    async with anyio.create_task_group() as tg:
+        wire = await serving(tg, channel.Pusher(poll_s=0.02))
+        await wire.handshake()
+        mailbox.send("codex", LANE, "one", db_path=store)
+        mailbox.send("codex", LANE, "two", db_path=store)
+        await wire.next(is_push)
+        third = mailbox.send("codex", LANE, "three", db_path=store)
+        push = await wire.next(is_push)
+        assert push["params"]["meta"]["message_ids"] == str(third["message_id"])
+        tg.cancel_scope.cancel()
+
+
+def test_reading_delivery_state_never_waits_on_a_fact_write(store, monkeypatch):
+    """``state()`` runs on the event loop (list_agents); a slow write must not
+    freeze protocol handling, pings included."""
+    import threading
+    import time as _time
+
+    release = threading.Event()
+    monkeypatch.setattr(channel.delivery, "record", lambda *a, **k: release.wait(5))
+    pusher = channel.Pusher()
+    pusher.active = True
+    pusher.facts = {"declared_at": datetime.now(timezone.utc)}
+    writer = threading.Thread(
+        target=pusher.sent, args=([1], "n", datetime.now(timezone.utc))
+    )
+    writer.start()
+    try:
+        _time.sleep(0.1)  # the write is now blocked inside delivery.record
+        started = _time.monotonic()
+        assert pusher.state() == "awaiting_receipt"
+        assert _time.monotonic() - started < 0.5, "state() waited on the write"
+    finally:
+        release.set()
+        writer.join(5)
 
 
 @pytest.mark.anyio

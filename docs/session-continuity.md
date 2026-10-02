@@ -30,7 +30,7 @@ A moved conversation therefore gets its old address back, with nothing lost and 
 - **The secret was rejected as evidence.** A first draft proved continuity with a secret shown to the conversation. The review showed it proves possession, not identity: `/fork` copies, subagents and pasted output all pass, and spent secrets can be re-armed by ordinary reacquisition.
 - **Durable intents were cut.** Keyed by host and session, they would have caused surprise renames, durable capacity accounting, cancellation across code revisions, and a waiting loser inheriting a role long after its task ended. Waiting is opt-in and process-local instead.
 - **Pending stays `ok: false`.** `_register_session_impl` adopts the name locally whenever `ok` is true, and the tool contract says to check `ok`.
-- **Fulfilment is serialized.** `_claim_mutex` serializes it against explicit claims and against cancellation, so a release cannot interleave with a grant.
+- **Fulfilment is serialized.** `_claim_mutex` serializes it against explicit claims and against the **whole** of `release_session`, not only pending-claim cancellation. Round 3 reproduced the gap: a fulfilment snapshots every held lane and re-claims them together with the awaited one, so a release landing between the snapshot and the write saw its lane written back.
 
 **Deferred:**
 - **Automatic restoration of runtime names after a same-host reconnect**, keyed by verified host plus session id. It's valid evidence, but a separate change; the docs still say to re-claim after a reconnect.

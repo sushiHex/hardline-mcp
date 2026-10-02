@@ -50,9 +50,11 @@ SEND_TIMEOUT_S = 5.0
 # Between reminders for a pushed message that is still unread, per message, so
 # a new arrival never postpones an old reminder. The last step repeats.
 REMINDERS = (timedelta(minutes=5), timedelta(minutes=15), timedelta(minutes=60))
-# Bounds the unread snapshot. When it is full, a scheduled message missing
-# from it may simply not fit, so nothing is dropped from the schedule.
+# Unread mail is scanned in pages of _SCAN ids, at most _PAGES of them. Past
+# that the scan is incomplete, and a scheduled message missing from it may
+# simply not have been reached, so nothing is dropped from the schedule.
 _SCAN = 500
+_PAGES = 20
 
 
 def _now() -> datetime:
@@ -60,36 +62,64 @@ def _now() -> datetime:
 
 
 def _log(message: str) -> None:
-    print("hardline channel: " + message.encode("ascii", "replace").decode(), file=sys.stderr, flush=True)
+    try:
+        print(
+            "hardline channel: " + message.encode("ascii", "replace").decode(),
+            file=sys.stderr,
+            flush=True,
+        )
+    except (OSError, ValueError):
+        pass  # a diagnostic must never be the failure
 
 
 class Unavailable(Exception):
     """The store could not be read. Never to be mistaken for an empty inbox."""
 
 
-def unread(recipients: tuple[str, ...]) -> tuple[list[dict], bool]:
-    """Unread mail for ``recipients`` from a short read-only snapshot.
-
-    Returns (rows, complete). Like ``watch.read_pending``: ``mode=ro``, no
-    initializing connect, no transaction held past the one query.
-    """
-    if not recipients:
-        return [], True
+def _read(sql: str, params: tuple) -> list[sqlite3.Row]:
+    """One short read-only query, like ``watch.read_pending``: ``mode=ro``, no
+    initializing connect, no transaction held past the statement."""
     db = mailbox._resolve_db(None).expanduser().resolve()
-    marks = ",".join("?" for _ in recipients)
     try:
         uri = db.as_uri() + "?mode=ro"
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                f"SELECT id, sender, recipient, body FROM messages"
-                f" WHERE recipient IN ({marks}) AND acked_at IS NULL"
-                f" ORDER BY id LIMIT {_SCAN}",
-                recipients,
-            ).fetchall()
+            return conn.execute(sql, params).fetchall()
     except (sqlite3.Error, OSError) as exc:
         raise Unavailable(str(exc)) from exc
-    return [dict(r) for r in rows], len(rows) < _SCAN
+
+
+def unread(recipients: tuple[str, ...]) -> tuple[list[dict], bool]:
+    """(id, recipient) of every unread message for ``recipients``; complete?
+
+    Paged by id, so mail left unread at the front can never starve what came
+    after it. Bodies are fetched separately, for the batch actually pushed.
+    """
+    if not recipients:
+        return [], True
+    marks = ",".join("?" for _ in recipients)
+    found: list[dict] = []
+    after = 0
+    for _ in range(_PAGES):
+        page = _read(
+            f"SELECT id, recipient FROM messages WHERE recipient IN ({marks})"
+            f" AND acked_at IS NULL AND id > ? ORDER BY id LIMIT {_SCAN}",
+            (*recipients, after),
+        )
+        found += [dict(r) for r in page]
+        if len(page) < _SCAN:
+            return found, True
+        after = page[-1]["id"]
+    return found, False
+
+
+def bodies(ids: list[int]) -> dict[int, dict]:
+    """Sender and body for the messages about to be pushed."""
+    if not ids:
+        return {}
+    marks = ",".join("?" for _ in ids)
+    rows = _read(f"SELECT id, sender, body FROM messages WHERE id IN ({marks})", tuple(ids))
+    return {r["id"]: dict(r) for r in rows}
 
 
 def _preview(body: str) -> str:
@@ -120,17 +150,36 @@ class Pusher:
         self.facts: dict = {}
         self._last_fulfil: Optional[datetime] = None
         # Receipts arrive on a tool's worker thread while pushes are recorded
-        # on the pusher's. Held across the fact write too, so an older snapshot
-        # can never land after a newer one.
+        # on the pusher's. ``_lock`` guards memory only and is never held over
+        # I/O - ``state()`` is read on the event loop. Fact writes are ordered
+        # by a version under their own lock, so an older snapshot never lands
+        # after a newer one.
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._version = 0
+        self._written = 0
 
     # ── facts ────────────────────────────────────────────────────────────────
 
-    def _record(self) -> None:
+    def _snapshot(self) -> tuple[int, dict]:
+        """Caller holds ``_lock``."""
+        self._version += 1
+        return self._version, dict(self.facts)
+
+    def _write(self, snapshot: tuple[int, dict]) -> None:
+        """Best effort: facts are a report, never a reason to fail a push."""
+        version, facts = snapshot
         pid, key = procid.current_identity()
         if key is None:
             return  # no creation token: nothing a reader could verify
-        delivery.record(pid, key, **self.facts)
+        with self._write_lock:
+            if version <= self._written:
+                return
+            try:
+                delivery.record(pid, key, **facts)
+                self._written = version
+            except Exception as exc:  # noqa: BLE001
+                _log(f"delivery facts not recorded: {type(exc).__name__}: {exc}")
 
     def declare(self) -> None:
         with contextlib.suppress(Exception):
@@ -138,12 +187,13 @@ class Pusher:
         with self._lock:
             self.active = True
             self.facts = {"declared_at": self.clock()}
-            self._record()
+            snapshot = self._snapshot()
+        self._write(snapshot)
 
     def state(self) -> Optional[str]:
         with self._lock:
-            facts = dict(self.facts)
-        return delivery.derive(facts, self.clock()) if self.active else None
+            facts, active = dict(self.facts), self.active
+        return delivery.derive(facts, self.clock()) if active else None
 
     def accept_receipt(self, nonce: str) -> bool:
         """A receipt proves the push that carried it, and the channel up to it."""
@@ -157,8 +207,9 @@ class Pusher:
             previous = self.facts.get("last_receipted_push_at")
             self.facts["last_receipted_push_at"] = max(filter(None, (previous, pushed)))
             self.facts["oldest_unreceipted_at"] = min(self.unreceipted, default=None)
-            self._record()
-            return True
+            snapshot = self._snapshot()
+        self._write(snapshot)
+        return True
 
     # ── one poll ─────────────────────────────────────────────────────────────
 
@@ -198,6 +249,8 @@ class Pusher:
             # transaction, and a push must not advertise mail it cannot read.
             held = set(sessions.granted(owned))
             due = [r for r in due if r["recipient"] in held][:BATCH]
+            found = bodies([r["id"] for r in due])
+            due = [{**r, **found[r["id"]]} for r in due if r["id"] in found]
         if not due and not self.notices:
             return None
         nonce = secrets.token_hex(4)
@@ -231,8 +284,11 @@ class Pusher:
         return note, [r["id"] for r in due], nonce, now
 
     def sent(self, ids: list[int], nonce: str, now: datetime) -> None:
-        """Record a batch as pushed at ``now``, the time it was built."""
-        self.notices.clear()
+        """Record a batch as pushed at ``now``, the time it was built.
+
+        Recorded BEFORE the write, so a receipt can never arrive for a nonce
+        not yet known; ``unsent`` takes it back if the write fails.
+        """
         for i in ids:
             entry = self.schedule.setdefault(i, {"reminded": 0})
             entry["next"] = now + REMINDERS[min(entry["reminded"], len(REMINDERS) - 1)]
@@ -243,7 +299,36 @@ class Pusher:
             self.facts["last_push_at"] = now
             if not self.facts.get("oldest_unreceipted_at"):
                 self.facts["oldest_unreceipted_at"] = now
-            self._record()
+            snapshot = self._snapshot()
+        self._write(snapshot)
+
+    def unsent(self, ids: list[int], nonce: str, now: datetime) -> None:
+        """Take back a batch whose write failed: it never reached the host.
+
+        Left recorded, a later push's receipt would cover it and certify mail
+        the model never saw. Its messages become due again at once.
+        """
+        for i in ids:
+            entry = self.schedule.get(i)
+            if entry is None:
+                continue
+            entry["reminded"] -= 1
+            if entry["reminded"] <= 0:
+                del self.schedule[i]
+            else:
+                entry["next"] = now
+        with self._lock:
+            self.receipts.pop(nonce, None)
+            with contextlib.suppress(ValueError):
+                self.unreceipted.remove(now)
+            self.facts["oldest_unreceipted_at"] = min(self.unreceipted, default=None)
+            # Every push actually written is either still unreceipted or
+            # covered by the last receipt, so the latest of those is the last
+            # real push - not this one.
+            written = [*self.unreceipted, self.facts.get("last_receipted_push_at")]
+            self.facts["last_push_at"] = max(filter(None, written), default=None)
+            snapshot = self._snapshot()
+        self._write(snapshot)
 
     # ── the loop ─────────────────────────────────────────────────────────────
 
@@ -252,22 +337,27 @@ class Pusher:
             await initialized.wait()
             if client.get("name") != CLIENT:
                 return
-            await anyio.to_thread.run_sync(self.declare)
+            declared = False
             delay = self.poll_s
             while True:
-                # Isolated: a pusher fault is logged and retried with backoff,
-                # never allowed to cancel the task group serving every tool.
+                # Isolated: every pusher fault - startup included - is logged
+                # and retried with backoff, never allowed to cancel the task
+                # group serving every tool.
                 try:
+                    if not declared:
+                        await anyio.to_thread.run_sync(self.declare)
+                        declared = True
                     batch = await anyio.to_thread.run_sync(self.next_batch)
                     if batch:
                         note, ids, nonce, built = batch
-                        # Recorded BEFORE the write, so a receipt can never
-                        # arrive for a nonce not yet known. A write that then
-                        # fails leaves an unreceipted push behind - which is
-                        # what a push the host never read is.
                         await anyio.to_thread.run_sync(self.sent, ids, nonce, built)
-                        with anyio.fail_after(SEND_TIMEOUT_S):
-                            await out.send(SessionMessage(message=JSONRPCMessage(note)))
+                        try:
+                            with anyio.fail_after(SEND_TIMEOUT_S):
+                                await out.send(SessionMessage(message=JSONRPCMessage(note)))
+                        except Exception:
+                            await anyio.to_thread.run_sync(self.unsent, ids, nonce, built)
+                            raise
+                        self.notices.clear()
                     delay = self.poll_s
                 except Exception as exc:  # noqa: BLE001 - isolation is the point
                     _log(f"{type(exc).__name__}: {exc}")
@@ -290,11 +380,15 @@ def state() -> Optional[str]:
 async def _tap(read, forward, initialized: anyio.Event, client: dict) -> None:
     async with read, forward:
         async for item in read:
+            # Observation only, and never the reason serving stops: a malformed
+            # message goes through untouched so the SDK can answer it as before.
             root = getattr(getattr(item, "message", None), "root", None)
             method = getattr(root, "method", None)
             if method == "initialize":
-                info = (getattr(root, "params", None) or {}).get("clientInfo") or {}
-                client["name"] = info.get("name")
+                params = getattr(root, "params", None)
+                info = params.get("clientInfo") if isinstance(params, dict) else None
+                name = info.get("name") if isinstance(info, dict) else None
+                client["name"] = name if isinstance(name, str) else None
             elif method == "notifications/initialized":
                 initialized.set()
             await forward.send(item)
