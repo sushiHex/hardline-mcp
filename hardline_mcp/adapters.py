@@ -387,6 +387,32 @@ def validate_label(label: str) -> Optional[str]:
 MAX_CLAIMED_LANES = 32
 
 
+# Names this process is waiting to acquire, label -> agent. A name held by a
+# live process cannot be taken - nothing can tell a conversation that moved
+# away from one still reading - but it can be WAITED for: the claim completes
+# through the ordinary ownership rule once the holder is dead. Process-local
+# like ``_claimed_lanes``, so a waiting claim ends with the process that made
+# it and no other process, revision or later session can inherit it.
+_pending_claims: dict[str, str] = {}
+
+
+def _capacity_refusal(label: str) -> Optional[str]:
+    """Why one more name would exceed the cap. Caller holds ``_claim_lock``.
+
+    Pending names count: each becomes a bind parameter on every poll the moment
+    it is granted, so admitting it while waiting is admitting it.
+    """
+    taken = set(_claimed_lanes) | set(_pending_claims)
+    if label in taken or len(taken) < MAX_CLAIMED_LANES:
+        return None
+    return (
+        f"this session already holds or awaits {MAX_CLAIMED_LANES} names and "
+        "keeps consuming mail for all of them; refusing another rather "
+        "than dropping one somebody may still be writing to. Start a "
+        "new session if you need a fresh name."
+    )
+
+
 def claim_lane(label: str) -> Optional[str]:
     """Adopt ``label`` as this process's lane from now on.
 
@@ -397,21 +423,45 @@ def claim_lane(label: str) -> Optional[str]:
     ``HARDLINE_AGENT_LABEL``: the env var names a session before it can speak,
     this is the session naming itself, and it happens later.
 
-    The previous lane is NOT surrendered - see ``held_lanes``.
+    The previous lane is NOT surrendered - see ``held_lanes``. A pending claim
+    for the same name is settled by this adoption.
     """
     label = label.strip()
     with _claim_lock:
         if label in _claimed_lanes:
+            _pending_claims.pop(label, None)
             return None
-        if len(_claimed_lanes) >= MAX_CLAIMED_LANES:
-            return (
-                f"this session has already claimed {MAX_CLAIMED_LANES} names and "
-                "keeps consuming mail for all of them; refusing another rather "
-                "than dropping one somebody may still be writing to. Start a "
-                "new session if you need a fresh name."
-            )
+        refused = _capacity_refusal(label)
+        if refused:
+            return refused
         _claimed_lanes.append(label)
+        _pending_claims.pop(label, None)
     return None
+
+
+def await_lane(label: str, agent: str) -> Optional[str]:
+    """Wait for ``label`` until its holder is gone. None on success, else why not."""
+    label = label.strip()
+    with _claim_lock:
+        if label in _claimed_lanes:
+            return f"this session already holds {label!r}"
+        refused = _capacity_refusal(label)
+        if refused:
+            return refused
+        _pending_claims[label] = agent
+    return None
+
+
+def pending_claims() -> dict[str, str]:
+    """Names this process is waiting for, label -> agent, oldest first."""
+    with _claim_lock:
+        return dict(_pending_claims)
+
+
+def cancel_pending(label: str) -> bool:
+    """Stop waiting for ``label``. Returns whether it was pending."""
+    with _claim_lock:
+        return _pending_claims.pop(label.strip(), None) is not None
 
 
 def release_lane(label: str) -> None:
@@ -437,14 +487,7 @@ def claim_refusal(label: str) -> Optional[str]:
     with _claim_lock:
         if label in _claimed_lanes:
             return None
-        if len(_claimed_lanes) >= MAX_CLAIMED_LANES:
-            return (
-                f"this session has already claimed {MAX_CLAIMED_LANES} names and "
-                "keeps consuming mail for all of them; refusing another rather "
-                "than dropping one somebody may still be writing to. Start a "
-                "new session if you need a fresh name."
-            )
-    return None
+        return _capacity_refusal(label)
 
 
 # Which agent this process serves, when it had to be told at runtime. A Codex
@@ -488,6 +531,7 @@ def reset_claimed_lanes() -> None:
     state must not leak between them the way an env var cannot."""
     with _claim_lock:
         _claimed_lanes.clear()
+        _pending_claims.clear()
         _declared_agent.clear()
 
 

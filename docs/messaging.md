@@ -54,6 +54,29 @@ when you no longer need its mail. Runtime names must be reclaimed after an MCP
 reconnect, though an automatic or configured lane may register again. A label
 is reusable: a successful later claimant inherits its unread backlog.
 
+### Wait for a held name
+
+```text
+register_session(label="retro.3ff4ba5e", wait=true)
+```
+
+A held name cannot be taken, but it can be waited for. With `wait=true`, a
+refusal caused by a live or unknown holder, or by work still owed to the name,
+becomes a pending claim:
+- The result stays `ok: false`, with `status: "pending"`, and this session does
+  not hold the name yet.
+- The claim is granted, with the name's unread backlog, through the ordinary
+  ownership rule once the holder has exited. Fulfilment runs on the heartbeat
+  and on `list_agents`.
+- `release_session(label=...)` cancels it.
+- It ends with the process that made it.
+
+This is how a conversation gets its old lane back after Claude Code moves it
+to a background session: the move gives it a new process and a new derived
+lane, while the old process keeps the old one until its window closes. The
+server's MCP instructions tell every connected model to do this. See
+[session continuity](session-continuity.md).
+
 Qualified messages can be inspected without ownership, but `inbox` and `ack`
 consume them only with this process's uncontested durable grant, checked in the
 acknowledgement transaction. Current servers refuse consumption on contested
@@ -77,6 +100,15 @@ Bodies and aggregate responses are bounded. Use `peek` for a full body.
 `unread_only=False` browses without acknowledging. `remaining` counts only mail
 this caller could consume, so an unowned lane does not create an endless drain
 loop. Incoming bodies do not override the receiving agent's task instructions.
+
+`ack(message_ids=[...])` acknowledges a batch under the same ownership rule and
+returns per-id results. `inbox(..., receipt=...)` passes back the receipt from a
+pushed `<channel>` event. The reply's `receipt` is `accepted` or `unknown`, and
+an accepted receipt is the only proof that a push reached the session (see
+[push delivery](push-delivery.md)). A lane-qualified `send` reports
+`recipient_delivery`: `receipted`, `awaiting_receipt`, `unreceipted`,
+`declared`, or `unknown`. `unknown` covers older servers and clients without
+push, so it never means "not delivered".
 
 If a consuming response is lost, recover through `history`, which includes
 acknowledged messages and never consumes them. It returns newest first; page

@@ -50,6 +50,12 @@ Dependencies point one way: `procid` <- `mailbox` <- `jobs`/`sessions` <-
 - `watch.py` is a read-only, level-triggered observer of unread mail (what
   Claude's Monitor uses). `wake_codex.py` forwards the same observations to a
   bound Codex app-server thread.
+- `channel.py` decides what to push into a Claude Code session and when (pure
+  logic, no MCP import); `delivery.py` records push facts and derives
+  receipted/awaiting/unreceipted. `server.main` serves through
+  `server.serve_streams` - FastMCP's own `Server.run` with `channel.tap` and
+  the pusher spliced onto the raw streams - not `mcp.run()`. See
+  `docs/push-delivery.md`.
 
 Design rationale is in `docs/architecture.md`. The tool contracts are in
 `docs/messaging.md`, env vars (`HARDLINE_*`) in `docs/configuration.md`, and
@@ -108,6 +114,13 @@ with isolated mailboxes; opt in with `HARDLINE_LIVE_WATCH=1`. It requires
 `.[codex-watch]` for the Codex case and consumes plan tokens.
 
 ### Inbox signals in a Claude session
+
+Prefer push: a session launched with
+`--dangerously-load-development-channels server:hardline-mcp` receives its lane
+mail as `<channel>` events, idle or busy. If `list_agents().you.delivery` is
+`unreceipted` (no flag, or the conversation moved to a background session),
+fall back to the Monitor below. A conversation that lost its lane in such a move
+gets it back with `register_session(label=<old lane>, wait=true)`.
 
 When working here in Claude Code with Monitor available, call `list_agents()`
 and `server_info()`. If `watch.argv` is available, quote those arguments for
