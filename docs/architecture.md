@@ -123,6 +123,14 @@ memory. A replacement MCP process may register an automatic or configured lane,
 but it must explicitly reclaim a runtime role. A successful claim inherits that
 role's backlog.
 
+**A held name can be waited for, never taken.** A Claude Code conversation
+moved to the background continues in a new process, while the old process
+keeps its lanes until its window closes. No available signal distinguishes that
+move from a copy that is still being read, so the name is not transferred.
+`register_session(wait=true)` instead keeps the claim pending in memory until
+the holder is dead, which is positive evidence, and then grants it through the
+unchanged ownership rule. See [session continuity](session-continuity.md).
+
 **Rename tables, never reshape them.** Inspecting a table and then dropping it
 is two statements with no transaction between them, and under this deployment
 another process can build the correct table in that window and have it

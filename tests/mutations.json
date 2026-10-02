@@ -487,5 +487,53 @@
     "tests": [
       "tests/test_admission.py::test_queued_cancellation_admits_replacement_while_worker_is_busy"
     ]
+  },
+  "pending-claim-obeys-ownership-rule": {
+    "file": "hardline_mcp/server.py",
+    "before": "            result = _register_locked(label, agent, wait=False)\n",
+    "after": "            result = {\"ok\": adapters.claim_lane(label) is None, \"lane\": f\"{agent}:{label}\"}\n",
+    "tests": [
+      "tests/test_continuity.py::test_a_waiting_claim_is_never_granted_while_the_holder_lives"
+    ]
+  },
+  "pending-claim-fulfilled-by-heartbeat": {
+    "file": "hardline_mcp/server.py",
+    "before": "    _announce_self()\n    _fulfil_pending()\n",
+    "after": "    _announce_self()\n",
+    "tests": [
+      "tests/test_continuity.py::test_the_heartbeat_fulfils_a_waiting_claim"
+    ]
+  },
+  "pending-claim-release-cancels": {
+    "file": "hardline_mcp/server.py",
+    "before": "        if agent is not None:\n            adapters.cancel_pending(label)\n",
+    "after": "        if agent is not None:\n            pass\n",
+    "tests": [
+      "tests/test_continuity.py::test_release_cancels_a_waiting_claim"
+    ]
+  },
+  "pending-claim-is-not-ownership": {
+    "file": "hardline_mcp/server.py",
+    "before": "            \"status\": \"pending\",\n",
+    "after": "            \"ok\": True,\n            \"status\": \"pending\",\n",
+    "tests": [
+      "tests/test_continuity.py::test_a_waiting_claim_is_granted_with_its_backlog_once_the_holder_exits"
+    ]
+  },
+  "pending-claim-only-on-wait": {
+    "file": "hardline_mcp/server.py",
+    "before": "        if not (wait and waitable):\n",
+    "after": "        if not waitable:\n",
+    "tests": [
+      "tests/test_continuity.py::test_without_wait_a_held_name_is_refused_and_not_awaited"
+    ]
+  },
+  "pending-claim-counts-toward-cap": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    taken = set(_claimed_lanes) | set(_pending_claims)\n",
+    "after": "    taken = set(_claimed_lanes)\n",
+    "tests": [
+      "tests/test_continuity.py::test_a_waiting_claim_counts_toward_the_name_cap"
+    ]
   }
 }
