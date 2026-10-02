@@ -571,8 +571,8 @@
   },
   "push-receipt-clears-unreceipted": {
     "file": "hardline_mcp/channel.py",
-    "before": "        self.unreceipted = [t for t in self.unreceipted if t > pushed]\n",
-    "after": "        self.unreceipted = list(self.unreceipted)\n",
+    "before": "            self.unreceipted = [t for t in self.unreceipted if t > pushed]\n",
+    "after": "            self.unreceipted = list(self.unreceipted)\n",
     "tests": [
       "tests/test_channel.py::test_only_a_receipt_proves_a_push_arrived",
       "tests/test_channel.py::test_a_newer_receipt_covers_earlier_unreceipted_pushes"
@@ -580,8 +580,8 @@
   },
   "push-receipt-single-use": {
     "file": "hardline_mcp/channel.py",
-    "before": "        self.receipts = {n: t for n, t in self.receipts.items() if t > pushed}\n",
-    "after": "        self.receipts = {n: t for n, t in self.receipts.items() if t >= pushed}\n",
+    "before": "            self.receipts = {n: t for n, t in self.receipts.items() if t > pushed}\n",
+    "after": "            self.receipts = {n: t for n, t in self.receipts.items() if t >= pushed}\n",
     "tests": [
       "tests/test_channel.py::test_only_a_receipt_proves_a_push_arrived"
     ]

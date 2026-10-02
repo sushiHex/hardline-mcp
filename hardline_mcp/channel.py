@@ -27,6 +27,7 @@ import contextlib
 import secrets
 import sqlite3
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
@@ -118,6 +119,10 @@ class Pusher:
         self.notices: list[str] = []
         self.facts: dict = {}
         self._last_fulfil: Optional[datetime] = None
+        # Receipts arrive on a tool's worker thread while pushes are recorded
+        # on the pusher's. Held across the fact write too, so an older snapshot
+        # can never land after a newer one.
+        self._lock = threading.Lock()
 
     # ── facts ────────────────────────────────────────────────────────────────
 
@@ -128,28 +133,32 @@ class Pusher:
         delivery.record(pid, key, **self.facts)
 
     def declare(self) -> None:
-        self.active = True
-        self.facts = {"declared_at": self.clock()}
         with contextlib.suppress(Exception):
             delivery.prune()
-        self._record()
+        with self._lock:
+            self.active = True
+            self.facts = {"declared_at": self.clock()}
+            self._record()
 
     def state(self) -> Optional[str]:
-        return delivery.derive(self.facts, self.clock()) if self.active else None
+        with self._lock:
+            facts = dict(self.facts)
+        return delivery.derive(facts, self.clock()) if self.active else None
 
     def accept_receipt(self, nonce: str) -> bool:
         """A receipt proves the push that carried it, and the channel up to it."""
-        pushed = self.receipts.get(nonce)
-        if pushed is None:
-            return False
-        self.unreceipted = [t for t in self.unreceipted if t > pushed]
-        # Spent, along with every earlier nonce: each receipt counts once.
-        self.receipts = {n: t for n, t in self.receipts.items() if t > pushed}
-        previous = self.facts.get("last_receipted_push_at")
-        self.facts["last_receipted_push_at"] = max(filter(None, (previous, pushed)))
-        self.facts["oldest_unreceipted_at"] = min(self.unreceipted, default=None)
-        self._record()
-        return True
+        with self._lock:
+            pushed = self.receipts.get(nonce)
+            if pushed is None:
+                return False
+            self.unreceipted = [t for t in self.unreceipted if t > pushed]
+            # Spent, along with every earlier nonce: each receipt counts once.
+            self.receipts = {n: t for n, t in self.receipts.items() if t > pushed}
+            previous = self.facts.get("last_receipted_push_at")
+            self.facts["last_receipted_push_at"] = max(filter(None, (previous, pushed)))
+            self.facts["oldest_unreceipted_at"] = min(self.unreceipted, default=None)
+            self._record()
+            return True
 
     # ── one poll ─────────────────────────────────────────────────────────────
 
@@ -228,12 +237,13 @@ class Pusher:
             entry = self.schedule.setdefault(i, {"reminded": 0})
             entry["next"] = now + REMINDERS[min(entry["reminded"], len(REMINDERS) - 1)]
             entry["reminded"] += 1
-        self.receipts[nonce] = now
-        self.unreceipted.append(now)
-        self.facts["last_push_at"] = now
-        if not self.facts.get("oldest_unreceipted_at"):
-            self.facts["oldest_unreceipted_at"] = now
-        self._record()
+        with self._lock:
+            self.receipts[nonce] = now
+            self.unreceipted.append(now)
+            self.facts["last_push_at"] = now
+            if not self.facts.get("oldest_unreceipted_at"):
+                self.facts["oldest_unreceipted_at"] = now
+            self._record()
 
     # ── the loop ─────────────────────────────────────────────────────────────
 
