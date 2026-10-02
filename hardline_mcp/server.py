@@ -31,6 +31,9 @@ from typing import Literal
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
+from mcp.server.stdio import stdio_server
+from mcp.shared.message import SessionMessage
+from mcp.types import JSONRPCMessage, JSONRPCNotification
 
 from . import adapters, channel, delivery, dispatch, jobs, mailbox, sessions, watch
 
@@ -2187,10 +2190,50 @@ def main() -> None:
     # server from doing its actual job.
     _announce_self()
     atexit.register(_unregister_self)
-    # FastMCP's own stdio loop with channel push spliced onto its streams; the
-    # pusher also drives pending claims, so a moved conversation regains its
-    # name within seconds of the old holder exiting.
-    anyio.run(channel.serve, mcp, _fulfil_pending)
+    anyio.run(_serve_stdio)
+
+
+async def _serve_stdio() -> None:
+    """Drop-in for ``FastMCP.run_stdio_async``, with channel push spliced in.
+
+    The pusher also drives pending claims, so a moved conversation regains its
+    name within seconds of the old holder exiting.
+    """
+    async with stdio_server() as (read, write):
+        await serve_streams(read, write, channel.Pusher(fulfil=_fulfil_pending))
+
+
+async def serve_streams(read, write, pusher: "channel.Pusher") -> None:
+    """Serve on the given streams: FastMCP's own ``Server.run``, plus two tasks.
+
+    The initialize result declares ``experimental["claude/channel"]``, which
+    FastMCP's ``run_stdio_async`` cannot - it passes no experimental
+    capabilities. ``channel.tap`` observes the client's messages on their way
+    in; the pusher writes notifications to a clone of the write stream. All
+    MCP types stay here, so ``channel`` is pure logic like every other module.
+    """
+    channel.install(pusher)
+    low = mcp._mcp_server
+    options = low.create_initialization_options(
+        experimental_capabilities={channel.CAPABILITY: {}}
+    )
+    initialized = anyio.Event()
+    client: dict = {}
+    forward_send, forward_recv = anyio.create_memory_object_stream(0)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(channel.tap, read, forward_send, initialized, client)
+        tg.start_soon(_push, write.clone(), pusher, initialized, client)
+        await low.run(forward_recv, write, options)
+        tg.cancel_scope.cancel()
+
+
+async def _push(out, pusher: "channel.Pusher", initialized, client: dict) -> None:
+    async def send(params: dict) -> None:
+        note = JSONRPCNotification(jsonrpc="2.0", method=channel.METHOD, params=params)
+        await out.send(SessionMessage(message=JSONRPCMessage(note)))
+
+    async with out:  # closed on every exit, so the stdio writer can finish
+        await pusher.run(send, initialized, client)
 
 
 def _unregister_self() -> None:

@@ -14,7 +14,7 @@ Operator setup is in [inbox signals](inbox-signals.md#claude-code-push-preferred
 
 ## Serving
 
-`server.main` serves through `channel.serve`. That is FastMCP's own `Server.run`, with two tasks spliced onto the raw stdio streams:
+`server.main` serves through `server.serve_streams`. That is FastMCP's own `Server.run`, with two tasks spliced onto the raw stdio streams. All MCP types stay in `server.py`; `channel.py` is pure logic that emits notification params through an injected `send`.
 
 - **Capability.** The initialize result declares the capability. FastMCP's `run_stdio_async` passes no experimental capabilities, which is why it is replaced.
 - **Tap.** Passes client messages through unchanged and notes `clientInfo.name` and `notifications/initialized`.
@@ -30,7 +30,7 @@ Declaring and pushing is harmless where unused: the host drops pushes for sessio
 - **Scope.** Unread mail for lanes this process holds. Bare mail is excluded twice: `owned_recipients()` holds qualified lanes only, and the per-batch check filters anything ungranted. Grants are revalidated for every non-empty batch, as consumption revalidates them, so a lane lost to a contest is not advertised.
 - **Schedule.** Per message, in memory. A new id is pushed in the next batch. Unread pushed mail is re-announced 5 m, 15 m, then every 60 m after its own last push, so new arrivals never postpone an old reminder. Mail read by anyone (including `inbox(auto_ack=true)` or a later holder) leaves the schedule.
 - **Payload.** Ids, senders, 200-character previews; `meta` carries `message_ids`, `count`, `lanes`, `receipt`. Pushing never acks. A batch is stamped and recorded when it is built, before the write, so a receipt can never arrive for an unknown nonce. A write that fails or times out (5 s) is taken back: its nonce is dropped and its messages are due again. Otherwise a later push's receipt would cover mail the model never saw.
-- **Scan.** Unread ids are paged (500 per page, at most 20 pages), so mail left unread at the front never starves later mail. Bodies are fetched only for the batch being pushed.
+- **Scan.** Unread ids are paged (500 per page, up to 20 pages per poll), so mail left unread at the front never starves later mail. A larger backlog is swept across polls from a rotating cursor. Only a sweep that started at the front and finished in one poll may conclude that a scheduled message was read. Bodies are fetched only for the batch being pushed.
 - **Pending claims.** The pusher also drives pending claims ([session continuity](session-continuity.md)) every 15 s. A granted name is announced in the next push, followed by its backlog.
 
 ## Delivery state: receipts, not inference

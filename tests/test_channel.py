@@ -102,7 +102,7 @@ async def serving(tg, pusher, buffer=32):
 
     c2s_send, c2s_recv = anyio.create_memory_object_stream(32)
     s2c_send, s2c_recv = anyio.create_memory_object_stream(buffer)
-    tg.start_soon(lambda: channel.run(server.mcp, c2s_recv, s2c_send, pusher=pusher))
+    tg.start_soon(server.serve_streams, c2s_recv, s2c_send, pusher)
     return Wire(c2s_send, s2c_recv)
 
 
@@ -249,11 +249,11 @@ async def test_a_pusher_fault_never_stops_the_tools(store, monkeypatch):
     real = channel.unread
     calls = {"n": 0}
 
-    def flaky(recipients):
+    def flaky(recipients, after=0):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("store hiccup")
-        return real(recipients)
+        return real(recipients, after=after)
 
     monkeypatch.setattr(channel, "unread", flaky)
     try:
@@ -455,6 +455,49 @@ async def test_mail_left_unread_at_the_front_never_starves_later_mail(store, mon
         push = await wire.next(is_push)
         assert push["params"]["meta"]["message_ids"] == str(third["message_id"])
         tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_a_backlog_beyond_one_polls_scan_is_swept_across_polls(store, monkeypatch):
+    """Past the per-poll bound, the scan resumes where it stopped - it must not
+    rescan the same front of the backlog forever."""
+    monkeypatch.setattr(channel, "_SCAN", 1)
+    monkeypatch.setattr(channel, "_PAGES", 1)
+    ids = [mailbox.send("codex", LANE, f"m{i}", db_path=store)["message_id"] for i in range(3)]
+    pushed = set()
+    async with anyio.create_task_group() as tg:
+        wire = await serving(tg, channel.Pusher(poll_s=0.02))
+        await wire.handshake()
+        while pushed != set(ids):
+            push = await wire.next(is_push)
+            pushed |= {int(i) for i in push["params"]["meta"]["message_ids"].split(",")}
+        tg.cancel_scope.cancel()
+
+
+def test_only_the_server_module_imports_mcp():
+    """The module map's boundary (AGENTS.md, CLAUDE.md): everything but
+    ``server`` is pure logic, so watchers and tests never load the SDK."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    probe = (
+        "import importlib, pkgutil, sys, hardline_mcp\n"
+        "for m in pkgutil.iter_modules(hardline_mcp.__path__):\n"
+        "    if m.name == 'server':\n"
+        "        continue\n"
+        "    importlib.import_module('hardline_mcp.' + m.name)\n"
+        "    if any(k == 'mcp' or k.startswith('mcp.') for k in sys.modules):\n"
+        "        print(m.name)\n"
+        "        break\n"
+    )
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", probe], cwd=root, capture_output=True,
+        text=True, encoding="utf-8", timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "", f"imports mcp: {result.stdout.strip()}"
 
 
 def test_reading_delivery_state_never_waits_on_a_fact_write(store, monkeypatch):

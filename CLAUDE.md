@@ -50,10 +50,12 @@ Dependencies point one way: `procid` <- `mailbox` <- `jobs`/`sessions` <-
 - `watch.py` is a read-only, level-triggered observer of unread mail (what
   Claude's Monitor uses). `wake_codex.py` forwards the same observations to a
   bound Codex app-server thread.
-- `channel.py` serves stdio (FastMCP's own `Server.run`) with Claude Code
-  channel push spliced onto the raw streams; `delivery.py` records push facts
-  and derives receipted/awaiting/unreceipted. `server.main` runs
-  `channel.serve`, not `mcp.run()`. See `docs/push-delivery.md`.
+- `channel.py` decides what to push into a Claude Code session and when (pure
+  logic, no MCP import); `delivery.py` records push facts and derives
+  receipted/awaiting/unreceipted. `server.main` serves through
+  `server.serve_streams` - FastMCP's own `Server.run` with `channel.tap` and
+  the pusher spliced onto the raw streams - not `mcp.run()`. See
+  `docs/push-delivery.md`.
 
 Design rationale is in `docs/architecture.md`. The tool contracts are in
 `docs/messaging.md`, env vars (`HARDLINE_*`) in `docs/configuration.md`, and

@@ -536,10 +536,26 @@
       "tests/test_channel.py::test_a_lane_this_process_lists_but_does_not_hold_is_not_pushed"
     ]
   },
+  "only-server-imports-mcp": {
+    "file": "hardline_mcp/channel.py",
+    "before": "import anyio\n\nfrom . import adapters, delivery, mailbox, procid, sessions\n",
+    "after": "import anyio\nimport mcp.types  # noqa: F401\n\nfrom . import adapters, delivery, mailbox, procid, sessions\n",
+    "tests": [
+      "tests/test_channel.py::test_only_the_server_module_imports_mcp"
+    ]
+  },
+  "push-scan-cursor-rotates": {
+    "file": "hardline_mcp/channel.py",
+    "before": "        rows, self._cursor = unread(owned, after=start)\n",
+    "after": "        rows, _ = unread(owned, after=0)\n",
+    "tests": [
+      "tests/test_channel.py::test_a_backlog_beyond_one_polls_scan_is_swept_across_polls"
+    ]
+  },
   "push-startup-isolated": {
     "file": "hardline_mcp/channel.py",
-    "before": "            declared = False\n",
-    "after": "            await anyio.to_thread.run_sync(self.declare)\n            declared = True\n",
+    "before": "        declared = False\n",
+    "after": "        await anyio.to_thread.run_sync(self.declare)\n        declared = True\n",
     "tests": [
       "tests/test_channel.py::test_a_startup_fault_never_stops_the_tools"
     ]
@@ -554,7 +570,7 @@
   },
   "push-failed-write-taken-back": {
     "file": "hardline_mcp/channel.py",
-    "before": "                            await anyio.to_thread.run_sync(self.unsent, ids, nonce, built)\n",
+    "before": "                        await anyio.to_thread.run_sync(self.unsent, ids, nonce, built)\n",
     "after": "",
     "tests": [
       "tests/test_channel.py::test_a_failed_write_is_taken_back_and_retried"
@@ -562,8 +578,8 @@
   },
   "push-send-bounded": {
     "file": "hardline_mcp/channel.py",
-    "before": "                            with anyio.fail_after(SEND_TIMEOUT_S):\n",
-    "after": "                            with contextlib.nullcontext():\n",
+    "before": "                        with anyio.fail_after(SEND_TIMEOUT_S):\n",
+    "after": "                        with contextlib.nullcontext():\n",
     "tests": [
       "tests/test_channel.py::test_a_failed_write_is_taken_back_and_retried"
     ]
@@ -574,14 +590,6 @@
     "after": "",
     "tests": [
       "tests/test_channel.py::test_a_failed_write_is_taken_back_and_retried"
-    ]
-  },
-  "push-scan-pages": {
-    "file": "hardline_mcp/channel.py",
-    "before": "    for _ in range(_PAGES):\n",
-    "after": "    for _ in range(1):\n",
-    "tests": [
-      "tests/test_channel.py::test_mail_left_unread_at_the_front_never_starves_later_mail"
     ]
   },
   "push-state-never-waits-on-io": {
@@ -610,8 +618,8 @@
   },
   "push-only-to-claude-code": {
     "file": "hardline_mcp/channel.py",
-    "before": "            if client.get(\"name\") != CLIENT:\n",
-    "after": "            if False:\n",
+    "before": "        if client.get(\"name\") != CLIENT:\n",
+    "after": "        if False:\n",
     "tests": [
       "tests/test_channel.py::test_a_client_that_is_not_claude_code_is_never_pushed_to"
     ]
@@ -652,8 +660,8 @@
   },
   "push-fault-isolated": {
     "file": "hardline_mcp/channel.py",
-    "before": "                except Exception as exc:  # noqa: BLE001 - isolation is the point\n",
-    "after": "                except ZeroDivisionError as exc:  # noqa: BLE001 - isolation is the point\n",
+    "before": "            except Exception as exc:  # noqa: BLE001 - isolation is the point\n",
+    "after": "            except ZeroDivisionError as exc:  # noqa: BLE001 - isolation is the point\n",
     "tests": [
       "tests/test_channel.py::test_a_pusher_fault_never_stops_the_tools"
     ]
