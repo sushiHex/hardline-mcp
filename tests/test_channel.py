@@ -195,6 +195,9 @@ async def test_only_a_receipt_proves_a_push_arrived(store):
     async with anyio.create_task_group() as tg:
         wire = await serving(tg, pusher)
         await wire.handshake()
+        with anyio.fail_after(5):
+            while not pusher.active:  # declared off the event loop after init
+                await anyio.sleep(0.01)
         listing = await server.list_agents()
         assert listing["you"]["delivery"] == "declared"
 
