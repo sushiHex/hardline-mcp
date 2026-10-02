@@ -528,6 +528,89 @@
       "tests/test_continuity.py::test_without_wait_a_held_name_is_refused_and_not_awaited"
     ]
   },
+  "push-revalidates-grants": {
+    "file": "hardline_mcp/channel.py",
+    "before": "            due = [r for r in due if r[\"recipient\"] in held][:BATCH]\n",
+    "after": "            due = due[:BATCH]\n",
+    "tests": [
+      "tests/test_channel.py::test_a_lane_this_process_lists_but_does_not_hold_is_not_pushed"
+    ]
+  },
+  "push-drives-pending-claims": {
+    "file": "hardline_mcp/channel.py",
+    "before": "            and adapters.pending_claims()\n",
+    "after": "            and False\n",
+    "tests": [
+      "tests/test_channel.py::test_the_pusher_completes_a_waiting_claim_and_says_so"
+    ]
+  },
+  "push-only-to-claude-code": {
+    "file": "hardline_mcp/channel.py",
+    "before": "            if client.get(\"name\") != CLIENT:\n",
+    "after": "            if False:\n",
+    "tests": [
+      "tests/test_channel.py::test_a_client_that_is_not_claude_code_is_never_pushed_to"
+    ]
+  },
+  "push-reminder-schedule": {
+    "file": "hardline_mcp/channel.py",
+    "before": "            if r[\"id\"] not in self.schedule or self.schedule[r[\"id\"]][\"next\"] <= now\n",
+    "after": "            if r[\"id\"] not in self.schedule or True\n",
+    "tests": [
+      "tests/test_channel.py::test_lane_mail_is_pushed_once_with_a_receipt_and_bare_mail_never",
+      "tests/test_channel.py::test_unread_pushed_mail_is_reminded_on_its_own_schedule"
+    ]
+  },
+  "push-reminder-per-message": {
+    "file": "hardline_mcp/channel.py",
+    "before": "            entry[\"next\"] = now + REMINDERS[min(entry[\"reminded\"], len(REMINDERS) - 1)]\n",
+    "after": "            entry[\"next\"] = now + REMINDERS[0]\n            for other in self.schedule.values():\n                other[\"next\"] = entry[\"next\"]\n",
+    "tests": [
+      "tests/test_channel.py::test_unread_pushed_mail_is_reminded_on_its_own_schedule"
+    ]
+  },
+  "push-receipt-clears-unreceipted": {
+    "file": "hardline_mcp/channel.py",
+    "before": "        self.unreceipted = [t for t in self.unreceipted if t > pushed]\n",
+    "after": "        self.unreceipted = list(self.unreceipted)\n",
+    "tests": [
+      "tests/test_channel.py::test_only_a_receipt_proves_a_push_arrived",
+      "tests/test_channel.py::test_a_newer_receipt_covers_earlier_unreceipted_pushes"
+    ]
+  },
+  "push-receipt-single-use": {
+    "file": "hardline_mcp/channel.py",
+    "before": "        self.receipts = {n: t for n, t in self.receipts.items() if t > pushed}\n",
+    "after": "        self.receipts = {n: t for n, t in self.receipts.items() if t >= pushed}\n",
+    "tests": [
+      "tests/test_channel.py::test_only_a_receipt_proves_a_push_arrived"
+    ]
+  },
+  "push-fault-isolated": {
+    "file": "hardline_mcp/channel.py",
+    "before": "                except Exception as exc:  # noqa: BLE001 - isolation is the point\n",
+    "after": "                except ZeroDivisionError as exc:  # noqa: BLE001 - isolation is the point\n",
+    "tests": [
+      "tests/test_channel.py::test_a_pusher_fault_never_stops_the_tools"
+    ]
+  },
+  "push-grace-window": {
+    "file": "hardline_mcp/delivery.py",
+    "before": "    return \"awaiting_receipt\" if now - oldest < GRACE else \"unreceipted\"\n",
+    "after": "    return \"awaiting_receipt\"\n",
+    "tests": [
+      "tests/test_channel.py::test_only_a_receipt_proves_a_push_arrived",
+      "tests/test_channel.py::test_a_missing_record_is_unknown_not_none"
+    ]
+  },
+  "send-reports-recipient-delivery": {
+    "file": "hardline_mcp/server.py",
+    "before": "        result[\"recipient_delivery\"] = _delivery_of(holders)\n",
+    "after": "        result[\"recipient_delivery\"] = \"unknown\"\n",
+    "tests": [
+      "tests/test_channel.py::test_a_sender_sees_whether_the_recipient_is_receiving_pushes"
+    ]
+  },
   "pending-claim-counts-toward-cap": {
     "file": "hardline_mcp/adapters.py",
     "before": "    taken = set(_claimed_lanes) | set(_pending_claims)\n",

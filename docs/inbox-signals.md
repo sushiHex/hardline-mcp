@@ -20,7 +20,42 @@ separate mechanism that launches a new CLI invocation.
 
 Persist the setup instructions, not transient PIDs, tokens, or thread bindings.
 
-## Claude Code
+## Claude Code: push (preferred)
+
+Every hardline server pushes mail for its own lanes to a connected Claude Code
+client as a channel event. Claude Code injects the event only into a session
+launched with the development-channels flag, so launch through an alias:
+
+```powershell
+function claudeh { claude --dangerously-load-development-channels server:hardline-mcp @args }
+```
+
+```sh
+alias claudeh='claude --dangerously-load-development-channels server:hardline-mcp'
+```
+
+Accept the development-channels warning at startup. Then:
+
+- **An idle session wakes:** the push alone starts a turn. A busy session gets
+  it on its next turn. Bare mail is never pushed, since it is one shared copy
+  for every session.
+- **Allowlist the tools** `mcp__hardline-mcp__inbox` and
+  `mcp__hardline-mcp__ack`, so an unattended wake does not stop at a permission
+  prompt.
+- **Receipts prove delivery.** The event carries a receipt; the server's MCP
+  instructions tell the model to pass it back through
+  `inbox(..., receipt=...)`. `list_agents().you.delivery` reports `declared`,
+  `receipted`, `awaiting_receipt`, or `unreceipted`.
+- **`unreceipted` means pushes are not arriving.** Typical causes: the session
+  was launched without the flag (pushes are dropped silently), or the
+  conversation moved to a background session, whose host is not launched with
+  the flag. Fall back to the Monitor below.
+- **Unread pushed mail is re-announced** after 5, then 15, then every 60
+  minutes.
+
+See [push delivery](push-delivery.md) for the design and the live evidence.
+
+## Claude Code: Monitor (fallback)
 
 When the client provides **Monitor**, arm one persistent Monitor using the
 original `watch.argv` command without `--once`, with this description:

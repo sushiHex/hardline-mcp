@@ -43,9 +43,25 @@ def _resolve_db(db_path: Optional[Path]) -> Path:
 # Bumped when a table is added or a column's meaning changes. Recorded in
 # `meta` so a running server can report what store it is talking to rather
 # than leaving "is this the new schema?" to be inferred from behaviour.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
-_SCHEMA = """
+# Facts a serving process records about its own channel pushes; readers derive
+# the delivery state (see ``delivery``). Also created by ``delivery`` on use: a
+# store rebuilt by an older revision is populated, so a newer process will not
+# re-run its initializer on it.
+PUSH_DELIVERY_TABLE = """
+CREATE TABLE IF NOT EXISTS push_delivery (
+    pid                    INTEGER NOT NULL,
+    process_key            TEXT NOT NULL,
+    declared_at            TEXT NOT NULL,
+    last_push_at           TEXT,
+    last_receipted_push_at TEXT,
+    oldest_unreceipted_at  TEXT,
+    PRIMARY KEY (pid, process_key)
+);
+"""
+
+_SCHEMA = PUSH_DELIVERY_TABLE + """
 CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     sender     TEXT NOT NULL,

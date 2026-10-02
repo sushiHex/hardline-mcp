@@ -101,6 +101,15 @@ Bodies and aggregate responses are bounded. Use `peek` for a full body.
 this caller could consume, so an unowned lane does not create an endless drain
 loop. Incoming bodies do not override the receiving agent's task instructions.
 
+`ack(message_ids=[...])` acknowledges a batch under the same ownership rule and
+returns per-id results. `inbox(..., receipt=...)` passes back the receipt from a
+pushed `<channel>` event. The reply's `receipt` is `accepted` or `unknown`, and
+an accepted receipt is the only proof that a push reached the session (see
+[push delivery](push-delivery.md)). A lane-qualified `send` reports
+`recipient_delivery`: `receipted`, `awaiting_receipt`, `unreceipted`,
+`declared`, or `unknown`. `unknown` covers older servers and clients without
+push, so it never means "not delivered".
+
 If a consuming response is lost, recover through `history`, which includes
 acknowledged messages and never consumes them. It returns newest first; page
 with `before_id=next_before_id` while `has_more`. Its `agent` filter matches

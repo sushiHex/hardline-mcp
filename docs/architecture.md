@@ -24,7 +24,11 @@ code is still reading and writing, and no coordinated migration is possible.
 
 Schema version 5 adds nullable `jobs.owner_key` and
 `agent_sessions.host_pid`/`host_key`. Existing rows and older writers remain
-compatible; readers account for missing tokens and host bindings.
+compatible; readers account for missing tokens and host bindings. Version 6
+adds `push_delivery`, which is also created on first use because a store
+rebuilt by older code will not be re-initialized by a running newer process.
+Any initializer overwrites `meta.schema_version` with its own constant, so
+readers detect tables rather than trusting the number.
 
 ## Three tables, three questions
 

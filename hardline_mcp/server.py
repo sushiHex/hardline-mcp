@@ -32,11 +32,15 @@ from typing import Literal
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 
-from . import adapters, dispatch, jobs, mailbox, sessions, watch
+from . import adapters, channel, delivery, dispatch, jobs, mailbox, sessions, watch
 
 # Delivered by the host to every connected model, so the rule reaches sessions
 # working in other repositories - which never read this repo's docs.
 INSTRUCTIONS = (
+    "Mail for this conversation may arrive as <channel source=\"...\"> events "
+    "listing message ids and a receipt. Use the tools of the server named in "
+    "source: read with inbox(agent=..., auto_ack=false, receipt=<the event's "
+    "receipt>) even if you defer the work, act, then ack the ids. "
     "hardline names belong to the process serving this conversation. If an "
     "earlier hardline result in this conversation shows a lane you no longer "
     "hold (for example after the conversation moved to a background session), "
@@ -574,6 +578,14 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
     advice = _lane_advice(to_agent)
     if advice:
         result["warning"] = advice
+    # "Stored" is not "delivered". A recipient whose pushes go unreceipted is
+    # not seeing them, and a sender reading only ok:true could not know.
+    if ":" in to_agent:
+        try:
+            holders = sessions.holders(to_agent)
+        except Exception:  # noqa: BLE001 - never fail a send over reporting
+            holders = []
+        result["recipient_delivery"] = _delivery_of(holders)
     if deliver:
         notice = (
             f"[hardline] new message #{result['message_id']} from {from_agent}. "
@@ -586,6 +598,25 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
         # carries the full lane so the reader queries the right inbox.
         result["delivery"] = adapters.deliver(adapters.base_agent(to_agent), notice)
     return result
+
+
+def _delivery_of(holders: list[dict]) -> str:
+    """Push delivery state of a lane's live holders; ``unknown`` without proof.
+
+    Unknown, never "none": a holder with no record may be older code, a client
+    without channel support, or a session nobody pushes to - absence of a
+    record is not evidence of anything.
+    """
+    try:
+        facts = delivery.facts_for(
+            [(h["pid"], h["process_key"]) for h in holders]
+        )
+    except Exception:  # noqa: BLE001 - reporting must never fail a call
+        return "unknown"
+    now = mailbox._default_now()
+    states = {delivery.derive(facts.get((h["pid"], h["process_key"])), now) for h in holders}
+    states.discard(None)
+    return states.pop() if len(states) == 1 else "unknown"
 
 
 @mcp.tool()
@@ -647,8 +678,13 @@ async def inbox(
     unread_only: bool = True,
     limit: int = mailbox.DEFAULT_INBOX_LIMIT,
     auto_ack: bool = True,
+    receipt: str | None = None,
 ) -> dict:
     """Read messages addressed to ``agent``, oldest first — one bounded batch.
+
+    ``receipt`` is the nonce from a ``<channel>`` event that announced this
+    mail. Passing it back is the only proof the push reached you; the reply's
+    ``receipt`` says ``accepted`` or ``unknown``.
 
     Reads this session's held lanes AND the shared unqualified name. Bare mail
     has one consumable copy shared by all readers; use a qualified recipient
@@ -730,6 +766,9 @@ async def inbox(
         response["recover_with"] = (
             f"history(agent={agent!r}, before_id={msgs[-1]['message_id'] + 1})"
         )
+    if receipt:
+        accepted = await _in_thread(channel.accept_receipt, receipt)
+        response["receipt"] = "accepted" if accepted else "unknown"
     warning = _last_registration_failure()
     if warning:
         response["registration_warning"] = warning
@@ -755,6 +794,16 @@ async def list_agents() -> dict:
     observed = await _in_thread(mailbox.recipients)
     seen_senders = await _in_thread(mailbox.senders)
     live = await _in_thread(sessions.live)
+    try:
+        facts = await _in_thread(
+            delivery.facts_for, [(s["pid"], s["process_key"]) for s in live]
+        )
+    except Exception:  # noqa: BLE001 - reporting must never fail the listing
+        facts = {}
+    now = mailbox._default_now()
+    for session in live:
+        state = delivery.derive(facts.get((session["pid"], session["process_key"])), now)
+        session["delivery"] = state or "unknown"
     # EVERY lane each session holds, not just the name it is currently
     # addressed by. A renamed session still consumes its previous lanes, so
     # collapsing to the current name here would mark them dead and count their
@@ -794,6 +843,8 @@ async def list_agents() -> dict:
             f"{waited_as}:{label}"
             for label, waited_as in adapters.pending_claims().items()
         ],
+        # Push to this conversation: proven by receipts, never assumed.
+        "delivery": channel.state() or "none",
         "note": (
             "Pass your bare agent name as from_agent for background jobs; "
             "completion notices go to your lane. Use job_result for the answer."
@@ -1106,7 +1157,9 @@ async def peek(message_id: int) -> dict:
 
 
 @mcp.tool()
-async def ack(message_id: int) -> dict:
+async def ack(
+    message_id: int | None = None, message_ids: list[int] | None = None
+) -> dict:
     """Mark a message read so it stops appearing in the unread inbox.
 
     Refuses messages belonging to a DIFFERENT session's lane — one session
@@ -1115,10 +1168,18 @@ async def ack(message_id: int) -> dict:
 
     Returns ``{"ok": true}`` only if a still-unread message with that id
     existed and was ackable by this session (idempotent — a second ack
-    returns false).
+    returns false). ``message_ids`` acks a batch, each under the same rule,
+    and returns ``{"ok": <all acked>, "results": {id: {...}}}``.
     """
+    if (message_id is None) == (message_ids is None):
+        return {"ok": False, "error": "pass exactly one of message_id, message_ids"}
     await _in_thread(_heartbeat)
-    return await _in_thread(_consume, mailbox.ack, message_id)
+    if message_id is not None:
+        return await _in_thread(_consume, mailbox.ack, message_id)
+    results = {}
+    for mid in dict.fromkeys(message_ids):
+        results[mid] = await _in_thread(_consume, mailbox.ack, mid)
+    return {"ok": all(r.get("ok") for r in results.values()), "results": results}
 
 
 @mcp.tool()
@@ -2123,7 +2184,10 @@ def main() -> None:
     # server from doing its actual job.
     _announce_self()
     atexit.register(_unregister_self)
-    mcp.run()
+    # FastMCP's own stdio loop with channel push spliced onto its streams; the
+    # pusher also drives pending claims, so a moved conversation regains its
+    # name within seconds of the old holder exiting.
+    anyio.run(channel.serve, mcp, _fulfil_pending)
 
 
 def _unregister_self() -> None:
