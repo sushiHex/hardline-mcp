@@ -1790,6 +1790,12 @@ def _ask_codex_validated(
     on_spawn: "Callable[[int], None] | None",
 ) -> dict:
     argv = _prefix_for("codex") + ["--ephemeral"]
+    # Before anything is spawned, isolation probes included: an invalid timeout
+    # is a configuration error to report at once, not after a probe has run.
+    try:
+        _timeout_for("codex")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     # Resolved once: the executable that is probed is the executable launched.
     exe = argv[0]
     if _is_plain_call(model, effort, mode, workdir, write):

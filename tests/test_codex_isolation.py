@@ -252,6 +252,15 @@ def test_live_flags_never_unstub_unit_tests(monkeypatch):
     assert conftest._real_probes_for("tests.test_live_agents")
 
 
+@pytest.mark.parametrize("kwargs", [{}, {"model": "gpt-5.6-sol"}], ids=["plain", "telemetry"])
+def test_an_invalid_timeout_fails_before_any_probe(codex, monkeypatch, kwargs):
+    """docs/configuration.md: invalid timeouts fail before an agent is spawned."""
+    monkeypatch.setenv("HARDLINE_CODEX_TIMEOUT_S", "not-a-number")
+    out = adapters.ask_codex("review", **kwargs)
+    assert codex.calls == [], "nothing - not even an isolation probe - may start"
+    assert out.get("ok") is False and "HARDLINE_CODEX_TIMEOUT_S" in out.get("error", "")
+
+
 def test_a_cancel_at_the_first_probe_stops_the_call(codex):
     out = adapters.ask_codex("review", on_spawn=lambda pid: False)
     assert out.get("cancelled") is True
