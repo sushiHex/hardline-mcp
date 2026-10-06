@@ -419,6 +419,36 @@ def test_a_child_that_never_reads_still_times_out():
     assert time.monotonic() - started < 60
 
 
+def test_an_unspawnable_argument_is_an_error_not_a_crash():
+    try:
+        out = adapters._run_cmd([sys.executable, "-c", "pass\x00"], stdin_text="x", timeout_s=30)
+    except ValueError as exc:
+        raise AssertionError(f"_run_cmd must never raise on a bad argument: {exc}")
+    assert out["ok"] is False and "spawn failed" in out["error"]
+
+
+def test_a_writer_that_cannot_start_leaves_no_child_and_no_pipe(monkeypatch):
+    killed, closed = [], []
+    real_kill, real_close = adapters._kill_tree, adapters._close_fds
+    monkeypatch.setattr(adapters, "_kill_tree", lambda proc: killed.append(proc) or real_kill(proc))
+    monkeypatch.setattr(adapters, "_close_fds", lambda fds: closed.append(fds) or real_close(fds))
+
+    class NoThreads:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(adapters.threading, "Thread", NoThreads)
+    with pytest.raises(RuntimeError):
+        adapters._run_cmd(
+            [sys.executable, "-c", "import time; time.sleep(60)"], stdin_text="x", timeout_s=60
+        )
+    assert killed, "the child must not outlive the failure"
+    assert any(fds for fds in closed), "the pipe's write end must be closed"
+
+
 def _feeders():
     return [t for t in threading.enumerate() if t.name == "hardline-stdin" and t.is_alive()]
 

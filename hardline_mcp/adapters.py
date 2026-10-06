@@ -757,7 +757,9 @@ def _run_cmd(
     (emoji, box-drawing); decode as UTF-8 and replace undecodable bytes rather
     than crash on the platform default codec (cp1252 on Windows)."""
     started = time.monotonic()
-    stdin_pipe = os.pipe() if stdin_text is not None else None
+    # Encoded before anything is spawned, so it cannot fail with a child alive.
+    stdin_bytes = None if stdin_text is None else stdin_text.encode("utf-8", "replace")
+    stdin_pipe = os.pipe() if stdin_bytes is not None else None
     try:
         # Popen rather than run(): the caller needs the child's pid to record
         # it against a durable job, so a cancel issued from another process
@@ -779,7 +781,7 @@ def _run_cmd(
     except FileNotFoundError:
         _close_fds(stdin_pipe)
         return {"ok": False, "error": f"command not found / not installed: {argv[0]!r}"}
-    except OSError as e:
+    except (OSError, ValueError) as e:  # ValueError: e.g. a NUL in an argument
         _close_fds(stdin_pipe)
         return {"ok": False, "error": f"spawn failed: {e}"}
     if stdin_pipe is not None:
@@ -822,14 +824,15 @@ def _run_cmd(
                 )
             return response
 
-    if stdin_pipe is not None:
-        threading.Thread(
-            target=_feed_stdin,
-            args=(stdin_pipe[0], stdin_text.encode("utf-8")),
-            name="hardline-stdin",
-            daemon=True,
-        ).start()
     try:
+        if stdin_pipe is not None:
+            threading.Thread(
+                target=_feed_stdin,
+                args=(stdin_pipe[0], stdin_bytes),
+                name="hardline-stdin",
+                daemon=True,
+            ).start()
+            stdin_pipe = None  # the writer owns it now, and closes it
         stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
         # Kill the TREE, not just the child. `claude`/`codex` are launchers
@@ -877,6 +880,7 @@ def _run_cmd(
         # landing mid-read) previously returned with the child still running
         # and its pipes open. subprocess.run() kills and waits on this path;
         # anything less leaks a process we can no longer reach.
+        _close_fds(stdin_pipe)  # still ours if the writer never started
         _kill_tree(proc)
         _reap(proc)
         if isinstance(e, OSError):
@@ -917,6 +921,8 @@ def _feed_stdin(fd: int, data: bytes) -> None:
     call past every deadline. Here the deadline is ``communicate``'s alone,
     and the write ends when the child exits or is killed. Bytes, not text:
     nothing between the caller's hash and the child can translate newlines.
+    A descendant that inherits stdin and never reads it keeps this daemon
+    thread waiting until that descendant exits; the call itself is not held.
     """
     try:
         with open(fd, "wb") as pipe:

@@ -34,6 +34,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import random
 import re
 import secrets
 import tempfile
@@ -191,10 +192,14 @@ def _check_pin(ref: Ref, pull: dict) -> None:
 
 
 def canonical(snapshot: dict) -> bytes:
-    """The bytes a snapshot id is computed over: sorted, compact, UTF-8."""
+    """The bytes a snapshot id is computed over: sorted, compact, UTF-8.
+
+    ``surrogatepass``: GitHub's JSON can carry a lone surrogate, which strict
+    UTF-8 refuses; ``json.loads`` reads such bytes back the same way.
+    """
     return json.dumps(
         snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    ).encode("utf-8", "surrogatepass")
 
 
 def snapshot_id(data: bytes) -> str:
@@ -336,20 +341,28 @@ def prune(directory: Path, *, now: Optional[float] = None) -> int:
     something else.
     """
     now = time.time() if now is None else now
-    removed = 0
     try:
-        candidates = sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        stale = [p for p in directory.glob("*.json") if _expired(p, now)]
     except OSError:
         return 0
-    for path in candidates[:_PRUNE_PER_CALL]:
+    # A random few, not the oldest few: files that can never be deleted must
+    # not take every turn and starve the rest.
+    removed = 0
+    for path in random.sample(stale, min(len(stale), _PRUNE_PER_CALL)):
         try:
-            if now - path.stat().st_mtime < SNAPSHOT_TTL_S:
-                break  # sorted oldest first: nothing later is older
-            path.unlink()
-            removed += 1
+            if _expired(path, now):  # unless used since the listing
+                path.unlink()
+                removed += 1
         except OSError:
             continue
     return removed
+
+
+def _expired(path: Path, now: float) -> bool:
+    try:
+        return now - path.stat().st_mtime >= SNAPSHOT_TTL_S
+    except OSError:
+        return False
 
 
 # ── delivery ────────────────────────────────────────────────────────────────
@@ -410,7 +423,12 @@ def render(
     # [name, heading, status, text, patch]; every patch starts withheld.
     plan = []
     for entry in snapshot["files"]:
-        name, patch = entry["filename"], entry.get("patch")
+        # Classified again here, never trusted from the stored snapshot: a
+        # snapshot written by other code must not read as complete because
+        # of how it was labelled.
+        entry = dict(entry, no_patch=_no_patch_reason(entry))
+        name = entry["filename"]
+        patch = entry["patch"] if entry["no_patch"] is None else None
         title = f"### {name} ({entry['status']}, +{entry['additions']} -{entry['deletions']})"
         if entry.get("previous_filename"):
             title += f" from {entry['previous_filename']}"
@@ -438,11 +456,16 @@ def render(
             summary.append("Not shown in full: " + ", ".join(partial))
         sections = [f"{title}\n{text}\n" for _, title, _, text, _ in plan]
         text = "\n".join(head + summary + ["", "Files:", ""] + sections + [end]) + "\n"
+        # JSON can carry lone surrogates, which UTF-8 cannot encode: replace
+        # them here, so the hashed text and the piped bytes are one thing.
+        text = text.encode("utf-8", "replace").decode("utf-8")
         return text, counts, partial, coverage
 
     envelope = len(assemble()[0])
+    # Patches are granted only beyond the slack, so a listing that fits is
+    # always delivered - with every patch withheld if need be.
     room = total_budget - envelope - _SUMMARY_SLACK
-    if room < 0:
+    if envelope > total_budget:
         raise CollectionError(
             f"listing all {listed} files needs {envelope} characters before any patch, "
             f"over the {total_budget} allowed (HARDLINE_GITHUB_MAX_CHARS)"

@@ -6,6 +6,7 @@ that a file with no patch has three distinguishable causes - and that binary
 and empty files are NOT distinguishable.
 """
 
+import hashlib
 import json
 import os
 import time
@@ -256,6 +257,34 @@ def test_pruning_attempts_a_bounded_number_of_deletions(tmp_path, monkeypatch):
     assert len(attempts) <= gc._PRUNE_PER_CALL
 
 
+def test_undeletable_files_do_not_starve_the_rest(tmp_path, monkeypatch):
+    """The oldest files may be locked forever; others must still get a turn."""
+    oldest = time.time() - 10 * gc.SNAPSHOT_TTL_S
+    locked = set()
+    for i in range(gc._PRUNE_PER_CALL):
+        path = tmp_path / (f"{i:064x}" + ".json")
+        path.write_bytes(b"{}")
+        os.utime(path, (oldest + i, oldest + i))
+        locked.add(path)
+    free = tmp_path / ("f" * 64 + ".json")
+    free.write_bytes(b"{}")
+    stale = time.time() - gc.SNAPSHOT_TTL_S - 60
+    os.utime(free, (stale, stale))
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self in locked:
+            raise PermissionError("in use by another process")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    for _ in range(50):
+        gc.prune(tmp_path)
+        if not free.exists():
+            break
+    assert not free.exists(), "a deletable stale snapshot was never attempted"
+
+
 # ── delivery ────────────────────────────────────────────────────────────────
 
 
@@ -311,6 +340,45 @@ def test_the_whole_text_fits_the_budget(budget):
     except gc.CollectionError as exc:
         raise AssertionError(f"a listing that fits must render, not be refused: {exc}")
     assert len(text) <= budget
+
+
+def test_a_listing_that_exactly_fits_is_delivered():
+    """With no patch to grant, the rendered text IS the envelope."""
+    snap = dict(_snap("empty_file_and_large_patch"))
+    snap["files"] = [dict(f, patch=None, changes=0) for f in snap["files"]]
+    envelope = len(gc.render(snap, nonce="n")[0])
+    try:
+        text, _ = gc.render(snap, nonce="n", total_budget=envelope)
+    except gc.CollectionError as exc:
+        raise AssertionError(f"a listing that fits must not be refused: {exc}")
+    assert len(text) == envelope
+
+
+def test_a_stored_snapshot_is_classified_again_not_trusted():
+    """A snapshot written by other code must not read as complete by its labels."""
+    snap = dict(_snap("deleted_fork"))
+    snap["files"] = [
+        {"filename": "a.py", "previous_filename": None, "status": "modified",
+         "additions": 3, "deletions": 0, "changes": 3, "patch": "", "no_patch": None},
+    ]
+    snap["changed_files"] = 1
+    _, manifest = gc.render(snap, nonce="n")
+    assert manifest["coverage"] == "partial"
+    assert manifest["statuses"] == {"omitted_by_github": 1}
+
+
+def test_a_lone_surrogate_cannot_break_hashing_or_delivery(tmp_path):
+    snap = dict(_snap("deleted_fork"), body="bad \ud800 text")
+    try:
+        data = gc.canonical(snap)
+        text, manifest = gc.render(snap, nonce="n")
+    except UnicodeEncodeError as exc:
+        raise AssertionError(f"evidence with a lone surrogate must still render: {exc}")
+    sid = gc.snapshot_id(data)
+    gc.store(data, sid, tmp_path)
+    assert gc.load(sid, tmp_path)["body"] == "bad \ud800 text"
+    piped = text.encode("utf-8")
+    assert hashlib.sha256(piped).hexdigest() == manifest["delivery_hash"]
 
 
 def test_a_listing_that_cannot_fit_is_refused():

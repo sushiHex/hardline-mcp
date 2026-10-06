@@ -1140,16 +1140,16 @@
   },
   "github-prune-tolerates-locked": {
     "file": "hardline_mcp/github_context.py",
-    "before": "            removed += 1\n        except OSError:\n            continue",
-    "after": "            removed += 1\n        except ValueError:\n            continue",
+    "before": "                removed += 1\n        except OSError:\n            continue",
+    "after": "                removed += 1\n        except ValueError:\n            continue",
     "tests": [
       "tests/test_github_context.py::test_pruning_survives_a_file_it_cannot_delete"
     ]
   },
   "github-prune-keeps-fresh": {
     "file": "hardline_mcp/github_context.py",
-    "before": "            if now - path.stat().st_mtime < SNAPSHOT_TTL_S:\n                break",
-    "after": "            if False:\n                break",
+    "before": "        return now - path.stat().st_mtime >= SNAPSHOT_TTL_S",
+    "after": "        return True",
     "tests": [
       "tests/test_github_context.py::test_pruning_removes_only_long_unused_snapshots"
     ]
@@ -1259,18 +1259,74 @@
   },
   "github-unfittable-listing-refused": {
     "file": "hardline_mcp/github_context.py",
-    "before": "    if room < 0:\n        raise CollectionError(\n            f\"listing all",
-    "after": "    if False:\n        raise CollectionError(\n            f\"listing all",
+    "before": "    if envelope > total_budget:",
+    "after": "    if False:",
     "tests": [
       "tests/test_github_context.py::test_a_listing_that_cannot_fit_is_refused"
     ]
   },
   "github-prune-attempts-bounded": {
     "file": "hardline_mcp/github_context.py",
-    "before": "    for path in candidates[:_PRUNE_PER_CALL]:",
-    "after": "    for path in candidates:",
+    "before": "    for path in random.sample(stale, min(len(stale), _PRUNE_PER_CALL)):",
+    "after": "    for path in stale:",
     "tests": [
       "tests/test_github_context.py::test_pruning_attempts_a_bounded_number_of_deletions"
+    ]
+  },
+  "github-prune-rotates": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    for path in random.sample(stale, min(len(stale), _PRUNE_PER_CALL)):",
+    "after": "    for path in sorted(stale, key=lambda p: p.stat().st_mtime)[:_PRUNE_PER_CALL]:",
+    "tests": [
+      "tests/test_github_context.py::test_undeletable_files_do_not_starve_the_rest"
+    ]
+  },
+  "github-fitting-listing-delivered": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    if envelope > total_budget:",
+    "after": "    if room < 0:",
+    "tests": [
+      "tests/test_github_context.py::test_a_listing_that_exactly_fits_is_delivered"
+    ]
+  },
+  "github-render-reclassifies": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "        entry = dict(entry, no_patch=_no_patch_reason(entry))\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_context.py::test_a_stored_snapshot_is_classified_again_not_trusted"
+    ]
+  },
+  "github-render-replaces-surrogates": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "        text = text.encode(\"utf-8\", \"replace\").decode(\"utf-8\")\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_context.py::test_a_lone_surrogate_cannot_break_hashing_or_delivery"
+    ]
+  },
+  "github-canonical-surrogatepass": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    ).encode(\"utf-8\", \"surrogatepass\")",
+    "after": "    ).encode(\"utf-8\")",
+    "tests": [
+      "tests/test_github_context.py::test_a_lone_surrogate_cannot_break_hashing_or_delivery"
+    ]
+  },
+  "spawn-valueerror-mapped": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    except (OSError, ValueError) as e:  # ValueError: e.g. a NUL in an argument",
+    "after": "    except OSError as e:",
+    "tests": [
+      "tests/test_github_review.py::test_an_unspawnable_argument_is_an_error_not_a_crash"
+    ]
+  },
+  "stdin-pipe-closed-if-writer-never-starts": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        _close_fds(stdin_pipe)  # still ours if the writer never started\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_review.py::test_a_writer_that_cannot_start_leaves_no_child_and_no_pipe"
     ]
   }
 }

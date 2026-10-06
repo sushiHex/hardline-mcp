@@ -23,6 +23,21 @@ Diff review by gpt-6-astra (2026-10-06) — adopted:
 - **The delivery cap was not a cap.** The envelope (headings, markers, summary) is laid out first and patches are granted from what remains; a listing that cannot fit is refused, and the final text is checked against the cap.
 - **Pruning attempted unbounded deletions** when files were locked. It now attempts at most 20 per write.
 
+Verification pass by gpt-6-astra on the fixes — adopted:
+- **Cancel's child read moved inside the claim's write transaction.** Read after the commit, it could find the record already cleared by `finish()`.
+- **`_run_cmd` startup paths:**
+  - the stdin bytes are encoded before anything spawns;
+  - a `ValueError` from `Popen` (a NUL in an argument) is an error result that closes the pipe;
+  - a writer thread that cannot start leaves no open pipe and no child.
+- **Classification is recomputed at render time.** Stored labels are not trusted, so a snapshot written by other code can't read as complete.
+- **Lone surrogates.** GitHub JSON can carry them. `canonical` encodes with `surrogatepass` (which `json.loads` reverses), and `render` replaces them, so the hashed text and the piped bytes stay identical.
+- **A listing that fits is never refused.** Only an envelope over the cap is refused; the slack only limits what patches can be granted.
+- **Pruning samples stale files at random**, so permanently locked files can't starve the rest.
+
+Not adopted from that pass:
+- **An `on_spawn` exception still counts as a claim.** This is a deliberate, older trade-off (`_run_cmd`: bookkeeping must not kill the run). The evidence goes only to the reviewer the caller asked for.
+- **A descendant that inherits stdin and never reads keeps the writer thread blocked until it exits.** It is a daemon thread holding one pipe end, and it doesn't hold up the call. Output pipes held by such descendants have the same limit for every hardline call, through `communicate`'s own reader threads.
+
 Recorded, not adopted: a no-clobber publish for concurrent writers of one snapshot. Both write identical bytes, and a replace refused because the target is open counts as success. The `store` docstring now says that instead of "never overwrites". Retention is about 24 hours; a snapshot used in the instant before pruning unlinks it can still go, and the next call naming it gets an explicit "expired" error.
 
 Verified live on 2026-10-06 against `sushiHex/hardline-mcp#44`: a real Codex and a real Claude both named the PR's title and its 7 files from stdin, reported no tool use, and received the same `snapshot_id`.
