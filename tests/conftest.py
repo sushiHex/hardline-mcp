@@ -89,6 +89,19 @@ def _no_ambient_parent_lane(monkeypatch):
     monkeypatch.setattr(adapters, "_session_anchor", [{"lane": "", "agent": ""}])
 
 
+@pytest.fixture(autouse=True)
+def _no_codex_mcp_listing(monkeypatch):
+    """Default every test to a Codex whose config defines no MCP servers.
+
+    Every ask_codex asks the real CLI which servers to disable (#42). Left in
+    place, that would run `codex mcp list` from the test suite and shift every
+    captured command by one. The isolation tests restore the real function.
+    """
+    from hardline_mcp import adapters
+
+    monkeypatch.setattr(adapters, "_codex_mcp_servers", lambda env, cwd: [])
+
+
 @pytest.fixture
 def spawned_by_codex(monkeypatch):
     """Act as a hardline a Codex terminal session spawned, telling us nothing.

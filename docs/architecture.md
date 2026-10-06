@@ -158,6 +158,12 @@ read-only description. Default calls now explicitly pass `--sandbox read-only`.
 The lesson is to select the execution boundary in the adapter instead of relying
 on an operator's incidental configuration.
 
+**Spawned agents get no MCP servers or app connectors.** Claude children run with `--strict-mcp-config`. Codex has no equivalent flag, and a default `ask_codex` child was found (#42) loading every server the user's Codex knows: hardline itself (more dispatch, mail as anyone, other sessions' history), `node_repl`'s browser, and web search through the `apps` connector. It called them unattended, outside its sandbox. Every Codex child now runs with:
+- `-c features.apps=false -c features.plugins=false`;
+- `-c mcp_servers.<name>.enabled=false` for each server that `codex mcp list` reports with those features off. That's the only set safe to disable: naming a server config doesn't define fails config loading.
+
+If the list can't be obtained, the child falls back to `--ignore-user-config`, failing closed. Codex's built-in web search stays available to default calls, which carry the orchestrator's own prompts.
+
 An earlier Claude probe requested `echo x > probe.txt` with host settings that
 allowed all Bash commands:
 
