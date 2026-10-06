@@ -15,6 +15,15 @@
 5. **`github_tools` is Claude-only.** Codex keeps its read-only sandbox shell either way; `"read"` for Codex is rejected rather than silently meaningless.
 6. **Codex framing replaces any configured `developer_instructions`** for the call. Codex has no append form, and the framing must reach the system channel.
 7. **`GH_HOST=github.com` is forced** for every `gh` child, so an Enterprise default cannot redirect collection.
+8. **Stdin is not written through `communicate(input=...)`.** On Windows, CPython 3.10 and early 3.13 write that input synchronously before the timeout is armed, so a child that never reads could hold a worker past every deadline. The child's stdin is the read end of an `os.pipe()` that only the child holds; a daemon thread writes UTF-8 bytes to the write end after the spawn claim succeeds, and `communicate` only reads. Writing bytes also removes newline translation, so no `reconfigure` is needed. A completed write means the pipe accepted the bytes, not that the child read them; both CLIs were observed reading it live.
+
+Diff review by gpt-6-astra (2026-10-06) — adopted:
+- **Cancel raced child hand-offs** (`jobs.request_cancel`): it read `child_pid` before claiming the row, so a child recorded in between (the next `gh`, then the reviewer) was missed and the stale one reported dead. The child is now read after the claim. This predates #43 (the #42 probes hand off too) but #43 adds more hand-offs.
+- **An empty or null patch, or a missing change count, read as complete.** Only `changes == 0` now means nothing textual; anything else without a patch is `omitted_by_github`. An unreported or mismatched `changed_files` is partial, including zero files listed.
+- **The delivery cap was not a cap.** The envelope (headings, markers, summary) is laid out first and patches are granted from what remains; a listing that cannot fit is refused, and the final text is checked against the cap.
+- **Pruning attempted unbounded deletions** when files were locked. It now attempts at most 20 per write.
+
+Recorded, not adopted: a no-clobber publish for concurrent writers of one snapshot. Both write identical bytes, and a replace refused because the target is open counts as success. The `store` docstring now says that instead of "never overwrites". Retention is about 24 hours; a snapshot used in the instant before pruning unlinks it can still go, and the next call naming it gets an explicit "expired" error.
 
 Verified live on 2026-10-06 against `sushiHex/hardline-mcp#44`: a real Codex and a real Claude both named the PR's title and its 7 files from stdin, reported no tool use, and received the same `snapshot_id`.
 

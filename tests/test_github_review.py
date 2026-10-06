@@ -8,8 +8,11 @@ would actually receive.
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -45,28 +48,29 @@ def _ref(name):
     return f"{pull['base']['repo']['full_name']}#{pull['number']}"
 
 
-class _Stdin:
-    newline = "untouched"
-
-    def reconfigure(self, newline=None):
-        self.newline = newline
-
-    def close(self):
-        pass
-
-
 class _Proc:
+    """A child that reads its stdin pipe to EOF, as a real reviewer would."""
+
     pid = 424242
-    stdout = stderr = None
+    stdout = stderr = stdin = None
 
     def __init__(self, record, out, code):
         self._record, self._out, self.returncode = record, out, code
-        self.stdin = _Stdin() if record["kwargs"]["stdin"] is subprocess.PIPE else None
+        stdin = record["kwargs"]["stdin"]
+        # The parent closes its read end right after Popen; keep our own.
+        piped = isinstance(stdin, int) and stdin >= 0  # DEVNULL is a negative int
+        self._stdin_fd = os.dup(stdin) if piped else None
 
     def communicate(self, input=None, timeout=None):
-        self._record.update(input=input, timeout=timeout)
-        if self.stdin is not None:
-            self._record["newline"] = self.stdin.newline
+        assert input is None, (
+            "evidence must not go through communicate(input=): on Windows "
+            "CPython 3.10 writes it before the timeout is armed"
+        )
+        self._record.update(input=None, raw=None, timeout=timeout)
+        if self._stdin_fd is not None:
+            with open(self._stdin_fd, "rb") as pipe:
+                raw = pipe.read()
+            self._record.update(raw=raw, input=raw.decode("utf-8"))
         return self._out, ""
 
     def kill(self):
@@ -153,8 +157,9 @@ def test_a_codex_reviewer_gets_the_evidence_on_stdin_and_no_web(world):
     (page,) = json.loads(_fixture("rename_only", "files"))
     assert evidence.startswith("<<<HARDLINE-EVIDENCE ")
     assert all(f"### {entry['filename']} " in evidence for entry in page)
-    assert child.get("newline") == "\n", "text-mode translation would rewrite every newline"
-    assert hashlib.sha256(evidence.encode("utf-8")).hexdigest() == out["github"]["delivery_hash"]
+    assert hashlib.sha256(child["raw"] or b"").hexdigest() == out["github"]["delivery_hash"], (
+        "the bytes that arrived are the bytes that were hashed"
+    )
     assert 'web_search="disabled"' in _overrides(_before_prompt(child["cmd"]))
     nonce = evidence.split("<<<HARDLINE-EVIDENCE ", 1)[1].split(">>>", 1)[0]
     assert nonce in _instructions(child["cmd"]), "the framing names this delivery's own nonce"
@@ -198,10 +203,10 @@ def test_a_claude_reviewer_has_no_tools_at_all(world):
     assert "HARDLINE-EVIDENCE" in _flag_value(child["cmd"], "--append-system-prompt")
     assert "--strict-mcp-config" in child["cmd"]
     assert (child["input"] or "").startswith("<<<HARDLINE-EVIDENCE ")
-    assert child.get("newline") == "\n"
+    assert hashlib.sha256(child["raw"] or b"").hexdigest() == out["github"]["delivery_hash"]
 
 
-def test_opt_in_claude_reads_are_confined_to_the_workdir(world, tmp_path):
+def test_opt_in_claude_reads_pass_restricted_and_the_workdir(world, tmp_path):
     adapters.ask_claude(
         "review", github=_ref("rename_only"), github_tools="read", workdir=str(tmp_path)
     )
@@ -263,10 +268,21 @@ def test_a_head_that_moves_starts_no_reviewer(world):
     assert world.reviewers() == []
 
 
-def test_a_cancel_during_collection_stops_the_call(world):
+def test_a_cancel_at_the_first_gh_call_stops_the_call(world):
     out = adapters.ask_codex("review", github=_ref("rename_only"), on_spawn=lambda pid: False)
     assert out.get("cancelled") is True
     assert len(world.gh()) == 1, "nothing after a cancelled gh may start"
+    assert world.reviewers() == []
+
+
+@pytest.mark.parametrize("claimed", [1, 2], ids=["at-files", "at-recheck"])
+def test_a_cancel_at_a_later_gh_call_stops_the_call(world, claimed):
+    claims = iter([True] * claimed + [False])
+    out = adapters.ask_claude(
+        "review", github=_ref("rename_only"), on_spawn=lambda pid: next(claims)
+    )
+    assert out.get("cancelled") is True
+    assert len(world.gh()) == claimed + 1
     assert world.reviewers() == []
 
 
@@ -388,3 +404,30 @@ def test_unicode_and_crlf_reach_a_real_child_byte_for_byte():
     out = adapters._run_cmd([sys.executable, "-c", child], stdin_text=text, timeout_s=60)
     assert out["ok"] is True, out
     assert out["reply"] == hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+BIG = "x" * (4 * 1024 * 1024)  # far past any OS pipe buffer
+
+
+def test_a_child_that_never_reads_still_times_out():
+    """The deadline must hold however much evidence is waiting to be written."""
+    started = time.monotonic()
+    out = adapters._run_cmd(
+        [sys.executable, "-c", "import time; time.sleep(120)"], stdin_text=BIG, timeout_s=3
+    )
+    assert out.get("timed_out") is True, out
+    assert time.monotonic() - started < 60
+
+
+def _feeders():
+    return [t for t in threading.enumerate() if t.name == "hardline-stdin" and t.is_alive()]
+
+
+def test_a_child_that_exits_without_reading_releases_the_writer():
+    """Only the child may hold the read end; otherwise the write blocks forever."""
+    out = adapters._run_cmd([sys.executable, "-c", "pass"], stdin_text=BIG, timeout_s=60)
+    assert out["ok"] is True, out
+    deadline = time.monotonic() + 20
+    while _feeders() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert _feeders() == [], "the stdin writer is still blocked on a pipe nobody reads"

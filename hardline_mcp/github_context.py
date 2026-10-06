@@ -91,9 +91,15 @@ def parse(text: str) -> "Ref | str":
 
 
 def _no_patch_reason(entry: dict) -> Optional[str]:
-    if "patch" in entry:
+    """Why a file shows no patch, or None when it has one.
+
+    An empty or null patch is no patch. Only a change count of exactly 0
+    means there was nothing textual to show; a missing or unreadable count is
+    not evidence of that, so it counts as withheld, like a positive one.
+    """
+    if isinstance(entry.get("patch"), str) and entry["patch"]:
         return None
-    if entry.get("changes", 0) == 0:
+    if entry.get("changes") == 0:
         return "rename_only" if entry.get("status") == "renamed" else "no_textual_diff"
     return "omitted_by_github"
 
@@ -156,8 +162,8 @@ def _collect(ref: Ref, run: Runner) -> dict:
                 key: entry.get(key)
                 for key in ("filename", "previous_filename", "status", "additions", "deletions", "changes")
             }
-            item["patch"] = entry.get("patch")
             item["no_patch"] = _no_patch_reason(entry)
+            item["patch"] = entry["patch"] if item["no_patch"] is None else None
             files.append(item)
     return {
         "repo": ref.repo,
@@ -223,8 +229,11 @@ def store(data: bytes, sid: str, directory: Path) -> None:
     """Persist ``data`` under its id. An existing file IS that content: keep it.
 
     Content addressing makes overwriting pointless and, on Windows, harmful:
-    ``os.replace`` onto a file another process holds open raises. Privacy
-    rests on the profile directory's ACL - POSIX mode bits are a no-op there.
+    ``os.replace`` onto a file another process holds open raises. Two writers
+    can both pass the existence check; the later replace then swaps in the
+    same bytes, or is refused because the target is open - which is success,
+    since the target exists. Privacy rests on the profile directory's ACL -
+    POSIX mode bits are a no-op there.
     """
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"{sid}.json"
@@ -317,10 +326,14 @@ def _touch(path: Path) -> None:
 
 
 def prune(directory: Path, *, now: Optional[float] = None) -> int:
-    """Delete a bounded number of snapshots unused for the TTL. Never raises.
+    """Try to delete at most a few snapshots unused for the TTL. Never raises.
 
     Opportunistic, on write - no reaper, no background thread. A file another
-    process holds open simply survives until a later write.
+    process holds open simply survives until a later write. The age is read
+    again just before each deletion, so a snapshot used since the listing is
+    kept; one used in the instant between that read and the unlink can still
+    go, and the next call naming it is told it expired - never silently given
+    something else.
     """
     now = time.time() if now is None else now
     removed = 0
@@ -328,9 +341,7 @@ def prune(directory: Path, *, now: Optional[float] = None) -> int:
         candidates = sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime)
     except OSError:
         return 0
-    for path in candidates:
-        if removed >= _PRUNE_PER_CALL:
-            break
+    for path in candidates[:_PRUNE_PER_CALL]:
         try:
             if now - path.stat().st_mtime < SNAPSHOT_TTL_S:
                 break  # sorted oldest first: nothing later is older
@@ -344,6 +355,21 @@ def prune(directory: Path, *, now: Optional[float] = None) -> int:
 # ── delivery ────────────────────────────────────────────────────────────────
 
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+_OVER_BUDGET = "[not shown: delivery budget spent]"
+# Room kept for the summary's status-count line to grow as patches are granted:
+# at most two new statuses (included, truncated) and wider counts.
+_SUMMARY_SLACK = 100
+
+
+def _withheld_text(entry: dict) -> str:
+    reason = entry["no_patch"]
+    if reason == "rename_only":
+        return "[renamed without content changes]"
+    if reason == "no_textual_diff":
+        return "[no textual diff: binary or empty; the API does not say which]"
+    changes = entry.get("changes")
+    count = f"{changes} changed lines" if isinstance(changes, int) else "an unreported change count"
+    return f"[patch omitted by GitHub: {count}]"
 
 
 def render(
@@ -357,10 +383,14 @@ def render(
     """What one reviewer receives, and the manifest describing it.
 
     Every file is listed. A patch is shown whole, cut at ``file_budget`` with a
-    marker, or withheld with the reason, until ``total_budget`` is spent. The
-    manifest's ``coverage`` is ``partial`` whenever any textual change is not
-    shown in full - a review of partial evidence must not pass for approval of
-    the whole PR - or when GitHub listed fewer files than it says changed.
+    marker, or withheld with the reason. ``total_budget`` bounds the whole
+    text, in characters: the envelope - every file's heading and withheld
+    marker, and the summary - is laid out first, and patches are granted from
+    what remains. A listing that cannot fit even with every patch withheld is
+    refused. The manifest's ``coverage`` is ``partial`` whenever any textual
+    change is not shown in full - a review of partial evidence must not pass
+    for approval of the whole PR - or unless GitHub's own count of changed
+    files matches the files it listed.
     """
     nonce = nonce or secrets.token_hex(8)
     begin, end = f"<<<HARDLINE-EVIDENCE {nonce}>>>", f"<<<END-HARDLINE-EVIDENCE {nonce}>>>"
@@ -377,48 +407,68 @@ def render(
         body or "(none)",
         "",
     ]
-    statuses, sections = {}, []
-    spent = sum(len(line) + 1 for line in head)
+    # [name, heading, status, text, patch]; every patch starts withheld.
+    plan = []
     for entry in snapshot["files"]:
         name, patch = entry["filename"], entry.get("patch")
         title = f"### {name} ({entry['status']}, +{entry['additions']} -{entry['deletions']})"
         if entry.get("previous_filename"):
             title += f" from {entry['previous_filename']}"
         if any(fnmatch.fnmatch(name, pattern) for pattern in exclude):
-            statuses[name], text = "excluded_by_caller", "[excluded by the caller]"
+            plan.append([name, title, "excluded_by_caller", "[excluded by the caller]", None])
         elif patch is None:
-            statuses[name] = entry["no_patch"]
-            text = {
-                "rename_only": "[renamed without content changes]",
-                "no_textual_diff": "[no textual diff: binary or empty; the API does not say which]",
-                "omitted_by_github": f"[patch omitted by GitHub: {entry['changes']} changed lines]",
-            }[entry["no_patch"]]
-        elif spent + len(title) + min(len(patch), file_budget) > total_budget:
-            statuses[name], text = "over_budget", "[not shown: delivery budget spent]"
-        elif len(patch) > file_budget:
-            statuses[name] = "truncated"
-            text = (
-                patch[:file_budget]
-                + f"\n[truncated: showed {file_budget} of {len(patch)} bytes]"
+            plan.append([name, title, entry["no_patch"], _withheld_text(entry), None])
+        else:
+            plan.append([name, title, "over_budget", _OVER_BUDGET, patch])
+
+    listed = len(plan)
+    complete_listing = snapshot.get("changed_files") == listed
+
+    def assemble() -> tuple[str, dict, list, str]:
+        statuses = [item[2] for item in plan]
+        counts = {status: statuses.count(status) for status in sorted(set(statuses))}
+        partial = [item[0] for item in plan if item[2] in NOT_SHOWN]
+        coverage = "partial" if partial or not complete_listing else "complete"
+        summary = [
+            f"Coverage: {coverage}. Files listed: {listed} of "
+            f"{snapshot.get('changed_files')} changed. "
+            + ", ".join(f"{status}: {n}" for status, n in counts.items()),
+        ]
+        if partial:
+            summary.append("Not shown in full: " + ", ".join(partial))
+        sections = [f"{title}\n{text}\n" for _, title, _, text, _ in plan]
+        text = "\n".join(head + summary + ["", "Files:", ""] + sections + [end]) + "\n"
+        return text, counts, partial, coverage
+
+    envelope = len(assemble()[0])
+    room = total_budget - envelope - _SUMMARY_SLACK
+    if room < 0:
+        raise CollectionError(
+            f"listing all {listed} files needs {envelope} characters before any patch, "
+            f"over the {total_budget} allowed (HARDLINE_GITHUB_MAX_CHARS)"
+        )
+    for item in plan:
+        patch = item[4]
+        if patch is None:
+            continue
+        if len(patch) > file_budget:
+            status = "truncated"
+            shown = patch[:file_budget] + (
+                f"\n[truncated: showed {file_budget} of {len(patch)} characters]"
             )
         else:
-            statuses[name], text = "included", patch
-        section = f"{title}\n{text}\n"
-        spent += len(section) + 1
-        sections.append(section)
-
-    listed = len(snapshot["files"])
-    complete_listing = snapshot.get("changed_files") in (None, listed)
-    counts = {status: list(statuses.values()).count(status) for status in sorted(set(statuses.values()))}
-    partial = [n for n, s in statuses.items() if s in NOT_SHOWN]
-    coverage = "partial" if partial or not complete_listing else "complete"
-    summary = [
-        f"Coverage: {coverage}. Files listed: {listed} of {snapshot.get('changed_files')} changed. "
-        + ", ".join(f"{status}: {n}" for status, n in counts.items()),
-    ]
-    if partial:
-        summary.append("Not shown in full: " + ", ".join(partial))
-    text = "\n".join(head + summary + ["", "Files:", ""] + sections + [end]) + "\n"
+            status, shown = "included", patch
+        # Granting a patch can only shorten the "Not shown" summary; the
+        # counts line may grow, which the slack covers.
+        cost = len(shown) - len(_OVER_BUDGET)
+        if cost <= room:
+            item[2], item[3] = status, shown
+            room -= cost
+    text, counts, partial, coverage = assemble()
+    if len(text) > total_budget:
+        raise CollectionError(
+            f"evidence rendered to {len(text)} characters, over the {total_budget} allowed"
+        )
     manifest = {
         "coverage": coverage,
         "files_listed": listed,

@@ -752,14 +752,12 @@ def _run_cmd(
     stdin is never inherited: hardline-mcp is itself a stdio MCP server, so
     its stdin is the JSON-RPC pipe to the host agent, and a child that read it
     would steal protocol bytes. It is ``DEVNULL``, or - when ``stdin_text`` is
-    given - a pipe of its own carrying exactly that text, written through
-    ``communicate`` (no deadlock against the output pipes) with newline
-    translation off: in text mode Windows would turn every ``\\n`` into
-    ``\\r\\n``, and the child would receive bytes that no longer match what the
-    caller hashed. ``encoding``/``errors``: agent output is often non-ASCII
+    given - a pipe of its own carrying exactly that text (see
+    ``_feed_stdin``). ``encoding``/``errors``: agent output is often non-ASCII
     (emoji, box-drawing); decode as UTF-8 and replace undecodable bytes rather
     than crash on the platform default codec (cp1252 on Windows)."""
     started = time.monotonic()
+    stdin_pipe = os.pipe() if stdin_text is not None else None
     try:
         # Popen rather than run(): the caller needs the child's pid to record
         # it against a durable job, so a cancel issued from another process
@@ -770,7 +768,7 @@ def _run_cmd(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
+            stdin=subprocess.DEVNULL if stdin_pipe is None else stdin_pipe[0],
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -778,12 +776,17 @@ def _run_cmd(
             cwd=cwd,
             start_new_session=True,
         )
-        if stdin_text is not None:
-            proc.stdin.reconfigure(newline="\n")
     except FileNotFoundError:
+        _close_fds(stdin_pipe)
         return {"ok": False, "error": f"command not found / not installed: {argv[0]!r}"}
     except OSError as e:
+        _close_fds(stdin_pipe)
         return {"ok": False, "error": f"spawn failed: {e}"}
+    if stdin_pipe is not None:
+        # Only the child may hold the read end: one left open here would keep
+        # a write to a child that died without reading blocked forever.
+        os.close(stdin_pipe[0])
+        stdin_pipe = (stdin_pipe[1],)
 
     if on_spawn is not None:
         # A False return means the caller could not claim this child - it was
@@ -797,6 +800,7 @@ def _run_cmd(
         except Exception:  # noqa: BLE001 - bookkeeping must not kill the run
             claimed = True
         if claimed is False:
+            _close_fds(stdin_pipe)  # nothing is written to an unclaimed child
             _kill_tree(proc)
             reaped = _reap(proc)
             response = {
@@ -818,8 +822,15 @@ def _run_cmd(
                 )
             return response
 
+    if stdin_pipe is not None:
+        threading.Thread(
+            target=_feed_stdin,
+            args=(stdin_pipe[0], stdin_text.encode("utf-8")),
+            name="hardline-stdin",
+            daemon=True,
+        ).start()
     try:
-        stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout_s)
+        stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
         # Kill the TREE, not just the child. `claude`/`codex` are launchers
         # that spawn the real worker, so killing the recorded pid alone left
@@ -895,6 +906,31 @@ def _run_cmd(
         "elapsed_s": elapsed,
         "timeout_s": timeout_s,
     }
+
+
+def _feed_stdin(fd: int, data: bytes) -> None:
+    """Write ``data`` to a child's stdin pipe, then close it. Never raises.
+
+    On a thread of its own, never through ``communicate(input=...)``: on
+    Windows, CPython 3.10 and early 3.13 write that input synchronously
+    before the timeout is armed, so a child that never reads would hold the
+    call past every deadline. Here the deadline is ``communicate``'s alone,
+    and the write ends when the child exits or is killed. Bytes, not text:
+    nothing between the caller's hash and the child can translate newlines.
+    """
+    try:
+        with open(fd, "wb") as pipe:
+            pipe.write(data)
+    except OSError:
+        pass  # the child exited or was killed without reading it all
+
+
+def _close_fds(fds) -> None:
+    for fd in fds or ():
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _reap(proc: subprocess.Popen) -> bool:
@@ -1222,13 +1258,13 @@ def _github_attachment(
             directory=github_context.store_dir(),
             max_bytes=snapshot_max,
         )
+        text, manifest = github_context.render(
+            snapshot.data, exclude=tuple(exclude or ()), total_budget=delivery_max
+        )
     except _GhCancelled as exc:
         return None, exc.result
     except github_context.CollectionError as exc:
         return None, _github_failure(github, exc)
-    text, manifest = github_context.render(
-        snapshot.data, exclude=tuple(exclude or ()), total_budget=delivery_max
-    )
     summary = {
         "requested": github,
         "snapshot_id": snapshot.id,

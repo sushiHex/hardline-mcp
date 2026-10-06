@@ -238,6 +238,24 @@ def test_pruning_survives_a_file_it_cannot_delete(tmp_path, monkeypatch):
     assert removed == 0
 
 
+def test_pruning_attempts_a_bounded_number_of_deletions(tmp_path, monkeypatch):
+    """Locked files must not turn one write into a sweep of the directory."""
+    stale = time.time() - gc.SNAPSHOT_TTL_S - 60
+    for i in range(3 * gc._PRUNE_PER_CALL):
+        path = tmp_path / (f"{i:064x}" + ".json")
+        path.write_bytes(b"{}")
+        os.utime(path, (stale, stale))
+    attempts = []
+
+    def locked(self, *a, **k):
+        attempts.append(self)
+        raise PermissionError("in use by another process")
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    gc.prune(tmp_path)
+    assert len(attempts) <= gc._PRUNE_PER_CALL
+
+
 # ── delivery ────────────────────────────────────────────────────────────────
 
 
@@ -279,9 +297,59 @@ def test_excluded_files_are_listed_and_partial():
 
 
 def test_a_spent_total_budget_withholds_the_rest_and_says_so():
-    _, manifest = gc.render(_snap("empty_file_and_large_patch"), nonce="n", total_budget=5000)
+    text, manifest = gc.render(_snap("empty_file_and_large_patch"), nonce="n", total_budget=12000)
     assert manifest["coverage"] == "partial"
     assert manifest["statuses"].get("over_budget", 0) > 0
+    assert "[not shown: delivery budget spent]" in text
+
+
+@pytest.mark.parametrize("budget", [9000, 12000, 30000, 60000, 400000])
+def test_the_whole_text_fits_the_budget(budget):
+    """The cap bounds what is piped, envelope and summary included."""
+    try:
+        text, _ = gc.render(_snap("empty_file_and_large_patch"), nonce="n", total_budget=budget)
+    except gc.CollectionError as exc:
+        raise AssertionError(f"a listing that fits must render, not be refused: {exc}")
+    assert len(text) <= budget
+
+
+def test_a_listing_that_cannot_fit_is_refused():
+    with pytest.raises(gc.CollectionError, match="HARDLINE_GITHUB_MAX_CHARS"):
+        gc.render(_snap("empty_file_and_large_patch"), nonce="n", total_budget=1000)
+
+
+def _synthetic(files, changed_files="count"):
+    """Collected, like a real response, from a hand-written file list."""
+    pull = json.loads(_fixture("deleted_fork", "pull"))
+    pull["changed_files"] = len(files) if changed_files == "count" else changed_files
+    entries = [
+        {"filename": f"f{i}", "status": "modified", "additions": 1, "deletions": 0, **entry}
+        for i, entry in enumerate(files)
+    ]
+    run = runner("deleted_fork", pulls=[json.dumps(pull)] * 2, files=json.dumps([entries]))
+    return gc.collect(_ref("deleted_fork"), run)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [{"patch": "", "changes": 3}, {"patch": None, "changes": 3}, {"changes": None}, {}],
+    ids=["empty-patch", "null-patch", "null-changes", "no-changes"],
+)
+def test_a_missing_patch_with_changes_unproven_is_withheld(entry):
+    """No patch is not "nothing to show" unless GitHub says 0 lines changed."""
+    text, manifest = gc.render(_synthetic([entry]), nonce="n")
+    assert manifest["coverage"] == "partial"
+    assert manifest["statuses"] == {"omitted_by_github": 1}
+
+
+def test_an_unreported_file_count_is_partial():
+    _, manifest = gc.render(_synthetic([{"patch": "@@ x", "changes": 1}], changed_files=None), nonce="n")
+    assert manifest["coverage"] == "partial"
+
+
+def test_no_files_at_all_is_not_complete_coverage():
+    _, manifest = gc.render(_synthetic([], changed_files=None), nonce="n")
+    assert manifest["coverage"] == "partial"
 
 
 def test_fewer_files_listed_than_changed_is_partial():

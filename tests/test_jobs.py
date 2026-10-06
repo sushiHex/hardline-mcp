@@ -256,6 +256,35 @@ def test_cancel_loses_cleanly_when_the_job_finishes_mid_cancel(tmp_path, monkeyp
     assert jobs.get(job_id, db_path=db)["state"] == jobs.COMPLETED
 
 
+def test_cancel_kills_the_child_recorded_while_it_was_claiming(tmp_path, monkeypatch):
+    """A job runs children in turn (probes, gh, the agent). One recorded
+    between cancel's first read and its claim must be the one killed - not
+    the previous child, long gone, reported as a clean cancel."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, db_path=db)
+    jobs.set_child_pid(job_id, 101, started_key="gh-key", db_path=db)
+
+    killed = []
+    monkeypatch.setattr(
+        jobs,
+        "kill_process_tree",
+        lambda pid, expect_key=None: (killed.append((pid, expect_key)) or (True, None)),
+    )
+    real_resolve = jobs._resolve_lost
+
+    def resolve_then_hand_off_to_the_next_child(conn, row, now_fn):
+        job = real_resolve(conn, row, now_fn)
+        jobs.set_child_pid(job_id, 202, started_key="agent-key", db_path=db)
+        return job
+
+    monkeypatch.setattr(jobs, "_resolve_lost", resolve_then_hand_off_to_the_next_child)
+
+    out = jobs.request_cancel(job_id, db_path=db)
+    assert out["ok"] is True
+    assert killed == [(202, "agent-key")], "the child running at the claim is the one stopped"
+
+
 def test_a_real_result_supersedes_a_heuristic_lost(tmp_path):
     """``lost`` is inferred from "the owner's pid is not alive"; a terminal
     result from the owner itself is direct evidence and outranks it. Refusing

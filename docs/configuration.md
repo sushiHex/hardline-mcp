@@ -200,16 +200,21 @@ reaches every `gh` child.
 can see different PRs while it moves. `github_snapshot(ref)` collects once and
 returns a `snapshot_id`; every call given that id receives the same evidence.
 Snapshots are content addressed (`snapshot_id` is the SHA-256 of the canonical
-evidence), kept 24 hours after last use, and pruned opportunistically when a
-new one is written. They are private repository content on disk, protected by
+evidence), kept about 24 hours after last use, and pruned opportunistically
+when a new one is written. An expired id is an explicit error, never a silent
+re-collection. They are private repository content on disk, protected by
 the profile directory's permissions; set `HARDLINE_GITHUB_SNAPSHOT_DIR=""` to
 keep nothing (a reference still works for its own call).
 
 **Coverage.** Every changed file is listed. A patch is shown whole, cut at 40,000
 characters, or withheld with its reason: `omitted_by_github`,
 `excluded_by_caller`, `over_budget`, `rename_only`, or `no_textual_diff` (binary
-or empty; GitHub does not say which). The result's `github` object reports
-`coverage`. When it is `"partial"`, the reviewer was told to limit its verdict
+or empty; GitHub does not say which). `HARDLINE_GITHUB_MAX_CHARS` caps the whole
+text: patches get what the listing leaves, and a listing too long to fit fails
+the call. Coverage is also partial when GitHub's count of changed files is
+missing or differs from the files it listed (its file list stops at 3,000).
+The result's `github` object reports `coverage`. When it is `"partial"`, the
+reviewer was told to limit its verdict
 to what it saw, and **the review must not be treated as approval of the whole
 PR**. Hardline cannot enforce that on the caller.
 
