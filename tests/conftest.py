@@ -89,17 +89,29 @@ def _no_ambient_parent_lane(monkeypatch):
     monkeypatch.setattr(adapters, "_session_anchor", [{"lane": "", "agent": ""}])
 
 
-@pytest.fixture(autouse=True)
-def _no_codex_mcp_listing(monkeypatch):
-    """Default every test to a Codex whose config defines no MCP servers.
+_LIVE_OPT_INS = ("HARDLINE_LIVE_TESTS", "HARDLINE_LIVE_WATCH", "HARDLINE_TEST_SPAWN")
 
-    Every ask_codex asks the real CLI which servers to disable (#42). Left in
-    place, that would run `codex mcp list` from the test suite and shift every
-    captured command by one. The isolation tests restore the real function.
+
+@pytest.fixture(autouse=True)
+def _no_codex_isolation_probes(monkeypatch):
+    """Default every test to a Codex with the required features and no servers.
+
+    Every ask_codex asks the real CLI what to disable (#42). Left in place,
+    that would run `codex features list` / `codex mcp list` from the test
+    suite and shift every captured command. The isolation tests restore the
+    real functions; opted-in live tests keep them, so real children launched
+    from the suite are isolated for real.
     """
+    if any(os.environ.get(name) == "1" for name in _LIVE_OPT_INS):
+        return
     from hardline_mcp import adapters
 
-    monkeypatch.setattr(adapters, "_codex_mcp_servers", lambda env, cwd: [])
+    monkeypatch.setattr(
+        adapters, "_codex_features", lambda exe: frozenset(adapters._CODEX_REQUIRED_FEATURES)
+    )
+    monkeypatch.setattr(
+        adapters, "_codex_mcp_servers", lambda env, cwd, on_spawn=None: ([], {"ok": True})
+    )
 
 
 @pytest.fixture
