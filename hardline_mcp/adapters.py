@@ -50,7 +50,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import procid
+from . import github_context, procid
 
 
 def _codex_bin_root() -> Path:
@@ -739,6 +739,7 @@ def _run_cmd(
     timeout_s: int = _TIMEOUT_S,
     capture_failed_output: bool = False,
     on_spawn: "Callable[[int], None] | None" = None,
+    stdin_text: str | None = None,
 ) -> dict:
     """Run argv, capturing text output. Never raises — every failure mode is
     mapped to ``{"ok": False, "error": ...}`` so one dead target can't crash
@@ -748,12 +749,16 @@ def _run_cmd(
     job can record it and a cancel from another process can reach a run this
     one is blocked on.
 
-    ``stdin=DEVNULL``: hardline-mcp is itself a stdio MCP server, so its stdin
-    is the JSON-RPC pipe to the host agent. A spawned child must not inherit
-    it — a child that reads stdin would steal protocol bytes. ``encoding``/
-    ``errors``: agent output is often non-ASCII (emoji, box-drawing); decode
-    as UTF-8 and replace undecodable bytes rather than crash on the platform
-    default codec (cp1252 on Windows)."""
+    stdin is never inherited: hardline-mcp is itself a stdio MCP server, so
+    its stdin is the JSON-RPC pipe to the host agent, and a child that read it
+    would steal protocol bytes. It is ``DEVNULL``, or - when ``stdin_text`` is
+    given - a pipe of its own carrying exactly that text, written through
+    ``communicate`` (no deadlock against the output pipes) with newline
+    translation off: in text mode Windows would turn every ``\\n`` into
+    ``\\r\\n``, and the child would receive bytes that no longer match what the
+    caller hashed. ``encoding``/``errors``: agent output is often non-ASCII
+    (emoji, box-drawing); decode as UTF-8 and replace undecodable bytes rather
+    than crash on the platform default codec (cp1252 on Windows)."""
     started = time.monotonic()
     try:
         # Popen rather than run(): the caller needs the child's pid to record
@@ -765,7 +770,7 @@ def _run_cmd(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -773,6 +778,8 @@ def _run_cmd(
             cwd=cwd,
             start_new_session=True,
         )
+        if stdin_text is not None:
+            proc.stdin.reconfigure(newline="\n")
     except FileNotFoundError:
         return {"ok": False, "error": f"command not found / not installed: {argv[0]!r}"}
     except OSError as e:
@@ -812,7 +819,7 @@ def _run_cmd(
             return response
 
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_s)
+        stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
         # Kill the TREE, not just the child. `claude`/`codex` are launchers
         # that spawn the real worker, so killing the recorded pid alone left
@@ -1131,6 +1138,125 @@ def _codex_isolation(
     return overrides, None
 
 
+class _GhCancelled(Exception):
+    """A ``gh`` child could not be claimed: the call was cancelled."""
+
+    def __init__(self, result: dict):
+        super().__init__(result.get("error"))
+        self.result = result
+
+
+def _gh_runner(timeout_s: int, on_spawn=None) -> "github_context.Runner":
+    """``gh`` as github_context needs it: github.com only, never prompting, one
+    deadline across every page, and every child under ``on_spawn`` - the same
+    claim the reviewer spawns under, so ``job_cancel`` reaches collection too.
+    """
+    deadline = time.monotonic() + timeout_s
+    env = dict(os.environ, GH_HOST="github.com", GH_PROMPT_DISABLED="1", NO_COLOR="1")
+    exe = shutil.which("gh") or "gh"
+
+    def run(argv: list) -> dict:
+        remaining = math.ceil(deadline - time.monotonic())
+        if remaining <= 0:
+            return {"ok": False, "error": f"HARDLINE_GITHUB_TIMEOUT_S ({timeout_s}s) spent"}
+        result = _run_cmd([exe, *argv], env=env, timeout_s=remaining, on_spawn=on_spawn)
+        if result.get("cancelled"):
+            raise _GhCancelled(result)
+        return result
+
+    return run
+
+
+def _github_limits() -> tuple[int, int, int]:
+    """``(timeout_s, delivery_max_chars, snapshot_max_bytes)``; ValueError if misset."""
+    return (
+        positive_int_env("HARDLINE_GITHUB_TIMEOUT_S", _GITHUB_TIMEOUT_S, unit="seconds"),
+        positive_int_env(
+            "HARDLINE_GITHUB_MAX_CHARS", github_context.DELIVERY_BUDGET, unit="characters"
+        ),
+        positive_int_env(
+            "HARDLINE_GITHUB_SNAPSHOT_MAX_BYTES", github_context.SNAPSHOT_MAX, unit="bytes"
+        ),
+    )
+
+
+def _github_failure(github: str, exc: Exception) -> dict:
+    return {"ok": False, "error": f"github: {exc}", "github": {"requested": github}}
+
+
+def github_snapshot(github: str, exclude: list | None = None, on_spawn=None) -> dict:
+    """Collect (or load) a snapshot and describe it, without starting a reviewer.
+
+    Two reviewers given the returned ``snapshot_id`` receive the same evidence;
+    two given the same reference may not, because a PR keeps moving.
+    """
+    error = _validate_github("github_snapshot", github, exclude, "none", None, False)
+    if error is not None:
+        return error
+    attachment, failure = _github_attachment(github, exclude, on_spawn)
+    if failure is not None:
+        return failure
+    summary = dict(attachment["summary"])
+    del summary["delivery_hash"]  # covers a one-off nonce: meaningless here
+    return {"ok": True, **summary}
+
+
+def _github_attachment(
+    github: str, exclude: list | None, on_spawn=None
+) -> tuple[dict | None, dict | None]:
+    """``(attachment, failure)``: the GitHub evidence one reviewer receives.
+
+    ``attachment`` holds the text for the child's stdin, the framing for its
+    system channel, and the ``summary`` its result carries. Collection runs
+    here, in the adapter, immediately before the reviewer spawns - so its
+    after-read of the head is also the last check of the pin.
+    """
+    try:
+        timeout_s, delivery_max, snapshot_max = _github_limits()
+    except ValueError as exc:
+        return None, {"ok": False, "error": str(exc)}
+    try:
+        snapshot = github_context.obtain(
+            github,
+            _gh_runner(timeout_s, on_spawn),
+            directory=github_context.store_dir(),
+            max_bytes=snapshot_max,
+        )
+    except _GhCancelled as exc:
+        return None, exc.result
+    except github_context.CollectionError as exc:
+        return None, _github_failure(github, exc)
+    text, manifest = github_context.render(
+        snapshot.data, exclude=tuple(exclude or ()), total_budget=delivery_max
+    )
+    summary = {
+        "requested": github,
+        "snapshot_id": snapshot.id,
+        "stored": snapshot.stored,
+        "head_sha": snapshot.data["head"]["sha"],
+        "base_sha": snapshot.data["base"]["sha"],
+        **{
+            key: manifest[key]
+            for key in (
+                "coverage",
+                "not_shown",
+                "files_listed",
+                "changed_files",
+                "statuses",
+                "delivery_hash",
+                "delivery_bytes",
+            )
+        },
+    }
+    if snapshot.note:
+        summary["note"] = snapshot.note
+    return {
+        "stdin": text,
+        "framing": github_context.framing(manifest),
+        "summary": summary,
+    }, None
+
+
 # Recognized tokens for HARDLINE_ALLOW_WRITE, matched case-insensitively
 # after stripping whitespace. Anything else (a typo like "TRUE " -> fine,
 # but "enabled"/"tru" -> neither set) is a misconfiguration, not silently
@@ -1196,7 +1322,12 @@ def _validate_model(name: str, model: str | None) -> dict | None:
 
 
 def _is_plain_call(
-    model: str | None, effort: str, mode: str, workdir: str | None, write: bool
+    model: str | None,
+    effort: str,
+    mode: str,
+    workdir: str | None,
+    write: bool,
+    github: str | None = None,
 ) -> bool:
     """Whether this is the unqualified default call - no option set at all.
 
@@ -1210,7 +1341,59 @@ def _is_plain_call(
         and mode == "default"
         and workdir is None
         and not write
+        and github is None
     )
+
+
+_GITHUB_TOOLS = frozenset({"none", "read"})
+_GITHUB_EXCLUDE_MAX = 100
+_GITHUB_TIMEOUT_S = 60
+# Opt-in file tools for a Claude reviewer holding GitHub evidence. --restricted
+# confines them to the working directory (measured: Read of an absolute path
+# outside it was refused); symlinks and junctions were not measured.
+_CLAUDE_GITHUB_READ_TOOLS = ["--restricted", "--tools", "Read,Grep,Glob"]
+
+
+def _validate_github(
+    name: str,
+    github: str | None,
+    exclude: list | None,
+    tools: str,
+    workdir: str | None,
+    write: bool,
+) -> dict | None:
+    """The ``github`` options' own rules; None when they hold."""
+
+    def refuse(message: str) -> dict:
+        return {"ok": False, "error": f"{name} {message}"}
+
+    if github is None:
+        if exclude or tools != "none":
+            return refuse("github_exclude and github_tools require github")
+        return None
+    try:
+        github_context.parse(github if isinstance(github, str) else "")
+    except ValueError as exc:
+        return refuse(str(exc))
+    if exclude is not None and (
+        not isinstance(exclude, list)
+        or len(exclude) > _GITHUB_EXCLUDE_MAX
+        or not all(isinstance(p, str) and p.strip() for p in exclude)
+    ):
+        return refuse(
+            f"github_exclude must be a list of at most {_GITHUB_EXCLUDE_MAX} non-empty glob strings"
+        )
+    if tools not in _GITHUB_TOOLS:
+        return refuse(f"github_tools must be one of {sorted(_GITHUB_TOOLS)}")
+    if tools == "read" and name != "Claude":
+        return refuse("github_tools='read' is Claude-only: Codex keeps its read-only shell")
+    if tools == "read" and workdir is None:
+        return refuse("github_tools='read' requires workdir, the only directory it may read")
+    if write:
+        # The evidence is text third parties wrote. A reviewer holding it must
+        # not also hold write access that an instruction hidden in it could use.
+        return refuse("cannot combine github evidence with write mode")
+    return None
 
 
 def _validate_workdir_write(
@@ -1270,6 +1453,9 @@ def validate_request(
     mode: str,
     workdir: str | None,
     write: bool,
+    github: str | None = None,
+    github_exclude: list | None = None,
+    github_tools: str = "none",
 ) -> tuple[dict | None, str | None]:
     """Validate invocation options without starting work; resolve its directory.
 
@@ -1292,6 +1478,9 @@ def validate_request(
             "error": f"unsupported {name} mode {mode!r}; expected one of {sorted(modes)}",
         }, None
     error, resolved = _validate_workdir_write(name, mode, workdir, write)
+    error = error or _validate_github(
+        name, github, github_exclude, github_tools, workdir, write
+    )
     return error or _validate_model(name, model), resolved
 
 
@@ -1725,6 +1914,9 @@ def ask_codex(
     write: bool = False,
     on_spawn: "Callable[[int], None] | None" = None,
     resolve_model: bool = True,
+    github: str | None = None,
+    github_exclude: list | None = None,
+    github_tools: str = "none",
 ) -> dict:
     """Query Codex with explicit routing and optional structured telemetry.
 
@@ -1749,9 +1941,23 @@ def ask_codex(
     environment (see ``_write_enabled``; an unrecognized value fails loud
     rather than silently behaving as disabled) - omitted, Codex stays
     read-only exactly as before.
+
+    ``github`` (``"owner/repo#123"``, ``"owner/repo#123@<head sha>"`` or a
+    snapshot id) attaches that pull request's evidence, collected here with
+    the host's ``gh`` and piped to the child's stdin; see ``_github_attachment``.
+    The child then also runs without web search, and with no ``workdir`` in an
+    empty directory rather than hardline's own.
     """
     error, workdir = validate_request(
-        "codex", model=model, effort=effort, mode=mode, workdir=workdir, write=write
+        "codex",
+        model=model,
+        effort=effort,
+        mode=mode,
+        workdir=workdir,
+        write=write,
+        github=github,
+        github_exclude=github_exclude,
+        github_tools=github_tools,
     )
     if error is not None:
         return error
@@ -1766,6 +1972,8 @@ def ask_codex(
         workdir=workdir,
         write=write,
         on_spawn=on_spawn,
+        github=github,
+        github_exclude=github_exclude,
     )
     if resolution is not None:
         # On failure too: "Codex rejected gpt-6-astra" needs to say that the
@@ -1788,6 +1996,8 @@ def _ask_codex_validated(
     workdir: str | None,
     write: bool,
     on_spawn: "Callable[[int], None] | None",
+    github: str | None = None,
+    github_exclude: list | None = None,
 ) -> dict:
     argv = _prefix_for("codex") + ["--ephemeral"]
     # Before anything is spawned, isolation probes included: an invalid timeout
@@ -1798,7 +2008,7 @@ def _ask_codex_validated(
         return {"ok": False, "error": str(exc)}
     # Resolved once: the executable that is probed is the executable launched.
     exe = argv[0]
-    if _is_plain_call(model, effort, mode, workdir, write):
+    if _is_plain_call(model, effort, mode, workdir, write, github):
         isolation, refusal = _codex_isolation(exe, None, None, on_spawn)
         if refusal is not None:
             return refusal
@@ -1807,6 +2017,41 @@ def _ask_codex_validated(
             argv + _CODEX_READONLY_SANDBOX + isolation + ["--", prompt],
             on_spawn=on_spawn,
         )
+    attachment = None
+    if github is not None:
+        attachment, failure = _github_attachment(github, github_exclude, on_spawn)
+        if failure is not None:
+            return failure
+    result = _ask_codex_structured(
+        prompt,
+        argv,
+        model=model,
+        effort=effort,
+        mode=mode,
+        workdir=workdir,
+        write=write,
+        on_spawn=on_spawn,
+        attachment=attachment,
+    )
+    if attachment is not None:
+        result["github"] = attachment["summary"]
+    return result
+
+
+def _ask_codex_structured(
+    prompt: str,
+    argv: list[str],
+    *,
+    model: str | None,
+    effort: str,
+    mode: str,
+    workdir: str | None,
+    write: bool,
+    on_spawn: "Callable[[int], None] | None",
+    attachment: dict | None,
+) -> dict:
+    """The telemetry path; ``argv`` is the resolved ``codex exec --ephemeral``."""
+    exe = argv[0]
     if model is not None:
         argv += ["--model", model]
     argv.append("--json")
@@ -1845,9 +2090,28 @@ def _ask_codex_validated(
             "read-only",
             "-C",
             run_cwd,
+        ]
+    instructions = []
+    if mode == "advisory":
+        instructions.append(_CODEX_ADVISORY_DEVELOPER_INSTRUCTIONS)
+    if attachment is not None:
+        # Evidence from GitHub, so no reaching back out to the web for more;
+        # and no workdir means nothing local to read - not hardline's checkout.
+        argv += ["-c", 'web_search="disabled"']
+        if run_cwd is None:
+            try:
+                neutral_root = tempfile.mkdtemp(prefix="hardline-mcp-codex-")
+            except OSError as exc:
+                return {"ok": False, "error": f"failed to create a neutral directory: {exc}"}
+            run_cwd = neutral_root
+            argv += ["-C", run_cwd, "--skip-git-repo-check"]
+        instructions.append(attachment["framing"])
+    if instructions:
+        # Replaces any configured developer_instructions for this call: the
+        # framing must reach the system channel, and Codex has no append.
+        argv += [
             "-c",
-            "developer_instructions="
-            + json.dumps(_CODEX_ADVISORY_DEVELOPER_INSTRUCTIONS),
+            "developer_instructions=" + _toml_basic_string("\n\n".join(instructions)),
         ]
     try:
         # Every mode, write and advisory included: a write-enabled child that
@@ -1864,6 +2128,7 @@ def _ask_codex_validated(
             cwd=run_cwd,
             capture_failed_output=True,
             on_spawn=on_spawn,
+            stdin_text=attachment["stdin"] if attachment is not None else None,
         )
     finally:
         if neutral_root:
@@ -2230,6 +2495,9 @@ def ask_claude(
     workdir: str | None = None,
     write: bool = False,
     on_spawn: "Callable[[int], None] | None" = None,
+    github: str | None = None,
+    github_exclude: list | None = None,
+    github_tools: str = "none",
 ) -> dict:
     """Query Claude Code with optional model/effort selection and telemetry.
 
@@ -2270,9 +2538,22 @@ def ask_claude(
     high default effort this is a quieter, cheaper answer than the same call
     made before - pass ``effort`` explicitly when that matters, since an
     explicit value is honoured either way.
+
+    ``github`` attaches a pull request's evidence as for ``ask_codex``. The
+    reviewer then has NO tools, so nothing in the evidence can make it open a
+    local file; ``github_tools="read"`` grants Read/Grep/Glob confined to
+    ``workdir`` instead.
     """
     error, workdir = validate_request(
-        "claude", model=model, effort=effort, mode=mode, workdir=workdir, write=write
+        "claude",
+        model=model,
+        effort=effort,
+        mode=mode,
+        workdir=workdir,
+        write=write,
+        github=github,
+        github_exclude=github_exclude,
+        github_tools=github_tools,
     )
     if error is not None:
         return error
@@ -2285,7 +2566,7 @@ def ask_claude(
     # below, same as any other explicit model selection - "omitted" and
     # "happens to equal Claude's own current default" are different caller
     # intents.
-    if _is_plain_call(model, effort, mode, workdir, write):
+    if _is_plain_call(model, effort, mode, workdir, write, github):
         return _run_agent_cmd(
             "claude",
             _prefix_for("claude")
@@ -2299,7 +2580,44 @@ def ask_claude(
             ],
             on_spawn=on_spawn,
         )
+    try:
+        _timeout_for("claude")  # a configuration error, reported before gh runs
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    attachment = None
+    if github is not None:
+        attachment, failure = _github_attachment(github, github_exclude, on_spawn)
+        if failure is not None:
+            return failure
+    result = _ask_claude_structured(
+        prompt,
+        model=model,
+        effort=effort,
+        mode=mode,
+        workdir=workdir,
+        write=write,
+        on_spawn=on_spawn,
+        attachment=attachment,
+        github_tools=github_tools,
+    )
+    if attachment is not None:
+        result["github"] = attachment["summary"]
+    return result
 
+
+def _ask_claude_structured(
+    prompt: str,
+    *,
+    model: str | None,
+    effort: str,
+    mode: str,
+    workdir: str | None,
+    write: bool,
+    on_spawn: "Callable[[int], None] | None",
+    attachment: dict | None,
+    github_tools: str,
+) -> dict:
+    """The stream-json telemetry path of ``ask_claude``."""
     argv = _prefix_for("claude")
     if model is not None:
         argv += ["--model", model]
@@ -2326,15 +2644,30 @@ def ask_claude(
                 "ok": False,
                 "error": f"failed to create advisory temporary directory: {exc}",
             }
+        system_prompt = _CLAUDE_ADVISORY_SYSTEM_PROMPT
+        if attachment is not None:
+            system_prompt += "\n\n" + attachment["framing"]
         argv += [
             "--safe-mode",
             "--tools",
             "",
             "--disable-slash-commands",
             "--system-prompt",
-            _CLAUDE_ADVISORY_SYSTEM_PROMPT,
+            system_prompt,
         ]
         run_cwd = neutral_cwd
+    elif attachment is not None:
+        # Zero tools unless reads were asked for, and then only confined ones:
+        # the evidence is third-party text, and a reviewer that can open any
+        # local file can be talked into quoting one. Measured: `--tools ""`
+        # starts Claude with "tools":[].
+        argv += (
+            _CLAUDE_NO_MCP
+            + _CLAUDE_NO_HOST_SETTINGS
+            + ["--disallowedTools", _CLAUDE_READONLY_DENIED_TOOLS]
+            + (_CLAUDE_GITHUB_READ_TOOLS if github_tools == "read" else ["--tools", ""])
+            + ["--append-system-prompt", attachment["framing"]]
+        )
     elif write:
         # No settings stripping here on purpose - see _CLAUDE_NO_HOST_SETTINGS.
         # This is the mode that is supposed to write, so the host's hooks and
@@ -2358,6 +2691,7 @@ def ask_claude(
             cwd=run_cwd,
             capture_failed_output=True,
             on_spawn=on_spawn,
+            stdin_text=attachment["stdin"] if attachment is not None else None,
         )
     finally:
         if neutral_cwd:

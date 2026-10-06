@@ -879,5 +879,326 @@
       "tests/test_codex_isolation.py::test_an_invalid_timeout_fails_before_any_probe[plain]",
       "tests/test_codex_isolation.py::test_an_invalid_timeout_fails_before_any_probe[telemetry]"
     ]
+  },
+  "github-forces-structured-path": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        and github is None\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_review.py::test_a_claude_reviewer_has_no_tools_at_all",
+      "tests/test_github_review.py::test_a_codex_reviewer_gets_the_evidence_on_stdin_and_no_web"
+    ]
+  },
+  "github-stdin-newline-translation-off": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            proc.stdin.reconfigure(newline=\"\\n\")\n",
+    "after": "            pass\n",
+    "tests": [
+      "tests/test_github_review.py::test_a_claude_reviewer_has_no_tools_at_all"
+    ]
+  },
+  "github-codex-stdin-delivered": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            stdin_text=attachment[\"stdin\"] if attachment is not None else None,\n        )\n    finally:\n        if neutral_root:",
+    "after": "        )\n    finally:\n        if neutral_root:",
+    "tests": [
+      "tests/test_github_review.py::test_a_codex_reviewer_gets_the_evidence_on_stdin_and_no_web"
+    ]
+  },
+  "github-claude-stdin-delivered": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            stdin_text=attachment[\"stdin\"] if attachment is not None else None,\n        )\n    finally:\n        if neutral_cwd:",
+    "after": "        )\n    finally:\n        if neutral_cwd:",
+    "tests": [
+      "tests/test_github_review.py::test_a_claude_reviewer_has_no_tools_at_all"
+    ]
+  },
+  "github-codex-web-search-disabled": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        argv += [\"-c\", 'web_search=\"disabled\"']\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_review.py::test_a_codex_reviewer_gets_the_evidence_on_stdin_and_no_web"
+    ]
+  },
+  "github-codex-neutral-directory": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if run_cwd is None:\n            try:\n                neutral_root",
+    "after": "        if False:\n            try:\n                neutral_root",
+    "tests": [
+      "tests/test_github_review.py::test_a_codex_reviewer_without_workdir_runs_in_an_empty_directory"
+    ]
+  },
+  "github-codex-framing-in-developer-instructions": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        instructions.append(attachment[\"framing\"])\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_review.py::test_a_codex_reviewer_gets_the_evidence_on_stdin_and_no_web",
+      "tests/test_github_review.py::test_a_patch_github_omitted_is_partial_and_the_reviewer_is_told"
+    ]
+  },
+  "github-claude-zero-tools": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "else [\"--tools\", \"\"])",
+    "after": "else [])",
+    "tests": [
+      "tests/test_github_review.py::test_a_claude_reviewer_has_no_tools_at_all"
+    ]
+  },
+  "github-claude-read-tools-restricted": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "_CLAUDE_GITHUB_READ_TOOLS = [\"--restricted\", \"--tools\", \"Read,Grep,Glob\"]",
+    "after": "_CLAUDE_GITHUB_READ_TOOLS = [\"--tools\", \"Read,Grep,Glob\"]",
+    "tests": [
+      "tests/test_github_review.py::test_opt_in_claude_reads_are_confined_to_the_workdir"
+    ]
+  },
+  "github-claude-framing-appended": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            + [\"--append-system-prompt\", attachment[\"framing\"]]\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_review.py::test_a_claude_reviewer_has_no_tools_at_all"
+    ]
+  },
+  "github-claude-advisory-framing": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            system_prompt += \"\\n\\n\" + attachment[\"framing\"]\n",
+    "after": "            pass\n",
+    "tests": [
+      "tests/test_github_review.py::test_advisory_claude_carries_the_framing_in_its_system_prompt"
+    ]
+  },
+  "github-codex-result-summary": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        attachment=attachment,\n    )\n    if attachment is not None:\n        result[\"github\"] = attachment[\"summary\"]",
+    "after": "        attachment=attachment,\n    )\n    if attachment is not None:\n        pass",
+    "tests": [
+      "tests/test_github_review.py::test_a_codex_reviewer_gets_the_evidence_on_stdin_and_no_web"
+    ]
+  },
+  "github-claude-result-summary": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        github_tools=github_tools,\n    )\n    if attachment is not None:\n        result[\"github\"] = attachment[\"summary\"]",
+    "after": "        github_tools=github_tools,\n    )\n    if attachment is not None:\n        pass",
+    "tests": [
+      "tests/test_github_review.py::test_a_claude_reviewer_has_no_tools_at_all"
+    ]
+  },
+  "github-gh-host-forced": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "GH_HOST=\"github.com\", ",
+    "after": "",
+    "tests": [
+      "tests/test_github_review.py::test_gh_runs_against_github_com_without_prompting"
+    ]
+  },
+  "github-one-deadline": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        remaining = math.ceil(deadline - time.monotonic())",
+    "after": "        remaining = timeout_s",
+    "tests": [
+      "tests/test_github_review.py::test_the_deadline_is_shared_by_every_gh_call"
+    ]
+  },
+  "github-gh-cancel-propagates": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if result.get(\"cancelled\"):\n            raise _GhCancelled(result)\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_review.py::test_a_cancel_during_collection_stops_the_call"
+    ]
+  },
+  "github-options-require-github": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if exclude or tools != \"none\":\n            return refuse(",
+    "after": "        if False:\n            return refuse(",
+    "tests": [
+      "tests/test_github_review.py::test_invalid_github_options_spawn_nothing[exclude-alone]",
+      "tests/test_github_review.py::test_invalid_github_options_spawn_nothing[tools-alone]"
+    ]
+  },
+  "github-read-tools-claude-only": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if tools == \"read\" and name != \"Claude\":",
+    "after": "    if False:",
+    "tests": [
+      "tests/test_github_review.py::test_invalid_github_options_spawn_nothing[read-for-codex]"
+    ]
+  },
+  "github-read-tools-need-workdir": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if tools == \"read\" and workdir is None:",
+    "after": "    if False:",
+    "tests": [
+      "tests/test_github_review.py::test_invalid_github_options_spawn_nothing[read-without-workdir]"
+    ]
+  },
+  "github-refuses-write": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if write:\n        # The evidence is text",
+    "after": "    if False:\n        # The evidence is text",
+    "tests": [
+      "tests/test_github_review.py::test_invalid_github_options_spawn_nothing[codex-write]",
+      "tests/test_github_review.py::test_invalid_github_options_spawn_nothing[claude-write]"
+    ]
+  },
+  "github-forward-reserve-guard": {
+    "file": "hardline_mcp/server.py",
+    "before": "            on_spawn=on_spawn,\n            github=github,\n",
+    "after": "            on_spawn=on_spawn,\n",
+    "tests": [
+      "tests/test_github_forwarding.py::test_the_reserve_guard_forwards_github"
+    ]
+  },
+  "github-forward-plan-claude-kwargs": {
+    "file": "hardline_mcp/server.py",
+    "before": "        \"write\": write,\n        **github_kwargs,\n    }\n",
+    "after": "        \"write\": write,\n    }\n",
+    "tests": [
+      "tests/test_github_forwarding.py::test_direct_claude_forwards_read_tools",
+      "tests/test_github_forwarding.py::test_the_reserve_guard_forwards_github"
+    ]
+  },
+  "github-forward-redirect": {
+    "file": "hardline_mcp/server.py",
+    "before": "            \"write\": False,\n            **github_kwargs,\n",
+    "after": "            \"write\": False,\n",
+    "tests": [
+      "tests/test_github_forwarding.py::test_a_redirect_to_chatgpt_carries_the_evidence"
+    ]
+  },
+  "github-forward-async-worker": {
+    "file": "hardline_mcp/server.py",
+    "before": "                ),\n                **github_kwargs,\n            )",
+    "after": "                ),\n            )",
+    "tests": [
+      "tests/test_github_forwarding.py::test_async_codex_forwards_github_and_records_only_the_reference",
+      "tests/test_github_forwarding.py::test_async_claude_through_the_guard_forwards_github"
+    ]
+  },
+  "github-forward-async-claude-tool": {
+    "file": "hardline_mcp/server.py",
+    "before": "        github=ask_kwargs[\"github\"],\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_forwarding.py::test_async_claude_through_the_guard_forwards_github"
+    ]
+  },
+  "github-async-request-records-reference": {
+    "file": "hardline_mcp/server.py",
+    "before": "                **_github_request(github, github_exclude, github_tools),\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_forwarding.py::test_async_codex_forwards_github_and_records_only_the_reference"
+    ]
+  },
+  "github-async-admission-validates": {
+    "file": "hardline_mcp/server.py",
+    "before": "        write=write,\n        **github_kwargs,\n    )\n    if error:",
+    "after": "        write=write,\n    )\n    if error:",
+    "tests": [
+      "tests/test_github_forwarding.py::test_async_admission_rejects_bad_github_before_queueing"
+    ]
+  },
+  "github-audit-records-github": {
+    "file": "hardline_mcp/server.py",
+    "before": "    overrides.update(_github_request(github, github_exclude, github_tools))\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_forwarding.py::test_the_reserve_guard_forwards_github"
+    ]
+  },
+  "github-head-recheck": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    if moved:\n        changes",
+    "after": "    if False:\n        changes",
+    "tests": [
+      "tests/test_github_context.py::test_a_head_that_moves_during_collection_fails_it",
+      "tests/test_github_context.py::test_a_base_that_moves_during_collection_fails_it",
+      "tests/test_github_review.py::test_a_head_that_moves_starts_no_reviewer"
+    ]
+  },
+  "github-pin-checked": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    if ref.pin and not pull",
+    "after": "    if False and not pull",
+    "tests": [
+      "tests/test_github_context.py::test_a_pin_that_is_not_the_head_fails_collection"
+    ]
+  },
+  "github-never-overwrite": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    if target.exists():\n        _touch(target)\n        return\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_context.py::test_an_existing_snapshot_is_never_overwritten"
+    ]
+  },
+  "github-load-verifies-hash": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    if snapshot_id(data) != sid:",
+    "after": "    if False:",
+    "tests": [
+      "tests/test_github_context.py::test_a_corrupt_snapshot_is_refused"
+    ]
+  },
+  "github-prune-tolerates-locked": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "            removed += 1\n        except OSError:\n            continue",
+    "after": "            removed += 1\n        except ValueError:\n            continue",
+    "tests": [
+      "tests/test_github_context.py::test_pruning_survives_a_file_it_cannot_delete"
+    ]
+  },
+  "github-prune-keeps-fresh": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "            if now - path.stat().st_mtime < SNAPSHOT_TTL_S:\n                break",
+    "after": "            if False:\n                break",
+    "tests": [
+      "tests/test_github_context.py::test_pruning_removes_only_long_unused_snapshots"
+    ]
+  },
+  "github-omitted-patch-is-partial": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "NOT_SHOWN = (\"truncated\", \"omitted_by_github\", \"excluded_by_caller\", \"over_budget\")",
+    "after": "NOT_SHOWN = (\"truncated\", \"excluded_by_caller\", \"over_budget\")",
+    "tests": [
+      "tests/test_github_context.py::test_a_patch_github_omitted_makes_coverage_partial",
+      "tests/test_github_review.py::test_a_patch_github_omitted_is_partial_and_the_reviewer_is_told"
+    ]
+  },
+  "github-incomplete-listing-is-partial": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "coverage = \"partial\" if partial or not complete_listing else \"complete\"",
+    "after": "coverage = \"partial\" if partial else \"complete\"",
+    "tests": [
+      "tests/test_github_context.py::test_fewer_files_listed_than_changed_is_partial"
+    ]
+  },
+  "github-html-comments-stripped": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    body = _HTML_COMMENT.sub(\"\", snapshot.get(\"body\") or \"\").strip()",
+    "after": "    body = (snapshot.get(\"body\") or \"\").strip()",
+    "tests": [
+      "tests/test_github_context.py::test_html_comments_are_stripped_from_the_description"
+    ]
+  },
+  "github-rename-only-not-binary": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "        return \"rename_only\" if entry.get(\"status\") == \"renamed\" else \"no_textual_diff\"",
+    "after": "        return \"no_textual_diff\"",
+    "tests": [
+      "tests/test_github_context.py::test_every_missing_patch_has_its_recorded_cause"
+    ]
+  },
+  "github-partial-framing": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "        if manifest[\"coverage\"] == \"complete\"",
+    "after": "        if True",
+    "tests": [
+      "tests/test_github_context.py::test_framing_names_the_nonce_and_scopes_partial_reviews"
+    ]
   }
 }

@@ -50,11 +50,13 @@ class _FakePopen:
         self.stdout = None
         self.stderr = None
 
-    def communicate(self, timeout=None):
+    def communicate(self, input=None, timeout=None):
         # The timeout moved from run(timeout=) to communicate(timeout=), so
-        # record it where the assertions already look for it.
+        # record it where the assertions already look for it - and the stdin
+        # text beside it, the first time (a drain after a kill sends none).
         if self._calls:
             self._calls[-1]["kwargs"]["timeout"] = timeout
+            self._calls[-1]["kwargs"].setdefault("input", input)
         if self._exc is not None:
             exc, self._exc = self._exc, None  # raise once; the drain must not
             # With Popen, a TimeoutExpired from communicate() does NOT carry

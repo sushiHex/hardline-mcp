@@ -333,6 +333,7 @@ async def test_tool_roster_is_exactly_this():
         "ask_codex_async",
         "ask_claude",
         "ask_claude_async",
+        "github_snapshot",
     }
 
 
@@ -348,6 +349,8 @@ async def test_ask_codex_forwards_model_effort_mode_workdir_and_write(monkeypatc
         mode="default",
         workdir=None,
         write=False,
+        github=None,
+        github_exclude=None,
     ):
         captured.update(
             prompt=prompt,
@@ -356,6 +359,8 @@ async def test_ask_codex_forwards_model_effort_mode_workdir_and_write(monkeypatc
             mode=mode,
             workdir=workdir,
             write=write,
+            github=github,
+            github_exclude=github_exclude,
         )
         return {"ok": True, "reply": "reviewed", "usage": {"input_tokens": 10}}
 
@@ -366,6 +371,8 @@ async def test_ask_codex_forwards_model_effort_mode_workdir_and_write(monkeypatc
         model="gpt-5.6-terra",
         effort="xhigh",
         mode="advisory",
+        github="octo/repo#7",
+        github_exclude=["*.lock"],
     )
 
     assert result["ok"] is True
@@ -376,6 +383,8 @@ async def test_ask_codex_forwards_model_effort_mode_workdir_and_write(monkeypatc
         "mode": "advisory",
         "workdir": None,
         "write": False,
+        "github": "octo/repo#7",
+        "github_exclude": ["*.lock"],
     }
 
 
@@ -391,6 +400,9 @@ async def test_ask_claude_forwards_model_effort_and_mode(monkeypatch):
         mode="default",
         workdir=None,
         write=False,
+        github=None,
+        github_exclude=None,
+        github_tools="none",
     ):
         captured.update(
             prompt=prompt,
@@ -399,13 +411,21 @@ async def test_ask_claude_forwards_model_effort_and_mode(monkeypatch):
             mode=mode,
             workdir=workdir,
             write=write,
+            github=github,
+            github_exclude=github_exclude,
+            github_tools=github_tools,
         )
         return {"ok": True, "reply": "reviewed", "actual_model": "claude-fable-5"}
 
     monkeypatch.setattr(server.adapters, "ask_claude", fake_ask_claude)
 
     result = await server.ask_claude(
-        prompt="review this", model="fable", effort="xhigh", mode="advisory"
+        prompt="review this",
+        model="fable",
+        effort="xhigh",
+        mode="advisory",
+        github="octo/repo#7",
+        github_exclude=["*.lock"],
     )
 
     assert result["ok"] is True
@@ -417,6 +437,9 @@ async def test_ask_claude_forwards_model_effort_and_mode(monkeypatch):
         "mode": "advisory",
         "workdir": None,
         "write": False,
+        "github": "octo/repo#7",
+        "github_exclude": ["*.lock"],
+        "github_tools": "none",
     }
 
 
@@ -432,6 +455,9 @@ async def test_ask_claude_defaults_remain_backward_compatible(monkeypatch):
         mode="default",
         workdir=None,
         write=False,
+        github=None,
+        github_exclude=None,
+        github_tools="none",
     ):
         captured.update(
             prompt=prompt,
@@ -441,6 +467,7 @@ async def test_ask_claude_defaults_remain_backward_compatible(monkeypatch):
             workdir=workdir,
             write=write,
         )
+        assert (github, github_exclude, github_tools) == (None, None, "none")
         return {"ok": True, "reply": "old shape still works"}
 
     monkeypatch.setattr(server.adapters, "ask_claude", fake_ask_claude)
@@ -887,6 +914,9 @@ async def test_ask_codex_async_delivers_result_via_mailbox(monkeypatch, tmp_path
         workdir=None,
         write=False,
         on_spawn=None,
+        github=None,
+        github_exclude=None,
+        github_tools="none",
     ):
         return {"ok": True, "reply": f"handled: {prompt}"}
 
@@ -931,6 +961,9 @@ async def test_ask_codex_async_survives_adapter_exception(monkeypatch, tmp_path)
         workdir=None,
         write=False,
         on_spawn=None,
+        github=None,
+        github_exclude=None,
+        github_tools="none",
     ):
         raise RuntimeError("unexpected adapter failure")
 
@@ -1084,6 +1117,9 @@ async def test_ask_claude_async_delivers_result_via_mailbox(monkeypatch, tmp_pat
         workdir=None,
         write=False,
         on_spawn=None,
+        github=None,
+        github_exclude=None,
+        github_tools="none",
     ):
         return {"ok": True, "reply": f"handled: {prompt}"}
 
@@ -1616,7 +1652,7 @@ async def test_a_child_spawned_into_a_cancelled_job_is_killed_locally(
     class _FakeChild:
         pid = 4242
 
-        def communicate(self, timeout=None):
+        def communicate(self, input=None, timeout=None):
             # Recorded rather than raised: raising would land in the cleanup
             # path, which ALSO kills the tree, so the assertion below would
             # pass even when the failed claim was ignored.

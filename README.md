@@ -123,6 +123,10 @@ notice together. Retrieve the answer with `job_result`; use `job_cancel` to
 cancel queued or running work. Jobs interrupted by owner exit become `lost`
 and are not automatically resumed.
 
+A spawned reviewer cannot reach GitHub itself. Pass `github="owner/repo#123"`
+and Hardline collects the pull request with its own `gh` and hands it over; see
+[GitHub evidence for reviews](docs/configuration.md#github-evidence-for-reviews).
+
 Writes require both `write=True` and `HARDLINE_ALLOW_WRITE=1` in the MCP server's
 environment, plus an explicit existing `workdir`. Claude's default read controls
 are not a filesystem sandbox. Read [execution modes and write access](docs/configuration.md#execution-modes-and-write-access)
@@ -156,6 +160,7 @@ The client's MCP tool schema supplies arguments and defaults.
 | `server_info` | Inspect the running server and watcher command. |
 | `ask_hermes`, `ask_codex`, `ask_claude` | Start an agent CLI and wait for its answer. |
 | `ask_codex_async`, `ask_claude_async` | Submit a background job. |
+| `github_snapshot` | Collect a pull request once, for reviewers to share. |
 | `job_status`, `job_result` | Track a job and retrieve its answer. |
 | `job_cancel` | Cancel a job. |
 | `list_jobs` | Find recent or active jobs. |
@@ -165,7 +170,7 @@ The client's MCP tool schema supplies arguments and defaults.
 | Guide | Read it for |
 | --- | --- |
 | [Messaging and jobs](docs/messaging.md) | Addressing, ownership, recovery, and job lifecycle. |
-| [Configuration](docs/configuration.md) | CLI paths, limits, model options, writes, and quota routing. |
+| [Configuration](docs/configuration.md) | CLI paths, limits, model options, writes, GitHub evidence, and quota routing. |
 | [Inbox signals](docs/inbox-signals.md) | Claude Monitor and Codex thread setup, checks, and troubleshooting. |
 | [Development](docs/development.md) | Tests, mutation checks, and optional live acceptance. |
 | [Architecture](docs/architecture.md) | Design decisions, compatibility, and historical rationale. |
