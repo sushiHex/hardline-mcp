@@ -191,10 +191,16 @@ ask_claude(prompt="Attack this change.", github="owner/repo#123@<head sha>",
 
 `github` takes `owner/repo#N`, `owner/repo#N@<head sha>` (fails unless the head
 is that commit), or a `snapshot_id`. Collection reads the PR, its per-file diff
-(`gh api .../pulls/N/files --paginate --slurp`), and the PR again; a head or
-base that moved in between fails the call rather than mixing revisions. Only
-github.com is used (`GH_HOST` is forced), `gh` never prompts, and `job_cancel`
-reaches every `gh` child.
+(`gh api .../pulls/N/files?per_page=100 --paginate --slurp`, so `gh` must
+support `api --slurp`), and the PR again; a head or base that moved in between
+fails the call rather than mixing revisions. Only github.com is used (`GH_HOST`
+is forced), `gh` never prompts, and for an async job `job_cancel` reaches every
+`gh` child.
+
+The PR's base is shown as GitHub recorded it at the PR's last update; the base
+branch may have moved since. A reviewer that can read a local checkout (Codex
+with `workdir`, or Claude with `github_tools="read"`) is told the checkout may
+not be at the PR's head, and that the evidence is the PR.
 
 **One evidence set for several reviewers.** Two calls given the same reference
 can see different PRs while it moves. `github_snapshot(ref)` collects once and
@@ -202,21 +208,30 @@ returns a `snapshot_id`; every call given that id receives the same evidence.
 Snapshots are content addressed (`snapshot_id` is the SHA-256 of the canonical
 evidence), kept about 24 hours after last use, and pruned opportunistically
 when a new one is written. An expired id is an explicit error, never a silent
-re-collection. They are private repository content on disk, protected by
-the profile directory's permissions; set `HARDLINE_GITHUB_SNAPSHOT_DIR=""` to
-keep nothing (a reference still works for its own call).
+re-collection, and so is a snapshot written by a Hardline version with another
+snapshot schema. They are private repository content on disk, protected by
+the profile directory's permissions. `HARDLINE_GITHUB_SNAPSHOT_DIR` must be
+absolute; set it to `""` to keep nothing (a reference still works for its own
+call).
 
-**Coverage.** Every changed file is listed. A patch is shown whole, cut at 40,000
+**Coverage.** Every file GitHub lists is shown in the listing. A patch is shown whole, cut at 40,000
 characters, or withheld with its reason: `omitted_by_github`,
 `excluded_by_caller`, `over_budget`, `rename_only`, or `no_textual_diff` (binary
 or empty; GitHub does not say which). `HARDLINE_GITHUB_MAX_CHARS` caps the whole
 text: patches get what the listing leaves, and a listing too long to fit fails
 the call. Coverage is also partial when GitHub's count of changed files is
 missing or differs from the files it listed (its file list stops at 3,000).
-The result's `github` object reports `coverage`. When it is `"partial"`, the
-reviewer was told to limit its verdict
-to what it saw, and **the review must not be treated as approval of the whole
-PR**. Hardline cannot enforce that on the caller.
+`github_exclude` globs match case-sensitively, with `/` separators, on every
+host.
+
+The result's `github` object names the `pr`, its `snapshot_id`, head and base
+SHAs, and `coverage`, with the first 50 `not_shown` files (and
+`not_shown_total` past that). When `coverage` is `"partial"`, the reviewer was
+told to limit its verdict to what it saw, and **the review must not be treated
+as approval of the whole PR**. Hardline cannot enforce that on the caller. A
+reviewer that closes its stdin before accepting all of the evidence fails the
+call; `stdin_delivery: "unconfirmed"` means a process the reviewer started
+still holds its stdin.
 
 **The reviewer's isolation.**
 

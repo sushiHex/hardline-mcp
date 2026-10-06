@@ -1447,9 +1447,10 @@ async def ask_codex(
 async def github_snapshot(ref: str, exclude: list[str] | None = None) -> dict:
     """Collect a pull request once, so several reviewers see identical evidence.
 
-    ``ref`` is ``"owner/repo#123"`` or ``"owner/repo#123@<head sha>"``. Returns
-    ``snapshot_id`` with the head/base SHAs and the coverage a reviewer would
-    get under ``exclude``. Pass the id as ``github=`` to ``ask_codex`` /
+    ``ref`` is ``"owner/repo#123"`` or ``"owner/repo#123@<head sha>"`` (a
+    ``snapshot_id`` looks a stored one up again). Returns ``snapshot_id`` with
+    the PR, its head/base SHAs, and the coverage a reviewer would get under
+    ``exclude``. Pass the id as ``github=`` to ``ask_codex`` /
     ``ask_claude`` (or their async forms): the same id is the same bytes,
     which two calls given the same ref cannot promise while the PR moves.
     Snapshots are kept on disk for 24 h after last use (``stored`` says

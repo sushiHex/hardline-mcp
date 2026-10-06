@@ -10,12 +10,17 @@
 
 1. **No separate pin recheck.** Collection runs in the adapter immediately before the reviewer spawns, and it already re-reads the PR after the file list. That after-read is the recheck; a further call would only re-measure a gap of milliseconds. A snapshot *id* is deliberately not rechecked: it names fixed evidence, labelled with its `head_sha`.
 2. **`write=True` with `github` is refused.** A reviewer holding third-party text must not also hold write access that an instruction hidden in it could use.
-3. **One result object, `github`,** instead of a top-level `github_coverage`. It carries `requested`, `snapshot_id`, `stored`, `head_sha`, `base_sha`, `coverage`, `not_shown`, `files_listed`, `changed_files`, `statuses`, `delivery_hash` and `delivery_bytes`. `delivery_hash` includes the per-call nonce, so two reviewers of one snapshot have different delivery hashes and the same `snapshot_id`.
+3. **One result object, `github`,** instead of a top-level `github_coverage`. It carries `requested`, `pr`, `snapshot_id`, `stored`, `head_sha`, `base_sha`, `coverage`, `not_shown` (the first 50, with `not_shown_total` past that), `files_listed`, `changed_files`, `statuses`, `delivery_hash` and `delivery_bytes`. `delivery_hash` includes the per-call nonce, so two reviewers of one snapshot have different delivery hashes and the same `snapshot_id`.
 4. **Budgets count characters.** The delivery cap is `HARDLINE_GITHUB_MAX_CHARS` (not `_BYTES`); the snapshot cap counts real bytes of the canonical JSON.
 5. **`github_tools` is Claude-only.** Codex keeps its read-only sandbox shell either way; `"read"` for Codex is rejected rather than silently meaningless.
 6. **Codex framing replaces any configured `developer_instructions`** for the call. Codex has no append form, and the framing must reach the system channel.
 7. **`GH_HOST=github.com` is forced** for every `gh` child, so an Enterprise default cannot redirect collection.
-8. **Stdin is not written through `communicate(input=...)`.** On Windows, CPython 3.10 and early 3.13 write that input synchronously before the timeout is armed, so a child that never reads could hold a worker past every deadline. The child's stdin is the read end of an `os.pipe()` that only the child holds; a daemon thread writes UTF-8 bytes to the write end after the spawn claim succeeds, and `communicate` only reads. Writing bytes also removes newline translation, so no `reconfigure` is needed. A completed write means the pipe accepted the bytes, not that the child read them; both CLIs were observed reading it live.
+8. **Stdin is not written through `communicate(input=...)`.** On Windows, CPython 3.10 and early 3.13 write that input synchronously before the timeout is armed, so a child that never reads could hold a worker past every deadline. The child's stdin is the read end of an `os.pipe()` that only the child holds; a daemon thread writes UTF-8 bytes to the write end after the spawn claim succeeds, and `communicate` only reads. Writing bytes also removes newline translation, so no `reconfigure` is needed. A completed write means the pipe accepted the bytes, not that the child read them; both CLIs were observed reading it live. A child that closes its stdin before accepting everything fails the call.
+9. **Codex isolation is #42's, not rev 4 §6's.** The default github path keeps the user's configuration (and default model) and disables every MCP server and connector the way #42 does, plus `web_search="disabled"`. It does not use `--ignore-user-config --disable apps`.
+10. **The snapshot stores GitHub's own fields, with a `schema` version.** What a missing patch means is decided only at render, and `load` refuses another schema. Several revisions of this code share one store indefinitely.
+11. **Not recorded:** the oversized-diff error fixture rev 4 §5 asked for. That path fails closed through `gh`'s exit code, but no real response backs it.
+
+Line references in the rev 4 section below are as of `a5271eb` and have since moved.
 
 Diff review by gpt-6-astra (2026-10-06) — adopted:
 - **Cancel raced child hand-offs** (`jobs.request_cancel`): it read `child_pid` before claiming the row, so a child recorded in between (the next `gh`, then the reviewer) was missed and the stale one reported dead. The child is now read after the claim. This predates #43 (the #42 probes hand off too) but #43 adds more hand-offs.
@@ -37,6 +42,27 @@ Verification pass by gpt-6-astra on the fixes — adopted:
 Not adopted from that pass:
 - **An `on_spawn` exception still counts as a claim.** This is a deliberate, older trade-off (`_run_cmd`: bookkeeping must not kill the run). The evidence goes only to the reviewer the caller asked for.
 - **A descendant that inherits stdin and never reads keeps the writer thread blocked until it exits.** It is a daemon thread holding one pipe end, and it doesn't hold up the call. Output pipes held by such descendants have the same limit for every hardline call, through `communicate`'s own reader threads.
+
+Final review by claude-fable-5-1 — adopted:
+- **Delivery is confirmed.** The writer records the bytes the pipe accepted. A reviewer that closed its stdin early fails the call instead of returning `ok` with a `delivery_hash` it never saw.
+- **The PR is named:** `pr` in the result, so a snapshot-id review says what it reviewed.
+- **Snapshot schema.** It is versioned and checked on load, and a misshapen snapshot is a `CollectionError`, not a `KeyError` out of the adapter.
+- **Checkouts and the base.** A reviewer that can read a checkout is told it may not be the PR head. The base is labelled as GitHub recorded it.
+- **Cancel's in-transaction read** now has a test that fails if the read moves after the commit.
+- **Exclusion globs** are `fnmatchcase`: the same coverage on Windows and POSIX.
+- **Declined finding A, reopened in part.** An `on_spawn` exception still lets the run continue, but the result now says `child_recorded: false` with a warning.
+- **Nits:**
+  - unused constants removed;
+  - the redundant `--disallowedTools` beside `--tools` removed;
+  - positional lists replaced by a dataclass;
+  - control characters in filenames escaped;
+  - `per_page=100`;
+  - `not_shown` capped;
+  - a relative snapshot directory refused;
+  - the cancel result names its request;
+  - weaker tests strengthened (one-evidence-set compares the delivered text; request rows hold only options).
+
+Declined: rewriting the budget as grant/assemble/revoke. The slack and the final check are one guarantee with a cheap proof: growth is bounded by 64 characters, and the slack is 100.
 
 Recorded, not adopted: a no-clobber publish for concurrent writers of one snapshot. Both write identical bytes, and a replace refused because the target is open counts as success. The `store` docstring now says that instead of "never overwrites". Retention is about 24 hours; a snapshot used in the instant before pruning unlinks it can still go, and the next call naming it gets an explicit "expired" error.
 

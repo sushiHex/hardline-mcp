@@ -790,6 +790,17 @@ def _run_cmd(
         os.close(stdin_pipe[0])
         stdin_pipe = (stdin_pipe[1],)
 
+    unrecorded = False
+
+    def tagged(response: dict) -> dict:
+        if unrecorded:
+            response["child_recorded"] = False
+            response["warning"] = (
+                f"the child (pid {proc.pid}) could not be recorded, so a cancel "
+                "could not have reached it"
+            )
+        return response
+
     if on_spawn is not None:
         # A False return means the caller could not claim this child - it was
         # cancelled in the window between Popen creating the process and the
@@ -800,7 +811,9 @@ def _run_cmd(
         try:
             claimed = on_spawn(proc.pid)
         except Exception:  # noqa: BLE001 - bookkeeping must not kill the run
-            claimed = True
+            # ...but must not be silent either: with no pid recorded, a cancel
+            # cannot reach this child, and would report success regardless.
+            claimed, unrecorded = True, True
         if claimed is False:
             _close_fds(stdin_pipe)  # nothing is written to an unclaimed child
             _kill_tree(proc)
@@ -824,14 +837,16 @@ def _run_cmd(
                 )
             return response
 
+    writer, fed = None, {}
     try:
         if stdin_pipe is not None:
-            threading.Thread(
+            writer = threading.Thread(
                 target=_feed_stdin,
-                args=(stdin_pipe[0], stdin_bytes),
+                args=(stdin_pipe[0], stdin_bytes, fed),
                 name="hardline-stdin",
                 daemon=True,
-            ).start()
+            )
+            writer.start()
             stdin_pipe = None  # the writer owns it now, and closes it
         stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
@@ -874,7 +889,7 @@ def _run_cmd(
             response["partial_stdout"] = _raw_evidence(partial_out)
         if partial_err:
             response["partial_stderr"] = _raw_evidence(partial_err)
-        return response
+        return tagged(response)
     except BaseException as e:  # noqa: BLE001 - see below; re-raised if unexpected
         # An exception out of communicate() (OSError, or a KeyboardInterrupt
         # landing mid-read) previously returned with the child still running
@@ -892,27 +907,56 @@ def _run_cmd(
     elapsed = round(time.monotonic() - started, 1)
     stdout = stdout or ""
     stderr = stderr or ""
-    if proc.returncode != 0:
-        detail = (stderr or stdout).strip()
+    undelivered = _stdin_shortfall(writer, fed, stdin_bytes)
+    if proc.returncode != 0 or undelivered:
+        # A reply to a prompt whose evidence never arrived is not a reply to
+        # the question asked, however well formed: it fails like an exit.
+        detail = undelivered or f"exit {proc.returncode}: {(stderr or stdout).strip()}"
         response = {
             "ok": False,
-            "error": f"exit {proc.returncode}: {detail}",
+            "error": detail,
             "exit_code": proc.returncode,
             "elapsed_s": elapsed,
             "timeout_s": timeout_s,
         }
         if capture_failed_output and stdout:
             response["_stdout"] = stdout.strip()
-        return response
-    return {
+        return tagged(response)
+    response = {
         "ok": True,
         "reply": stdout.strip(),
         "elapsed_s": elapsed,
         "timeout_s": timeout_s,
     }
+    if writer is not None and writer.is_alive():
+        # A descendant inherited stdin and has not finished reading it.
+        response["stdin_delivery"] = "unconfirmed"
+    return tagged(response)
 
 
-def _feed_stdin(fd: int, data: bytes) -> None:
+def _stdin_shortfall(writer, fed: dict, data: bytes | None) -> str | None:
+    """Why the child's stdin was not fully accepted, or None.
+
+    Accepted means the pipe took the bytes, not that the child read them all;
+    but a child that closed its stdin early is caught. A writer still running
+    after a short wait is a descendant holding the pipe: unconfirmed, not
+    failed.
+    """
+    if writer is None:
+        return None
+    writer.join(1)
+    if writer.is_alive():
+        return None
+    sent = fed.get("sent", 0)
+    if sent < len(data):
+        return (
+            f"the child closed its stdin after accepting {sent} of {len(data)} bytes "
+            f"({fed.get('error') or 'no error'}); its reply was not given all the input"
+        )
+    return None
+
+
+def _feed_stdin(fd: int, data: bytes, fed: dict) -> None:
     """Write ``data`` to a child's stdin pipe, then close it. Never raises.
 
     On a thread of its own, never through ``communicate(input=...)``: on
@@ -923,12 +967,17 @@ def _feed_stdin(fd: int, data: bytes) -> None:
     nothing between the caller's hash and the child can translate newlines.
     A descendant that inherits stdin and never reads it keeps this daemon
     thread waiting until that descendant exits; the call itself is not held.
+    ``fed`` receives ``sent`` (bytes the pipe accepted) and any ``error``.
     """
+    sent = 0
     try:
-        with open(fd, "wb") as pipe:
-            pipe.write(data)
-    except OSError:
-        pass  # the child exited or was killed without reading it all
+        while sent < len(data):
+            sent += os.write(fd, data[sent:sent + 65536])
+    except OSError as exc:  # the child exited or was killed without reading it all
+        fed["error"] = str(exc)
+    finally:
+        fed["sent"] = sent
+        _close_fds((fd,))
 
 
 def _close_fds(fds) -> None:
@@ -1243,8 +1292,11 @@ def github_snapshot(github: str, exclude: list | None = None, on_spawn=None) -> 
     return {"ok": True, **summary}
 
 
+_GITHUB_NOT_SHOWN_LISTED = 50  # results and job rows stay small; the reviewer sees all
+
+
 def _github_attachment(
-    github: str, exclude: list | None, on_spawn=None
+    github: str, exclude: list | None, on_spawn=None, *, local_checkout: bool = False
 ) -> tuple[dict | None, dict | None]:
     """``(attachment, failure)``: the GitHub evidence one reviewer receives.
 
@@ -1252,6 +1304,7 @@ def _github_attachment(
     system channel, and the ``summary`` its result carries. Collection runs
     here, in the adapter, immediately before the reviewer spawns - so its
     after-read of the head is also the last check of the pin.
+    ``local_checkout``: the reviewer can also read a working directory.
     """
     try:
         timeout_s, delivery_max, snapshot_max = _github_limits()
@@ -1268,33 +1321,31 @@ def _github_attachment(
             snapshot.data, exclude=tuple(exclude or ()), total_budget=delivery_max
         )
     except _GhCancelled as exc:
-        return None, exc.result
+        return None, {**exc.result, "github": {"requested": github}}
     except github_context.CollectionError as exc:
         return None, _github_failure(github, exc)
+    data, not_shown = snapshot.data, manifest["not_shown"]
     summary = {
         "requested": github,
+        # Named, not only hashed: a review given a snapshot id says which PR.
+        "pr": f"{data['repo']}#{data['number']}",
         "snapshot_id": snapshot.id,
         "stored": snapshot.stored,
-        "head_sha": snapshot.data["head"]["sha"],
-        "base_sha": snapshot.data["base"]["sha"],
+        "head_sha": data["head"]["sha"],
+        "base_sha": data["base"]["sha"],
+        "coverage": manifest["coverage"],
+        "not_shown": not_shown[:_GITHUB_NOT_SHOWN_LISTED],
+        **({"not_shown_total": len(not_shown)} if len(not_shown) > _GITHUB_NOT_SHOWN_LISTED else {}),
         **{
             key: manifest[key]
-            for key in (
-                "coverage",
-                "not_shown",
-                "files_listed",
-                "changed_files",
-                "statuses",
-                "delivery_hash",
-                "delivery_bytes",
-            )
+            for key in ("files_listed", "changed_files", "statuses", "delivery_hash", "delivery_bytes")
         },
     }
     if snapshot.note:
         summary["note"] = snapshot.note
     return {
         "stdin": text,
-        "framing": github_context.framing(manifest),
+        "framing": github_context.framing(manifest, local_checkout=local_checkout),
         "summary": summary,
     }, None
 
@@ -2061,7 +2112,10 @@ def _ask_codex_validated(
         )
     attachment = None
     if github is not None:
-        attachment, failure = _github_attachment(github, github_exclude, on_spawn)
+        # A Codex child always has its read-only shell, so any workdir is readable.
+        attachment, failure = _github_attachment(
+            github, github_exclude, on_spawn, local_checkout=workdir is not None
+        )
         if failure is not None:
             return failure
     result = _ask_codex_structured(
@@ -2628,7 +2682,9 @@ def ask_claude(
         return {"ok": False, "error": str(exc)}
     attachment = None
     if github is not None:
-        attachment, failure = _github_attachment(github, github_exclude, on_spawn)
+        attachment, failure = _github_attachment(
+            github, github_exclude, on_spawn, local_checkout=github_tools == "read"
+        )
         if failure is not None:
             return failure
     result = _ask_claude_structured(
@@ -2706,7 +2762,6 @@ def _ask_claude_structured(
         argv += (
             _CLAUDE_NO_MCP
             + _CLAUDE_NO_HOST_SETTINGS
-            + ["--disallowedTools", _CLAUDE_READONLY_DENIED_TOOLS]
             + (_CLAUDE_GITHUB_READ_TOOLS if github_tools == "read" else ["--tools", ""])
             + ["--append-system-prompt", attachment["framing"]]
         )

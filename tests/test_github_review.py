@@ -271,8 +271,39 @@ def test_a_head_that_moves_starts_no_reviewer(world):
 def test_a_cancel_at_the_first_gh_call_stops_the_call(world):
     out = adapters.ask_codex("review", github=_ref("rename_only"), on_spawn=lambda pid: False)
     assert out.get("cancelled") is True
+    assert out.get("github", {}).get("requested") == _ref("rename_only")
     assert len(world.gh()) == 1, "nothing after a cancelled gh may start"
     assert world.reviewers() == []
+
+
+def test_a_reviewer_that_can_read_a_checkout_is_told_it_may_not_be_the_head(world, tmp_path):
+    adapters.ask_codex("review", github=_ref("rename_only"), workdir=str(tmp_path))
+    assert "local checkout" in _instructions(world.reviewer()["cmd"])
+    world.calls.clear()
+    adapters.ask_codex("review", github=_ref("rename_only"))
+    assert "local checkout" not in _instructions(world.reviewer()["cmd"])
+
+
+def test_a_long_not_shown_list_is_capped_in_the_result(world):
+    entries = [
+        {"filename": f"gen/{i}.bin", "status": "added", "additions": 1, "deletions": 0, "changes": 1}
+        for i in range(80)
+    ]
+    world.files = json.dumps([entries])
+    out = adapters.ask_codex("review", github=_ref("rename_only"))
+    assert len(out["github"]["not_shown"]) == adapters._GITHUB_NOT_SHOWN_LISTED
+    assert out["github"]["not_shown_total"] == 80
+
+
+def test_a_child_that_could_not_be_recorded_says_so():
+    def failing_bookkeeping(pid):
+        raise RuntimeError("database is locked")
+
+    out = adapters._run_cmd(
+        [sys.executable, "-c", "pass"], timeout_s=30, on_spawn=failing_bookkeeping
+    )
+    assert out.get("child_recorded") is False
+    assert "could not have reached it" in out.get("warning", "")
 
 
 @pytest.mark.parametrize("claimed", [1, 2], ids=["at-files", "at-recheck"])
@@ -303,7 +334,7 @@ def test_gh_runs_against_github_com_without_prompting(world, monkeypatch):
         assert env["GH_HOST"] == "github.com"
         assert env["GH_PROMPT_DISABLED"] == "1"
         assert call["kwargs"]["stdin"] is subprocess.DEVNULL
-        assert call["timeout"] <= 7, "one deadline across every gh call"
+        assert call["timeout"] <= 7, "no gh call may outlast HARDLINE_GITHUB_TIMEOUT_S"
 
 
 def test_the_deadline_is_shared_by_every_gh_call(monkeypatch):
@@ -325,13 +356,25 @@ def test_the_deadline_is_shared_by_every_gh_call(monkeypatch):
 
 
 def test_a_snapshot_id_gives_a_second_reviewer_the_same_evidence(world):
-    snap = adapters.github_snapshot(_ref("rename_only"))
-    assert snap["ok"] is True and snap["stored"] is True
+    first = adapters.ask_codex("review", github=_ref("rename_only"))
+    first_evidence = _without_nonce(world.reviewer()["input"])
+    snapshot_id = first["github"]["snapshot_id"]
     world.calls.clear()
-    out = adapters.ask_claude("review", github=snap["snapshot_id"])
+    second = adapters.ask_claude("review", github=snapshot_id)
     assert world.gh() == [], "an id is loaded, never re-collected"
-    assert out["github"]["snapshot_id"] == snap["snapshot_id"]
-    assert out["github"]["head_sha"] == snap["head_sha"]
+    assert second["github"]["snapshot_id"] == snapshot_id
+    assert _without_nonce(world.reviewer()["input"]) == first_evidence, (
+        "two reviewers of one snapshot receive the same evidence, nonce aside"
+    )
+    assert second["github"].get("pr") == "modelcontextprotocol/python-sdk#3442", (
+        "a review given only an id still names its PR"
+    )
+
+
+def _without_nonce(evidence):
+    evidence = evidence or ""
+    nonce = evidence.split("<<<HARDLINE-EVIDENCE ", 1)[-1].split(">>>", 1)[0]
+    return evidence.replace(nonce, "NONCE")
 
 
 def test_the_snapshot_id_is_the_hash_of_what_github_returned(world):
@@ -453,10 +496,11 @@ def _feeders():
     return [t for t in threading.enumerate() if t.name == "hardline-stdin" and t.is_alive()]
 
 
-def test_a_child_that_exits_without_reading_releases_the_writer():
-    """Only the child may hold the read end; otherwise the write blocks forever."""
+def test_a_child_that_exits_without_reading_fails_and_releases_the_writer():
+    """Its reply was never given the evidence; and only the child may hold the
+    read end, or the write would block forever."""
     out = adapters._run_cmd([sys.executable, "-c", "pass"], stdin_text=BIG, timeout_s=60)
-    assert out["ok"] is True, out
+    assert out["ok"] is False and "closed its stdin" in out.get("error", ""), out
     deadline = time.monotonic() + 20
     while _feeders() and time.monotonic() < deadline:
         time.sleep(0.1)

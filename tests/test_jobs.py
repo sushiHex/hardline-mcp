@@ -6,6 +6,7 @@ that cannot answer "is it still running?". These cover the record that fixes it.
 """
 
 import os
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -283,6 +284,48 @@ def test_cancel_kills_the_child_recorded_while_it_was_claiming(tmp_path, monkeyp
     out = jobs.request_cancel(job_id, db_path=db)
     assert out["ok"] is True
     assert killed == [(202, "agent-key")], "the child running at the claim is the one stopped"
+
+
+def test_cancel_kills_the_child_even_when_finish_clears_it_after_the_claim(
+    tmp_path, monkeypatch
+):
+    """finish() clears child_pid on a cancelled row. Read after the claim's
+    commit, the child would be gone from the record while still running."""
+    db = tmp_path / "mb.db"
+    job_id = _create(db)
+    jobs.mark_running(job_id, db_path=db)
+    jobs.set_child_pid(job_id, 202, started_key="agent-key", db_path=db)
+    killed = []
+    monkeypatch.setattr(
+        jobs,
+        "kill_process_tree",
+        lambda pid, expect_key=None: (killed.append(pid) or (True, None)),
+    )
+    real_connect = jobs._connect
+
+    class FinishLandsAtCommit:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def __enter__(self):
+            self._conn.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            result = self._conn.__exit__(*exc)
+            with closing(real_connect(db)) as other, other:
+                other.execute(
+                    "UPDATE jobs SET child_pid = NULL, child_key = NULL WHERE job_id = ?",
+                    (job_id,),
+                )
+            return result
+
+    monkeypatch.setattr(jobs, "_connect", lambda path: FinishLandsAtCommit(real_connect(path)))
+    jobs.request_cancel(job_id, db_path=db)
+    assert killed == [202], "the child the claim won is the one stopped"
 
 
 def test_a_real_result_supersedes_a_heuristic_lost(tmp_path):

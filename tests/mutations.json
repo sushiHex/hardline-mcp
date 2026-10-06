@@ -1208,7 +1208,7 @@
     "before": "        os.close(stdin_pipe[0])\n        stdin_pipe = (stdin_pipe[1],)",
     "after": "        stdin_pipe = (stdin_pipe[1],)",
     "tests": [
-      "tests/test_github_review.py::test_a_child_that_exits_without_reading_releases_the_writer"
+      "tests/test_github_review.py::test_a_child_that_exits_without_reading_fails_and_releases_the_writer"
     ]
   },
   "cancel-reads-child-after-claim": {
@@ -1291,8 +1291,8 @@
   },
   "github-render-reclassifies": {
     "file": "hardline_mcp/github_context.py",
-    "before": "        entry = dict(entry, no_patch=_no_patch_reason(entry))\n",
-    "after": "",
+    "before": "        name, reason = _one_line(entry[\"filename\"]), _no_patch_reason(entry)",
+    "after": "        name, reason = _one_line(entry[\"filename\"]), entry.get(\"no_patch\")",
     "tests": [
       "tests/test_github_context.py::test_a_stored_snapshot_is_classified_again_not_trusted"
     ]
@@ -1327,6 +1327,110 @@
     "after": "",
     "tests": [
       "tests/test_github_review.py::test_a_writer_that_cannot_start_leaves_no_child_and_no_pipe"
+    ]
+  },
+  "stdin-shortfall-fails-the-call": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if proc.returncode != 0 or undelivered:",
+    "after": "    if proc.returncode != 0:",
+    "tests": [
+      "tests/test_github_review.py::test_a_child_that_exits_without_reading_fails_and_releases_the_writer"
+    ]
+  },
+  "unrecorded-child-is-reported": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            claimed, unrecorded = True, True",
+    "after": "            claimed = True",
+    "tests": [
+      "tests/test_github_review.py::test_a_child_that_could_not_be_recorded_says_so"
+    ]
+  },
+  "github-result-names-the-pr": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        \"pr\": f\"{data['repo']}#{data['number']}\",\n",
+    "after": "",
+    "tests": [
+      "tests/test_github_review.py::test_a_snapshot_id_gives_a_second_reviewer_the_same_evidence"
+    ]
+  },
+  "github-cancel-result-names-request": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        return None, {**exc.result, \"github\": {\"requested\": github}}",
+    "after": "        return None, exc.result",
+    "tests": [
+      "tests/test_github_review.py::test_a_cancel_at_the_first_gh_call_stops_the_call"
+    ]
+  },
+  "github-not-shown-capped": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        \"not_shown\": not_shown[:_GITHUB_NOT_SHOWN_LISTED],",
+    "after": "        \"not_shown\": not_shown,",
+    "tests": [
+      "tests/test_github_review.py::test_a_long_not_shown_list_is_capped_in_the_result"
+    ]
+  },
+  "github-local-checkout-framing": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            github, github_exclude, on_spawn, local_checkout=workdir is not None",
+    "after": "            github, github_exclude, on_spawn, local_checkout=False",
+    "tests": [
+      "tests/test_github_review.py::test_a_reviewer_that_can_read_a_checkout_is_told_it_may_not_be_the_head"
+    ]
+  },
+  "github-schema-checked-on-load": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    if not isinstance(snapshot, dict) or snapshot.get(\"schema\") != SCHEMA:",
+    "after": "    if not isinstance(snapshot, dict):",
+    "tests": [
+      "tests/test_github_context.py::test_a_snapshot_of_another_schema_is_refused"
+    ]
+  },
+  "github-render-shape-guard": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    except (KeyError, TypeError, AttributeError) as exc:\n        raise CollectionError(f\"snapshot has an unexpected shape",
+    "after": "    except ZeroDivisionError as exc:\n        raise CollectionError(f\"snapshot has an unexpected shape",
+    "tests": [
+      "tests/test_github_context.py::test_a_misshapen_snapshot_is_a_collection_error_not_a_crash"
+    ]
+  },
+  "github-exclude-case-sensitive": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "fnmatch.fnmatchcase(",
+    "after": "fnmatch.fnmatch(",
+    "tests": [
+      "tests/test_github_context.py::test_exclusions_match_the_same_way_on_every_host"
+    ]
+  },
+  "github-headings-one-line": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    return _CONTROL.sub(lambda m: f\"\\\\x{ord(m.group()):02x}\", str(text))",
+    "after": "    return str(text)",
+    "tests": [
+      "tests/test_github_context.py::test_a_filename_cannot_forge_lines_in_the_evidence"
+    ]
+  },
+  "github-base-labelled-as-recorded": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "        f\"Base: {snapshot['base']['ref']} @ {snapshot['base']['sha']} (as of the PR's last \"\n        \"update; the branch may have moved since)\",",
+    "after": "        f\"Base: {snapshot['base']['ref']} @ {snapshot['base']['sha']}\",",
+    "tests": [
+      "tests/test_github_context.py::test_the_base_is_labelled_as_recorded_not_live"
+    ]
+  },
+  "github-snapshot-dir-absolute": {
+    "file": "hardline_mcp/github_context.py",
+    "before": "    if not path.is_absolute():",
+    "after": "    if False:",
+    "tests": [
+      "tests/test_github_context.py::test_a_relative_snapshot_dir_is_refused"
+    ]
+  },
+  "cancel-child-read-inside-the-claim": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "        job = {**job, **dict(current)}",
+    "after": "        job = {**job, **dict(conn.execute(\"SELECT child_pid, child_key FROM jobs WHERE job_id = ?\", (job_id,)).fetchone())}",
+    "tests": [
+      "tests/test_jobs.py::test_cancel_kills_the_child_even_when_finish_clears_it_after_the_claim"
     ]
   }
 }

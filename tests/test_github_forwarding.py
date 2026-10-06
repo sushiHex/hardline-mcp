@@ -93,6 +93,9 @@ async def test_async_codex_forwards_github_and_records_only_the_reference(
     request = server.jobs.get(receipt["job_id"])["request"]
     assert request.get("github") == "octo/repo#7"
     assert request.get("github_exclude") == ["*.lock"]
+    assert set(request) == {
+        "prompt_chars", "model", "effort", "mode", "workdir", "write", "github", "github_exclude"
+    }, "the request row holds options, never evidence"
 
 
 @pytest.mark.anyio
