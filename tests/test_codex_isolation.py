@@ -56,14 +56,12 @@ def codex(monkeypatch):
             return _Proc(State.features, 0)
         return _Proc("reply", 0)
 
-    adapters._codex_features_cache.clear()
     monkeypatch.setattr(adapters, "_codex_features", REAL_FEATURES)
     monkeypatch.setattr(adapters, "_codex_mcp_servers", REAL_LISTING)
     monkeypatch.setattr(adapters.subprocess, "Popen", popen)
     monkeypatch.setattr(adapters, "_kill_tree", lambda proc: None)
     State.calls = calls
-    yield State
-    adapters._codex_features_cache.clear()
+    return State
 
 
 def _execs(calls):
@@ -122,36 +120,63 @@ def test_every_codex_child_gets_no_connectors_and_no_servers(
     ]
 
 
-def test_servers_are_listed_exactly_where_and_how_the_child_will_run(
+def _features_probe(calls):
+    (call,) = [c for c in calls if c["cmd"][1:3] == ["features", "list"]]
+    return call
+
+
+def test_codex_is_probed_exactly_where_and_how_the_child_will_run(
     codex, monkeypatch, tmp_path
 ):
     monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
     adapters.ask_codex("review", workdir=str(tmp_path))
-    listing, (child,) = _listing(codex.calls), _execs(codex.calls)
+    listing, probe = _listing(codex.calls), _features_probe(codex.calls)
+    (child,) = _execs(codex.calls)
     assert listing["cmd"][3:] == ["--json", *CONNECTORS], (
         "listed with plugins and apps off, or it names servers no layer defines"
     )
-    assert listing["kwargs"]["cwd"] == child["kwargs"]["cwd"]
-    assert listing["kwargs"]["env"] == child["kwargs"]["env"], (
-        "a different environment (CODEX_HOME, say) could list a different config"
-    )
+    for question in (listing, probe):
+        assert question["cmd"][0] == child["cmd"][0], "the probed executable is the one launched"
+        assert question["kwargs"]["cwd"] == child["kwargs"]["cwd"]
+        assert question["kwargs"]["env"] == child["kwargs"]["env"], (
+            "a different environment (CODEX_HOME, say) could see a different config"
+        )
 
 
 def test_advisory_lists_in_its_isolated_home(codex, advisory_home):
     """--ignore-user-config still loads system, cloud and project layers."""
     adapters.ask_codex("review", mode="advisory")
-    listing, (child,) = _listing(codex.calls), _execs(codex.calls)
-    assert listing["kwargs"]["env"]["CODEX_HOME"] == child["kwargs"]["env"]["CODEX_HOME"]
-    assert listing["kwargs"]["cwd"] == child["kwargs"]["cwd"]
+    (child,) = _execs(codex.calls)
+    for question in (_listing(codex.calls), _features_probe(codex.calls)):
+        assert question["kwargs"]["env"]["CODEX_HOME"] == child["kwargs"]["env"]["CODEX_HOME"]
+        assert question["kwargs"]["cwd"] == child["kwargs"]["cwd"]
 
 
 def test_any_server_name_is_addressed_by_a_quoted_key(codex):
-    codex.servers = json.dumps([{"name": "team.server"}, {"name": 'odd"name'}])
+    names = ["team.server", 'odd"name', "back\\slash", "bell\x07", "del\x7f", "tab\tok", "emoji\U0001F600"]
+    codex.servers = json.dumps([{"name": n} for n in names])
     adapters.ask_codex("review")
     (child,) = _execs(codex.calls)
-    assert _disabled_servers(_before_prompt(child["cmd"])) == [
-        'mcp_servers={"team.server"={enabled=false},"odd\\"name"={enabled=false}}'
-    ]
+    (table,) = _disabled_servers(_before_prompt(child["cmd"]))
+    assert table == (
+        'mcp_servers={"team.server"={enabled=false},"odd\\"name"={enabled=false},'
+        '"back\\\\slash"={enabled=false},"bell\\u0007"={enabled=false},'
+        '"del\\u007F"={enabled=false},"tab\tok"={enabled=false},'
+        '"emoji\U0001F600"={enabled=false}}'
+    ), "TOML basic strings: no surrogate-pair escapes, controls escaped, tab literal"
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10
+        return
+    parsed = tomllib.loads(table)["mcp_servers"]
+    assert sorted(parsed) == sorted(names)
+
+
+def test_a_name_toml_cannot_express_refuses(codex):
+    codex.servers = json.dumps([{"name": "lone\ud800"}])
+    out = adapters.ask_codex("review")
+    assert _execs(codex.calls) == []
+    assert out.get("isolation") == "refused"
 
 
 def test_no_servers_means_no_table(codex):
@@ -179,15 +204,34 @@ def test_a_failed_listing_refuses_the_call(codex):
     assert out.get("isolation") == "refused" and out.get("ok") is False
 
 
-def test_a_codex_without_the_features_refuses(codex):
+@pytest.mark.parametrize(
+    "features, missing",
+    [
+        ("hooks  stable  true\nplugins  stable  true\n", "apps"),
+        ("apps  stable  true\nhooks  stable  true\n", "plugins"),
+        ("apps  removed  false\nplugins  stable  true\n", "apps"),
+        ("apps  under development  false\nplugins  removed  true\n", "plugins"),
+    ],
+    ids=["no-apps", "no-plugins", "apps-removed", "plugins-removed"],
+)
+def test_a_codex_without_the_features_refuses(codex, features, missing):
     """features.<unknown>=false is silently ignored, so a rename must be caught."""
-    codex.features = "hooks  stable  true\nplugins  stable  true\n"
+    codex.features = features
     out = adapters.ask_codex("review")
     assert _execs(codex.calls) == []
-    assert out.get("ok") is False and "apps" in out.get("error", "")
+    assert out.get("ok") is False and missing in out.get("error", "")
+
+
+def test_a_cancel_at_the_first_probe_stops_the_call(codex):
+    out = adapters.ask_codex("review", on_spawn=lambda pid: False)
+    assert out.get("cancelled") is True
+    assert [c["cmd"][1:3] for c in codex.calls] == [["features", "list"]], (
+        "nothing after a cancelled probe may start"
+    )
 
 
 def test_a_cancel_during_the_listing_stops_the_call(codex):
-    out = adapters.ask_codex("review", on_spawn=lambda pid: False)
+    claims = iter([True, False])  # the feature probe is claimed, the listing is not
+    out = adapters.ask_codex("review", on_spawn=lambda pid: next(claims))
     assert out.get("cancelled") is True
     assert _execs(codex.calls) == []

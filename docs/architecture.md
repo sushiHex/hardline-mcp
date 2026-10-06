@@ -169,7 +169,13 @@ Why not the obvious alternatives, all measured:
 - `--ignore-user-config` drops the configured default model and still loads system, cloud and project layers.
 - `--disable <unknown>` is a hard error, while an unknown `features.<name>` is silently ignored. That's why `apps` and `plugins` are also checked against `codex features list`.
 
-**Unprovable isolation refuses the call.** A failed or malformed listing, or a missing feature, stops the child from being started. The listing runs under the call's spawn claim, so a cancel reaches it. Codex's built-in web search stays available to default calls, which carry the orchestrator's own prompts.
+**Unprovable isolation refuses the call.** A failed or malformed listing, a missing or `removed` feature, or a server name TOML can't express stops the child from being started.
+- **Where the probes run:** both run against the same executable that will be launched, in the child's own environment and directory, under the call's spawn claim, so a cancel reaches them.
+- **Nothing is cached,** since the binary behind a name can change.
+
+**The guarantee covers servers configured when the call starts.** Codex reloads configuration at launch and has no execution-time "no MCP" switch. A server added in the sub-second gap between the listing and the launch is therefore not disabled.
+
+Codex's built-in web search stays available to default calls, which carry the orchestrator's own prompts.
 
 An earlier Claude probe requested `echo x > probe.txt` with host settings that
 allowed all Bash commands:

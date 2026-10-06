@@ -89,28 +89,36 @@ def _no_ambient_parent_lane(monkeypatch):
     monkeypatch.setattr(adapters, "_session_anchor", [{"lane": "", "agent": ""}])
 
 
-_LIVE_OPT_INS = ("HARDLINE_LIVE_TESTS", "HARDLINE_LIVE_WATCH", "HARDLINE_TEST_SPAWN")
+# Modules that launch REAL agents when opted in. Their children must be
+# isolated for real, so the probe stub below steps aside for them alone.
+_LIVE_MODULES = {"test_live_agents", "test_live_watch", "test_spawn_behaviour"}
 
 
 @pytest.fixture(autouse=True)
-def _no_codex_isolation_probes(monkeypatch):
+def _no_codex_isolation_probes(monkeypatch, request):
     """Default every test to a Codex with the required features and no servers.
 
     Every ask_codex asks the real CLI what to disable (#42). Left in place,
     that would run `codex features list` / `codex mcp list` from the test
     suite and shift every captured command. The isolation tests restore the
-    real functions; opted-in live tests keep them, so real children launched
-    from the suite are isolated for real.
+    real functions.
     """
-    if any(os.environ.get(name) == "1" for name in _LIVE_OPT_INS):
+    if request.module.__name__.rsplit(".", 1)[-1] in _LIVE_MODULES:
         return
     from hardline_mcp import adapters
 
     monkeypatch.setattr(
-        adapters, "_codex_features", lambda exe: frozenset(adapters._CODEX_REQUIRED_FEATURES)
+        adapters,
+        "_codex_features",
+        lambda exe, env, cwd, on_spawn=None: (
+            frozenset(adapters._CODEX_REQUIRED_FEATURES),
+            {"ok": True},
+        ),
     )
     monkeypatch.setattr(
-        adapters, "_codex_mcp_servers", lambda env, cwd, on_spawn=None: ([], {"ok": True})
+        adapters,
+        "_codex_mcp_servers",
+        lambda exe, env, cwd, on_spawn=None: ([], {"ok": True}),
     )
 
 
