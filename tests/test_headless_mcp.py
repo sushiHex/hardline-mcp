@@ -220,6 +220,14 @@ import json
 import os
 import sys
 
+# The isolation probes every Codex call now makes first (#42).
+if sys.argv[1:3] == ["features", "list"]:
+    print("apps  stable  true")
+    print("plugins  stable  true")
+    sys.exit(0)
+if sys.argv[1:3] == ["mcp", "list"]:
+    print(json.dumps([{{"name": "hardline"}}]))
+    sys.exit(0)
 with open(os.environ["HARDLINE_CAPTURE_ARGV"], "w", encoding="utf-8") as fh:
     json.dump(sys.argv[1:], fh)
 print(json.dumps({{"type": "thread.started", "thread_id": "fake-thread"}}))
@@ -262,4 +270,7 @@ print(json.dumps({{"type": "turn.completed", "usage": {{"input_tokens": 1}}}}))
     assert argv[argv.index("--model") + 1] == "gpt-5.6-terra"
     assert argv[argv.index("-c") + 1] == 'model_reasoning_effort="ultra"'
     assert "--json" in argv and "--ephemeral" in argv
+    # Through the real server process, not just the adapter (#42).
+    assert "features.apps=false" in argv and "features.plugins=false" in argv
+    assert 'mcp_servers={"hardline"={enabled=false}}' in argv
     assert argv[-2:] == ["--", "capture this"]

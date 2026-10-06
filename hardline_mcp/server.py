@@ -1386,7 +1386,9 @@ async def ask_codex(
 ) -> dict:
     """Ask Codex a question and wait for its reply.
 
-    Spawns an ephemeral ``codex exec``. Omitting ``model`` passes no
+    Spawns an ephemeral ``codex exec`` with no MCP servers or app connectors
+    (the user's configured ones are disabled per call; Codex's built-in web
+    search remains). Omitting ``model`` passes no
     ``--model`` flag, so Codex's own configured default applies. A full
     identifier (e.g. ``gpt-5.6-sol``) is passed through unexpanded; an
     unrecognized one is rejected by Codex itself rather than substituted. A

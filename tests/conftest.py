@@ -89,6 +89,44 @@ def _no_ambient_parent_lane(monkeypatch):
     monkeypatch.setattr(adapters, "_session_anchor", [{"lane": "", "agent": ""}])
 
 
+# Modules that launch REAL agents when opted in. Their children must be
+# isolated for real, so the probe stub below steps aside for them alone.
+_LIVE_MODULES = {"test_live_agents", "test_live_watch", "test_spawn_behaviour"}
+
+
+def _real_probes_for(module_name: str) -> bool:
+    """By module, never by ambient flag: a live flag must not un-stub unit tests."""
+    return module_name.rsplit(".", 1)[-1] in _LIVE_MODULES
+
+
+@pytest.fixture(autouse=True)
+def _no_codex_isolation_probes(monkeypatch, request):
+    """Default every test to a Codex with the required features and no servers.
+
+    Every ask_codex asks the real CLI what to disable (#42). Left in place,
+    that would run `codex features list` / `codex mcp list` from the test
+    suite and shift every captured command. The isolation tests restore the
+    real functions.
+    """
+    if _real_probes_for(request.module.__name__):
+        return
+    from hardline_mcp import adapters
+
+    monkeypatch.setattr(
+        adapters,
+        "_codex_features",
+        lambda exe, env, cwd, on_spawn=None: (
+            frozenset(adapters._CODEX_REQUIRED_FEATURES),
+            {"ok": True},
+        ),
+    )
+    monkeypatch.setattr(
+        adapters,
+        "_codex_mcp_servers",
+        lambda exe, env, cwd, on_spawn=None: ([], {"ok": True}),
+    )
+
+
 @pytest.fixture
 def spawned_by_codex(monkeypatch):
     """Act as a hardline a Codex terminal session spawned, telling us nothing.

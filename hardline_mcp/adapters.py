@@ -150,6 +150,39 @@ _CLAUDE_NO_MCP = ["--strict-mcp-config"]
 # default path took whatever the host config said. Ask for it explicitly.
 _CODEX_READONLY_SANDBOX = ["--sandbox", "read-only"]
 
+# No MCP servers and no app connectors in a spawned Codex - the parity of
+# Claude's --strict-mcp-config above. Without it the child loaded every server
+# the user's Codex knows, hardline itself included, and with approvals off
+# called them unattended, outside its --sandbox: it could dispatch more agents,
+# send mail as anyone, read other sessions' mail through history/peek, drive a
+# browser through node_repl, and search the web through the `apps` connector
+# even with web search disabled. Measured on Codex 0.156.1 (#42).
+#
+# Codex has no strict flag, and the obvious substitutes fail:
+#   * `-c mcp_servers={}` merges and removes nothing;
+#   * --ignore-user-config drops the configured default model a default
+#     ask_codex is documented to use, and still loads system, cloud and
+#     project configuration layers - not isolation at all;
+#   * disabling a server no configuration layer defines fails config loading
+#     outright ("invalid transport").
+# What works, measured: switch the two features off (apps supplies
+# codex_apps; plugins supply servers no config file names), ask `codex mcp
+# list` - with those same features off, in the child's own environment and
+# directory, so every layer is seen - which servers remain, and disable them
+# all in one inline-table override that deep-merges into each definition.
+# Quoted TOML keys address any server name, dots included.
+#
+# Unproven isolation refuses the call. A child that might reach hardline is not
+# started on a guess.
+#
+# The -c form, not --disable: `--disable <unknown>` is a hard error. Because an
+# unknown `features.<name>` is silently ignored instead, the two features are
+# checked against `codex features list`: a Codex that renamed one must refuse,
+# not quietly let its connectors back in.
+_CODEX_NO_CONNECTORS = ["-c", "features.apps=false", "-c", "features.plugins=false"]
+_CODEX_REQUIRED_FEATURES = ("apps", "plugins")
+_CODEX_ISOLATION_TIMEOUT_S = 15
+
 # Load NO settings.json layer. Measured rather than assumed: with the host's
 # settings loaded, a blanket `Bash(*)` permission overrides Claude Code's
 # built-in Bash write guard, so `--disallowedTools Edit,Write,NotebookEdit`
@@ -949,6 +982,14 @@ _AGENT_CHILD_STRIPPED_ENV = frozenset(
 )
 
 
+def _agent_env(env: dict | None) -> dict:
+    """The environment a spawned agent gets: ``env`` (or ours) minus the strip set."""
+    child_env = dict(os.environ if env is None else env)
+    for name in _AGENT_CHILD_STRIPPED_ENV:
+        child_env.pop(name, None)
+    return child_env
+
+
 def _run_agent_cmd(
     agent: str, argv: list[str], *, env: dict | None = None, **kwargs
 ) -> dict:
@@ -956,10 +997,138 @@ def _run_agent_cmd(
         timeout_s = _timeout_for(agent)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
-    child_env = dict(os.environ if env is None else env)
-    for name in _AGENT_CHILD_STRIPPED_ENV:
-        child_env.pop(name, None)
-    return _run_cmd(argv, timeout_s=timeout_s, env=child_env, **kwargs)
+    return _run_cmd(argv, timeout_s=timeout_s, env=_agent_env(env), **kwargs)
+
+
+def _codex_features(
+    exe: str, env: dict | None, cwd: str | None, on_spawn=None
+) -> tuple[frozenset | None, dict]:
+    """``(names, run)``: features this Codex knows (not ``removed``), or None.
+
+    Asked of the very executable the call will launch, in the child's own
+    environment and directory, under ``on_spawn`` - never cached, because the
+    executable behind a name or shim can change between calls (about 0.1 s).
+    """
+    run = _run_cmd(
+        [exe, "features", "list"],
+        env=_agent_env(env),
+        cwd=cwd,
+        timeout_s=_CODEX_ISOLATION_TIMEOUT_S,
+        on_spawn=on_spawn,
+    )
+    if not run.get("ok"):
+        return None, run
+    names = set()
+    for line in run.get("reply", "").splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and "removed" not in fields[1:]:
+            names.add(fields[0])
+    return frozenset(names), run
+
+
+def _codex_mcp_servers(
+    exe: str, env: dict | None, cwd: str | None, on_spawn=None
+) -> tuple[list | None, dict]:
+    """``(names, run)``: the MCP servers still enabled for this call, or None.
+
+    Asked of the very executable the call will launch, in the environment and
+    directory it will run in, with plugins and apps off as they will be - so
+    the configuration layers the call loads are seen, and only names some
+    layer defines come back. Under ``on_spawn``, so a cancel reaches it like
+    any other child. Strict: anything but a list of objects with a string
+    ``name`` is unknowable, never "no servers".
+    """
+    run = _run_cmd(
+        [exe, "mcp", "list", "--json", *_CODEX_NO_CONNECTORS],
+        env=_agent_env(env),
+        cwd=cwd,
+        timeout_s=_CODEX_ISOLATION_TIMEOUT_S,
+        on_spawn=on_spawn,
+    )
+    if not run.get("ok"):
+        return None, run
+    try:
+        servers = json.loads(run.get("reply", ""))
+    except json.JSONDecodeError:
+        return None, run
+    if not isinstance(servers, list) or not all(
+        isinstance(server, dict) and isinstance(server.get("name"), str)
+        for server in servers
+    ):
+        return None, run
+    return [server["name"] for server in servers], run
+
+
+def _toml_basic_string(text: str) -> str | None:
+    """``text`` as a TOML basic string, or None if TOML cannot express it.
+
+    Not ``json.dumps``: JSON escapes characters outside the BMP as surrogate
+    pairs, which TOML rejects (its ``\\u`` escapes must be Unicode scalar
+    values). TOML requires escaping the quote, the backslash and the control
+    characters except tab; everything else may appear literally.
+    """
+    out = []
+    for char in text:
+        code = ord(char)
+        if 0xD800 <= code <= 0xDFFF:
+            return None  # a lone surrogate is not a Unicode scalar value
+        if char in '"\\':
+            out.append("\\" + char)
+        elif (code < 0x20 and char != "\t") or code == 0x7F:
+            out.append(f"\\u{code:04X}")
+        else:
+            out.append(char)
+    return '"' + "".join(out) + '"'
+
+
+def _isolation_refusal(reason: str) -> dict:
+    return {
+        "ok": False,
+        "error": f"cannot isolate the Codex child: {reason}",
+        "isolation": "refused",
+    }
+
+
+def _codex_isolation(
+    exe: str, env: dict | None, cwd: str | None, on_spawn=None
+) -> tuple[list | None, dict | None]:
+    """``(overrides, refusal)``: leave a spawned Codex no MCP server or connector.
+
+    Exactly one is set; a refusal is returned as the call's result. Isolation
+    that cannot be shown is not attempted on a guess.
+
+    The guarantee covers servers configured when the call starts. Codex reloads
+    configuration at launch, and it offers no execution-time "no MCP" switch,
+    so a server added in the sub-second gap between the listing and the launch
+    is not disabled. Stated, not hidden.
+    """
+    features, run = _codex_features(exe, env, cwd, on_spawn)
+    if run.get("cancelled"):
+        return None, run
+    missing = [f for f in _CODEX_REQUIRED_FEATURES if features is None or f not in features]
+    if missing:
+        return None, _isolation_refusal(
+            f"this Codex does not report the feature(s) {missing}, so its "
+            "connectors cannot be shown to be off"
+        )
+    names, run = _codex_mcp_servers(exe, env, cwd, on_spawn)
+    if run.get("cancelled"):
+        return None, run
+    if names is None:
+        return None, _isolation_refusal(
+            "`codex mcp list` did not return a server list "
+            f"({run.get('error') or 'unreadable output'})"
+        )
+    keys = [_toml_basic_string(name) for name in names]
+    if None in keys:
+        return None, _isolation_refusal(
+            "a configured MCP server name cannot be written as a TOML key"
+        )
+    overrides = list(_CODEX_NO_CONNECTORS)
+    if keys:
+        table = ",".join(f"{key}={{enabled=false}}" for key in keys)
+        overrides += ["-c", "mcp_servers={" + table + "}"]
+    return overrides, None
 
 
 # Recognized tokens for HARDLINE_ALLOW_WRITE, matched case-insensitively
@@ -1621,10 +1790,21 @@ def _ask_codex_validated(
     on_spawn: "Callable[[int], None] | None",
 ) -> dict:
     argv = _prefix_for("codex") + ["--ephemeral"]
+    # Before anything is spawned, isolation probes included: an invalid timeout
+    # is a configuration error to report at once, not after a probe has run.
+    try:
+        _timeout_for("codex")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    # Resolved once: the executable that is probed is the executable launched.
+    exe = argv[0]
     if _is_plain_call(model, effort, mode, workdir, write):
+        isolation, refusal = _codex_isolation(exe, None, None, on_spawn)
+        if refusal is not None:
+            return refusal
         return _run_agent_cmd(
             "codex",
-            argv + _CODEX_READONLY_SANDBOX + ["--", prompt],
+            argv + _CODEX_READONLY_SANDBOX + isolation + ["--", prompt],
             on_spawn=on_spawn,
         )
     if model is not None:
@@ -1670,6 +1850,13 @@ def _ask_codex_validated(
             + json.dumps(_CODEX_ADVISORY_DEVELOPER_INSTRUCTIONS),
         ]
     try:
+        # Every mode, write and advisory included: a write-enabled child that
+        # could reach hardline is the worst version of #42, and advisory's
+        # --ignore-user-config still loads system, cloud and project layers.
+        isolation, refusal = _codex_isolation(exe, child_env, run_cwd, on_spawn)
+        if refusal is not None:
+            return refusal
+        argv += isolation
         run = _run_agent_cmd(
             "codex",
             argv + ["--", prompt],

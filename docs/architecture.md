@@ -158,6 +158,25 @@ read-only description. Default calls now explicitly pass `--sandbox read-only`.
 The lesson is to select the execution boundary in the adapter instead of relying
 on an operator's incidental configuration.
 
+**Spawned agents get no MCP servers or app connectors.** Claude children run with `--strict-mcp-config`. Codex has no equivalent flag, and a default `ask_codex` child was found (#42) loading every server the user's Codex knows: hardline itself (more dispatch, mail as anyone, other sessions' history), `node_repl`'s browser, and web search through the `apps` connector. It called them unattended, outside its sandbox.
+
+Every Codex child, advisory included, now runs with two things:
+- **The connector features off:** `-c features.apps=false -c features.plugins=false`.
+- **Every remaining server disabled:** `codex mcp list` is asked, with those features off and in the child's own environment and directory, which servers any configuration layer still enables. They are all disabled in one override, `-c mcp_servers={"<name>"={enabled=false},…}`, which deep-merges into each definition; quoted keys address any name.
+
+Why not the obvious alternatives, all measured:
+- `-c mcp_servers={}` merges and removes nothing.
+- `--ignore-user-config` drops the configured default model and still loads system, cloud and project layers.
+- `--disable <unknown>` is a hard error, while an unknown `features.<name>` is silently ignored. That's why `apps` and `plugins` are also checked against `codex features list`.
+
+**Unprovable isolation refuses the call.** A failed or malformed listing, a missing or `removed` feature, or a server name TOML can't express stops the child from being started.
+- **Where the probes run:** both run against the same executable that will be launched, in the child's own environment and directory, under the call's spawn claim, so a cancel reaches them.
+- **Nothing is cached,** since the binary behind a name can change.
+
+**The guarantee covers servers configured when the call starts.** Codex reloads configuration at launch and has no execution-time "no MCP" switch. A server added in the sub-second gap between the listing and the launch is therefore not disabled.
+
+Codex's built-in web search stays available to default calls, which carry the orchestrator's own prompts.
+
 An earlier Claude probe requested `echo x > probe.txt` with host settings that
 allowed all Bash commands:
 

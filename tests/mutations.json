@@ -690,5 +690,194 @@
     "tests": [
       "tests/test_continuity.py::test_a_waiting_claim_counts_toward_the_name_cap"
     ]
+  },
+  "codex-plain-isolation-applied": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            argv + _CODEX_READONLY_SANDBOX + isolation + [\"--\", prompt],\n",
+    "after": "            argv + _CODEX_READONLY_SANDBOX + [\"--\", prompt],\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_every_codex_child_gets_no_connectors_and_no_servers[plain]"
+    ]
+  },
+  "codex-plain-refusal-honoured": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        isolation, refusal = _codex_isolation(exe, None, None, on_spawn)\n        if refusal is not None:\n            return refusal\n",
+    "after": "        isolation, refusal = _codex_isolation(exe, None, None, on_spawn)\n        isolation = isolation or []\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_an_unprovable_listing_refuses_the_call[object]"
+    ]
+  },
+  "codex-every-mode-isolation-applied": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        argv += isolation\n",
+    "after": "",
+    "tests": [
+      "tests/test_codex_isolation.py::test_every_codex_child_gets_no_connectors_and_no_servers[telemetry]",
+      "tests/test_codex_isolation.py::test_every_codex_child_gets_no_connectors_and_no_servers[write]",
+      "tests/test_codex_isolation.py::test_every_codex_child_gets_no_connectors_and_no_servers[advisory]"
+    ]
+  },
+  "codex-every-mode-refusal-honoured": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        isolation, refusal = _codex_isolation(exe, child_env, run_cwd, on_spawn)\n        if refusal is not None:\n            return refusal\n",
+    "after": "        isolation, refusal = _codex_isolation(exe, child_env, run_cwd, on_spawn)\n        isolation = isolation or []\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_a_failed_listing_refuses_the_call"
+    ]
+  },
+  "codex-apps-connector-off": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "_CODEX_NO_CONNECTORS = [\"-c\", \"features.apps=false\", \"-c\", \"features.plugins=false\"]\n",
+    "after": "_CODEX_NO_CONNECTORS = [\"-c\", \"features.plugins=false\"]\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_every_codex_child_gets_no_connectors_and_no_servers[plain]",
+      "tests/test_codex_isolation.py::test_every_codex_child_gets_no_connectors_and_no_servers[advisory]"
+    ]
+  },
+  "codex-listing-strict": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if not isinstance(servers, list) or not all(\n",
+    "after": "    if not isinstance(servers, (list, dict, str)) or not all(\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_an_unprovable_listing_refuses_the_call[object]",
+      "tests/test_codex_isolation.py::test_an_unprovable_listing_refuses_the_call[string]"
+    ]
+  },
+  "codex-features-checked": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    missing = [f for f in _CODEX_REQUIRED_FEATURES if features is None or f not in features]\n",
+    "after": "    missing = []\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_a_codex_without_the_features_refuses[no-apps]"
+    ]
+  },
+  "codex-plugins-feature-required": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "_CODEX_REQUIRED_FEATURES = (\"apps\", \"plugins\")\n",
+    "after": "_CODEX_REQUIRED_FEATURES = (\"apps\",)\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_a_codex_without_the_features_refuses[no-plugins]"
+    ]
+  },
+  "codex-removed-features-dont-count": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if len(fields) >= 2 and \"removed\" not in fields[1:]:\n",
+    "after": "        if len(fields) >= 2:\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_a_codex_without_the_features_refuses[apps-removed]"
+    ]
+  },
+  "codex-listing-in-the-child-env": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        [exe, \"mcp\", \"list\", \"--json\", *_CODEX_NO_CONNECTORS],\n        env=_agent_env(env),\n",
+    "after": "        [exe, \"mcp\", \"list\", \"--json\", *_CODEX_NO_CONNECTORS],\n        env=_agent_env(None),\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_advisory_lists_in_its_isolated_home"
+    ]
+  },
+  "codex-features-in-the-child-env": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        [exe, \"features\", \"list\"],\n        env=_agent_env(env),\n",
+    "after": "        [exe, \"features\", \"list\"],\n        env=_agent_env(None),\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_advisory_lists_in_its_isolated_home"
+    ]
+  },
+  "codex-listing-under-spawn-claim": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        on_spawn=on_spawn,\n    )\n    if not run.get(\"ok\"):\n        return None, run\n    try:\n",
+    "after": "    )\n    if not run.get(\"ok\"):\n        return None, run\n    try:\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_a_cancel_during_the_listing_stops_the_call"
+    ]
+  },
+  "codex-features-under-spawn-claim": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        on_spawn=on_spawn,\n    )\n    if not run.get(\"ok\"):\n        return None, run\n    names = set()\n",
+    "after": "    )\n    if not run.get(\"ok\"):\n        return None, run\n    names = set()\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_a_cancel_at_the_first_probe_stops_the_call"
+    ]
+  },
+  "codex-features-cancel-propagated": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    features, run = _codex_features(exe, env, cwd, on_spawn)\n    if run.get(\"cancelled\"):\n        return None, run\n",
+    "after": "    features, run = _codex_features(exe, env, cwd, on_spawn)\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_a_cancel_at_the_first_probe_stops_the_call"
+    ]
+  },
+  "codex-listing-cancel-propagated": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    names, run = _codex_mcp_servers(exe, env, cwd, on_spawn)\n    if run.get(\"cancelled\"):\n        return None, run\n",
+    "after": "    names, run = _codex_mcp_servers(exe, env, cwd, on_spawn)\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_a_cancel_during_the_listing_stops_the_call"
+    ]
+  },
+  "toml-key-quotes-backslash": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if char in '\"\\\\':\n",
+    "after": "        if char == '\"':\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_any_server_name_is_addressed_by_a_quoted_key"
+    ]
+  },
+  "toml-key-escapes-del": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        elif (code < 0x20 and char != \"\\t\") or code == 0x7F:\n",
+    "after": "        elif code < 0x20 and char != \"\\t\":\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_any_server_name_is_addressed_by_a_quoted_key"
+    ]
+  },
+  "toml-key-refuses-surrogates": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if 0xD800 <= code <= 0xDFFF:\n            return None  # a lone surrogate is not a Unicode scalar value\n",
+    "after": "",
+    "tests": [
+      "tests/test_codex_isolation.py::test_a_name_toml_cannot_express_refuses"
+    ]
+  },
+  "codex-features-probe-same-executable": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        [exe, \"features\", \"list\"],\n",
+    "after": "        [_prefix_for(\"codex\")[0], \"features\", \"list\"],\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_the_executable_is_resolved_once_for_probes_and_launch"
+    ]
+  },
+  "codex-listing-same-executable": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        [exe, \"mcp\", \"list\", \"--json\", *_CODEX_NO_CONNECTORS],\n",
+    "after": "        [_prefix_for(\"codex\")[0], \"mcp\", \"list\", \"--json\", *_CODEX_NO_CONNECTORS],\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_the_executable_is_resolved_once_for_probes_and_launch"
+    ]
+  },
+  "codex-features-never-cached": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    return frozenset(names), run\n",
+    "after": "    _codex_features.memo = getattr(_codex_features, \"memo\", None) or (frozenset(names), run)\n    return _codex_features.memo\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_features_are_asked_fresh_on_every_call"
+    ]
+  },
+  "live-probes-scoped-by-module": {
+    "file": "tests/conftest.py",
+    "before": "    return module_name.rsplit(\".\", 1)[-1] in _LIVE_MODULES\n",
+    "after": "    return any(os.environ.get(n) == \"1\" for n in (\"HARDLINE_LIVE_TESTS\", \"HARDLINE_LIVE_WATCH\", \"HARDLINE_TEST_SPAWN\"))\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_live_flags_never_unstub_unit_tests"
+    ]
+  },
+  "codex-timeout-validated-before-probes": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    try:\n        _timeout_for(\"codex\")\n    except ValueError as exc:\n        return {\"ok\": False, \"error\": str(exc)}\n",
+    "after": "",
+    "tests": [
+      "tests/test_codex_isolation.py::test_an_invalid_timeout_fails_before_any_probe[plain]",
+      "tests/test_codex_isolation.py::test_an_invalid_timeout_fails_before_any_probe[telemetry]"
+    ]
   }
 }
