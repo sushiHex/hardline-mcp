@@ -28,7 +28,7 @@ class _Proc:
         self._out = stdout
         self.returncode = returncode
 
-    def communicate(self, timeout=None):
+    def communicate(self, input=None, timeout=None):
         return self._out, ""
 
     def kill(self):

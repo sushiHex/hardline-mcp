@@ -52,6 +52,10 @@ a fallback.
 | `HARDLINE_CODEX_TIMEOUT_S` | `14400` | Codex subprocess time budget in seconds. |
 | `HARDLINE_ASYNC_MAX_WORKERS` | `4` | Concurrent background workers per MCP server. |
 | `HARDLINE_ASYNC_MAX_PENDING` | Four times the worker count | Accepted jobs, running plus queued, per server. |
+| `HARDLINE_GITHUB_TIMEOUT_S` | `60` | One deadline for every `gh` call that collects a pull request. |
+| `HARDLINE_GITHUB_MAX_CHARS` | `400000` | Evidence piped to one reviewer; files past it are listed as `over_budget`. |
+| `HARDLINE_GITHUB_SNAPSHOT_MAX_BYTES` | `4000000` | Largest snapshot collected; over it, collection fails and names the largest patches. |
+| `HARDLINE_GITHUB_SNAPSHOT_DIR` | `~/.cache/hardline-mcp/github` | Snapshot store. An empty value disables storage. |
 
 These values must be positive integers. Worker limits are read at startup;
 invalid timeout values fail the call before spawning an agent. Hermes uses a
@@ -171,6 +175,78 @@ Bedrock/Vertex/Foundry overrides. After execution they require runtime telemetry
 showing first-party account authentication (`apiKeySource: none`) without
 overage, and report `subscription_verified`. A failed post-call check cannot
 undo a request already made by a misconfigured wrapper.
+
+## GitHub evidence for reviews
+
+A spawned reviewer cannot reach GitHub: Codex's sandbox blocks the network and
+`gh`'s config, and Claude runs without the user's permissions. `github=` has
+Hardline collect a pull request with its own authenticated `gh` and pipe it to
+the reviewer's stdin.
+
+```text
+ask_codex(prompt="Review this PR for correctness.", github="owner/repo#123")
+ask_claude(prompt="Attack this change.", github="owner/repo#123@<head sha>",
+           github_exclude=["*.lock"])
+```
+
+`github` takes `owner/repo#N`, `owner/repo#N@<head sha>` (fails unless the head
+is that commit), or a `snapshot_id`. Collection reads the PR, its per-file diff
+(`gh api .../pulls/N/files?per_page=100 --paginate --slurp`, so `gh` must
+support `api --slurp`), and the PR again; a head or base that moved in between
+fails the call rather than mixing revisions. Only github.com is used (`GH_HOST`
+is forced), `gh` never prompts, and for an async job `job_cancel` reaches every
+`gh` child.
+
+The PR's base is shown as GitHub recorded it at the PR's last update; the base
+branch may have moved since. A reviewer that can read a local checkout (Codex
+with `workdir`, or Claude with `github_tools="read"`) is told the checkout may
+not be at the PR's head, and that the evidence is the PR.
+
+**One evidence set for several reviewers.** Two calls given the same reference
+can see different PRs while it moves. `github_snapshot(ref)` collects once and
+returns a `snapshot_id`; every call given that id receives the same evidence.
+Snapshots are content addressed (`snapshot_id` is the SHA-256 of the canonical
+evidence), kept about 24 hours after last use, and pruned opportunistically
+when a new one is written. An expired id is an explicit error, never a silent
+re-collection, and so is a snapshot written by a Hardline version with another
+snapshot schema. They are private repository content on disk, protected by
+the profile directory's permissions. `HARDLINE_GITHUB_SNAPSHOT_DIR` must be
+absolute; set it to `""` to keep nothing (a reference still works for its own
+call).
+
+**Coverage.** Every file GitHub lists is shown in the listing. A patch is shown whole, cut at 40,000
+characters, or withheld with its reason: `omitted_by_github`,
+`excluded_by_caller`, `over_budget`, `rename_only`, or `no_textual_diff` (binary
+or empty; GitHub does not say which). `HARDLINE_GITHUB_MAX_CHARS` caps the whole
+text: patches get what the listing leaves, and a listing too long to fit fails
+the call. Coverage is also partial when GitHub's count of changed files is
+missing or differs from the files it listed (its file list stops at 3,000).
+`github_exclude` globs match case-sensitively, with `/` separators, on every
+host.
+
+The result's `github` object names the `pr`, its `snapshot_id`, head and base
+SHAs, and `coverage`, with the first 50 `not_shown` files (and
+`not_shown_total` past that). When `coverage` is `"partial"`, the reviewer was
+told to limit its verdict to what it saw, and **the review must not be treated
+as approval of the whole PR**. Hardline cannot enforce that on the caller. A
+reviewer that closes its stdin before accepting all of the evidence fails the
+call; `stdin_delivery: "unconfirmed"` means a process the reviewer started
+still holds its stdin.
+
+**The reviewer's isolation.**
+
+| | Codex | Claude |
+| --- | --- | --- |
+| Tools | Read-only sandbox shell; no MCP servers or connectors; `web_search="disabled"`. | None (`--tools ""`). `github_tools="read"` grants Read/Grep/Glob under `--restricted`, confined to the required `workdir`. |
+| Directory | `workdir`, or an empty temporary directory. | `workdir`, or the server's (no tools can read it). |
+| Framing | `developer_instructions`. This replaces any configured value for the call. | `--append-system-prompt` (`--system-prompt` in advisory mode). |
+
+The evidence sits between random-nonce markers, HTML comments are stripped from
+the description, and the framing tells the reviewer it is third-party text, not
+instructions. `github` is refused with `write=True`. A reviewer's reply can
+still quote that text; treat it as untrusted before posting it anywhere. Job
+requests record the reference, never the evidence; job results carry the
+snapshot id and `delivery_hash`, the SHA-256 of the exact bytes piped.
 
 ## Quota-aware Claude routing
 

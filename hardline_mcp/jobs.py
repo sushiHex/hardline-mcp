@@ -545,6 +545,18 @@ def request_cancel(
                     RUNNING,
                 ),
             )
+            # The child is read inside the claim's own write transaction,
+            # never before it and never after. A job runs several children in
+            # turn - isolation probes, `gh`, then the agent - and one recorded
+            # before an earlier read was missed: the kill reached the previous
+            # child, found it gone, and reported success while the new one ran
+            # on. After the commit, finish() may clear the record. Inside it,
+            # nothing else can write, and once it commits no child can be
+            # recorded (set_child_pid requires running): a later spawn fails
+            # its claim and kills itself. So this is the child the claim won.
+            current = conn.execute(
+                "SELECT child_pid, child_key FROM jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
         if cur.rowcount == 0:
             current = conn.execute(
                 "SELECT state FROM jobs WHERE job_id = ?", (job_id,)
@@ -555,6 +567,8 @@ def request_cancel(
                 "error": f"job reached {reached} before the cancel was applied",
                 "state": reached,
             }
+
+        job = {**job, **dict(current)}
 
         killed, kill_error = (False, None)
         identity_verified = None

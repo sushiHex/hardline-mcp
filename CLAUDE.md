@@ -47,6 +47,10 @@ Dependencies point one way: `procid` <- `mailbox` <- `jobs`/`sessions` <-
 - `adapters.py` spawns the agent CLIs (`hermes chat`, `codex exec`,
   `claude -p`). It resolves the executables, sets sandbox/read controls, and
   decodes output. `dispatch.py` is the cancellable executor behind `ask_*_async`.
+- `github_context.py` is pure logic for `github=`: collect a PR through an
+  injected `gh` runner, store snapshots content-addressed on disk, and render
+  what one reviewer receives. `adapters.py` supplies the runner (under the
+  call's `on_spawn`) and pipes the result to the child's stdin.
 - `watch.py` is a read-only, level-triggered observer of unread mail (what
   Claude's Monitor uses). `wake_codex.py` forwards the same observations to a
   bound Codex app-server thread.

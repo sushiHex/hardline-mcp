@@ -20,6 +20,9 @@ import pytest
 _store = tempfile.TemporaryDirectory(prefix="hardline-tests-")
 _previous_db = os.environ.get("HARDLINE_DB")
 os.environ["HARDLINE_DB"] = str(Path(_store.name) / "mailbox.db")
+# GitHub snapshots are private repository content: never the operator's cache.
+_previous_snapshots = os.environ.get("HARDLINE_GITHUB_SNAPSHOT_DIR")
+os.environ["HARDLINE_GITHUB_SNAPSHOT_DIR"] = str(Path(_store.name) / "github")
 
 from hardline_mcp import mailbox
 
@@ -39,10 +42,14 @@ def pytest_unconfigure(config):
     if server is not None:
         server._async_executor.shutdown(wait=True)
     mailbox._DEFAULT_PATH = _previous_default
-    if _previous_db is None:
-        os.environ.pop("HARDLINE_DB", None)
-    else:
-        os.environ["HARDLINE_DB"] = _previous_db
+    for name, previous in (
+        ("HARDLINE_DB", _previous_db),
+        ("HARDLINE_GITHUB_SNAPSHOT_DIR", _previous_snapshots),
+    ):
+        if previous is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = previous
     _store.cleanup()
 
 

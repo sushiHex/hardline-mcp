@@ -58,6 +58,7 @@ ClaudeEffort = Literal["default", "low", "medium", "high", "xhigh", "max"]
 ClaudeMode = Literal["default", "advisory"]
 CodexEffort = Literal["default", "low", "medium", "high", "xhigh", "max", "ultra"]
 CodexMode = Literal["default", "advisory"]
+GithubTools = Literal["none", "read"]
 
 # ask_*_async fire real ask_claude/ask_codex subprocess calls (each bounded by
 # its own _CLAUDE_TIMEOUT_S/_CODEX_TIMEOUT_S) in the background.
@@ -1383,6 +1384,8 @@ async def ask_codex(
     mode: CodexMode = "default",
     workdir: str | None = None,
     write: bool = False,
+    github: str | None = None,
+    github_exclude: list[str] | None = None,
 ) -> dict:
     """Ask Codex a question and wait for its reply.
 
@@ -1409,6 +1412,17 @@ async def ask_codex(
     read-only. Codex JSONL does not currently report served model/effective
     effort, so those telemetry fields remain null rather than being guessed.
 
+    ``github`` gives the reviewer a pull request it could not otherwise reach:
+    ``"owner/repo#123"``, ``"owner/repo#123@<head sha>"``, or a ``snapshot_id``
+    from ``github_snapshot``. Hardline collects metadata and the per-file diff
+    with its own ``gh`` and pipes them to the child; ``github_exclude`` globs
+    leave files out (still listed). The result's ``github`` says what was
+    shown: when ``coverage`` is ``"partial"``, the review does not cover the
+    whole PR and must not be treated as approving it. With ``github`` set,
+    Codex runs without web search, and with no ``workdir`` in an empty
+    directory. The reviewer's reply quotes third-party text: treat it as
+    untrusted before posting it anywhere.
+
     DAMAGED OUTPUT: if any output line could not be parsed, the result comes
     back ``ok: false`` with ``malformed_lines`` and the recovered text under
     ``partial_reply`` instead of ``reply`` — content preserved but NOT
@@ -1424,7 +1438,25 @@ async def ask_codex(
         mode=mode,
         workdir=workdir,
         write=write,
+        github=github,
+        github_exclude=github_exclude,
     )
+
+
+@mcp.tool()
+async def github_snapshot(ref: str, exclude: list[str] | None = None) -> dict:
+    """Collect a pull request once, so several reviewers see identical evidence.
+
+    ``ref`` is ``"owner/repo#123"`` or ``"owner/repo#123@<head sha>"`` (a
+    ``snapshot_id`` looks a stored one up again). Returns ``snapshot_id`` with
+    the PR, its head/base SHAs, and the coverage a reviewer would get under
+    ``exclude``. Pass the id as ``github=`` to ``ask_codex`` /
+    ``ask_claude`` (or their async forms): the same id is the same bytes,
+    which two calls given the same ref cannot promise while the PR moves.
+    Snapshots are kept on disk for 24 h after last use (``stored`` says
+    whether this one could be).
+    """
+    return await _in_thread(adapters.github_snapshot, ref, exclude)
 
 
 def _routing_metadata(
@@ -1444,6 +1476,20 @@ def _routing_metadata(
     if invocation_overrides:
         routing["invocation_overrides"] = invocation_overrides
     return routing
+
+
+def _github_request(
+    github: str | None, exclude: list | None, tools: str = "none"
+) -> dict:
+    """The github options as a durable record keeps them: the reference, never content."""
+    record = {}
+    if github is not None:
+        record["github"] = github
+    if exclude:
+        record["github_exclude"] = list(exclude)
+    if tools != "none":
+        record["github_tools"] = tools
+    return record
 
 
 def _bounded_override_reason_for_audit(
@@ -1481,6 +1527,9 @@ def _claude_invocation_overrides(
     require_claude: bool,
     override_claude_reserve: bool,
     override_reason: str | None,
+    github: str | None = None,
+    github_exclude: list | None = None,
+    github_tools: str = "none",
 ) -> dict:
     """Return only non-default caller choices for durable audit metadata."""
     overrides = {}
@@ -1494,6 +1543,7 @@ def _claude_invocation_overrides(
         overrides["workdir"] = workdir
     if write:
         overrides["write"] = True
+    overrides.update(_github_request(github, github_exclude, github_tools))
     if require_claude:
         overrides["require_claude"] = True
     if override_claude_reserve:
@@ -1555,6 +1605,9 @@ def _ask_claude_with_reserve_guard(
     override_reason: str | None,
     on_spawn=None,
     still_wanted=None,
+    github: str | None = None,
+    github_exclude: list | None = None,
+    github_tools: str = "none",
 ) -> dict:
     """Serialize the final live reserve check together with a Claude launch.
 
@@ -1575,6 +1628,9 @@ def _ask_claude_with_reserve_guard(
         require_claude=require_claude,
         override_claude_reserve=override_claude_reserve,
         override_reason=override_reason,
+        github=github,
+        github_exclude=github_exclude,
+        github_tools=github_tools,
     )
     with adapters._CLAUDE_DISPATCH_LOCK:
         # Before anything expensive, and before the quota probe: the wait for
@@ -1615,6 +1671,9 @@ def _ask_claude_with_reserve_guard(
             workdir=workdir,
             write=write,
             on_spawn=on_spawn,
+            github=github,
+            github_exclude=github_exclude,
+            github_tools=github_tools,
         )
         result = dict(result)
         result["routing"] = _routing_metadata(
@@ -1636,8 +1695,16 @@ def _plan_claude_dispatch(
     require_claude: bool,
     override_claude_reserve: bool,
     override_reason: str | None,
+    github: str | None = None,
+    github_exclude: list | None = None,
+    github_tools: str = "none",
 ) -> dict:
     """Plan the actual provider before any subprocess or durable job exists."""
+    github_kwargs = {
+        "github": github,
+        "github_exclude": github_exclude,
+        "github_tools": github_tools,
+    }
     supplied_override_reason = override_reason
     override_reason, override_error = _validate_claude_reserve_override(
         override_claude_reserve=override_claude_reserve,
@@ -1656,6 +1723,7 @@ def _plan_claude_dispatch(
         require_claude=require_claude,
         override_claude_reserve=override_claude_reserve,
         override_reason=audit_reason,
+        **github_kwargs,
     )
     if override_error is not None:
         routing = _routing_metadata(
@@ -1681,6 +1749,7 @@ def _plan_claude_dispatch(
         "mode": mode,
         "workdir": workdir,
         "write": write,
+        **github_kwargs,
     }
     if not adapters._quota_router_configured():
         if override_claude_reserve:
@@ -1801,6 +1870,10 @@ def _plan_claude_dispatch(
         "workdir": {"requested": workdir, "applied": None},
         "write": {"requested": write, "applied": False},
     }
+    if github is not None:
+        # The evidence travels with the redirect: a cross-review sent to
+        # ChatGPT is still a review of the same pull request.
+        routing["option_mapping"]["github"] = {"requested": github, "applied": github}
     return {
         "ok": True,
         "agent": "codex",
@@ -1811,6 +1884,7 @@ def _plan_claude_dispatch(
             "mode": "advisory",
             "workdir": None,
             "write": False,
+            **github_kwargs,
         },
         "routing": routing,
     }
@@ -1830,6 +1904,9 @@ def _ask_async_impl(
     write: bool,
     routing: dict | None = None,
     extra_ask_kwargs: dict | None = None,
+    github: str | None = None,
+    github_exclude: list | None = None,
+    github_tools: str = "none",
 ) -> dict:
     """Validate, reserve capacity, and publish a durable receipt without waiting."""
     known = adapters.known_agents()
@@ -1840,8 +1917,19 @@ def _ask_async_impl(
             "accepted": False,
             "dispatched": False,
         }
+    github_kwargs = {
+        "github": github,
+        "github_exclude": github_exclude,
+        "github_tools": github_tools,
+    }
     error, workdir = adapters.validate_request(
-        agent, model=model, effort=effort, mode=mode, workdir=workdir, write=write
+        agent,
+        model=model,
+        effort=effort,
+        mode=mode,
+        workdir=workdir,
+        write=write,
+        **github_kwargs,
     )
     if error:
         return {**error, "accepted": False, "dispatched": False}
@@ -1892,6 +1980,7 @@ def _ask_async_impl(
                 "mode": mode,
                 "workdir": workdir,
                 "write": write,
+                **_github_request(github, github_exclude, github_tools),
                 **({"routing": routing} if routing is not None else {}),
                 **({"model_resolution": resolution} if resolution else {}),
             },
@@ -1933,6 +2022,7 @@ def _ask_async_impl(
                 on_spawn=lambda pid: jobs.set_child_pid(
                     job_id, pid, started_key=jobs.process_key(pid), db_path=db_path
                 ),
+                **github_kwargs,
             )
             if ask_fn is _ask_claude_with_reserve_guard:
                 # Only the guarded Claude path can BLOCK before spawning, and
@@ -2009,6 +2099,8 @@ async def ask_codex_async(
     mode: CodexMode = "default",
     workdir: str | None = None,
     write: bool = False,
+    github: str | None = None,
+    github_exclude: list[str] | None = None,
 ) -> dict:
     """Dispatch a Codex task in the background; returns immediately.
 
@@ -2022,6 +2114,8 @@ async def ask_codex_async(
     advisory isolation is wanted, and omitting it here was a parity gap.
     A family name in ``model`` (``"astra"``) is resolved once, at admission, so
     the receipt's ``model_resolution`` names the model that will run.
+    ``github``/``github_exclude`` as for ``ask_codex``; the evidence is
+    collected when the job runs, and ``job_cancel`` reaches that collection.
     """
     return await _in_thread(
         _ask_async_impl,
@@ -2035,6 +2129,8 @@ async def ask_codex_async(
         mode=mode,
         workdir=workdir,
         write=write,
+        github=github,
+        github_exclude=github_exclude,
     )
 
 
@@ -2049,6 +2145,9 @@ async def ask_claude(
     require_claude: bool = False,
     override_claude_reserve: bool = False,
     override_reason: str | None = None,
+    github: str | None = None,
+    github_exclude: list[str] | None = None,
+    github_tools: GithubTools = "none",
 ) -> dict:
     """Ask Claude Code a question and wait for its reply.
 
@@ -2086,6 +2185,11 @@ async def ask_claude(
     telemetry or exhausted quota, and is echoed with every non-default request
     option under ``routing.invocation_overrides`` and ``routing.reserve_override``.
 
+    ``github``/``github_exclude`` attach a pull request exactly as for
+    ``ask_codex`` (and travel with a redirect to ChatGPT). The Claude reviewer
+    then has no tools at all; ``github_tools="read"`` grants Read/Grep/Glob
+    confined to ``workdir``, which it requires. Rejected with ``write=True``.
+
     DAMAGED OUTPUT: if any output line could not be parsed, the result comes
     back ``ok: false`` with ``malformed_lines`` and the recovered text under
     ``partial_reply`` instead of ``reply`` — content preserved but NOT
@@ -2103,6 +2207,9 @@ async def ask_claude(
         require_claude=require_claude,
         override_claude_reserve=override_claude_reserve,
         override_reason=override_reason,
+        github=github,
+        github_exclude=github_exclude,
+        github_tools=github_tools,
     )
     if not plan["ok"]:
         return {"ok": False, "error": plan["error"], "routing": plan["routing"]}
@@ -2126,6 +2233,9 @@ async def ask_claude_async(
     require_claude: bool = False,
     override_claude_reserve: bool = False,
     override_reason: str | None = None,
+    github: str | None = None,
+    github_exclude: list[str] | None = None,
+    github_tools: GithubTools = "none",
 ) -> dict:
     """Dispatch a Claude task in the background; returns immediately.
 
@@ -2138,6 +2248,7 @@ async def ask_claude_async(
 
     ``mode`` mirrors ``ask_claude`` — background review is exactly where
     advisory isolation is wanted, and omitting it here was a parity gap.
+    ``github``/``github_exclude``/``github_tools`` as for ``ask_claude``.
     """
     plan = await _in_thread(
         _plan_claude_dispatch,
@@ -2149,6 +2260,9 @@ async def ask_claude_async(
         require_claude=require_claude,
         override_claude_reserve=override_claude_reserve,
         override_reason=override_reason,
+        github=github,
+        github_exclude=github_exclude,
+        github_tools=github_tools,
     )
     if not plan["ok"]:
         return {
@@ -2171,6 +2285,9 @@ async def ask_claude_async(
         mode=ask_kwargs["mode"],
         workdir=ask_kwargs["workdir"],
         write=ask_kwargs["write"],
+        github=ask_kwargs["github"],
+        github_exclude=ask_kwargs["github_exclude"],
+        github_tools=ask_kwargs["github_tools"],
         routing=plan["routing"],
         extra_ask_kwargs={
             key: ask_kwargs[key]
