@@ -94,6 +94,11 @@ def _no_ambient_parent_lane(monkeypatch):
 _LIVE_MODULES = {"test_live_agents", "test_live_watch", "test_spawn_behaviour"}
 
 
+def _real_probes_for(module_name: str) -> bool:
+    """By module, never by ambient flag: a live flag must not un-stub unit tests."""
+    return module_name.rsplit(".", 1)[-1] in _LIVE_MODULES
+
+
 @pytest.fixture(autouse=True)
 def _no_codex_isolation_probes(monkeypatch, request):
     """Default every test to a Codex with the required features and no servers.
@@ -103,7 +108,7 @@ def _no_codex_isolation_probes(monkeypatch, request):
     suite and shift every captured command. The isolation tests restore the
     real functions.
     """
-    if request.module.__name__.rsplit(".", 1)[-1] in _LIVE_MODULES:
+    if _real_probes_for(request.module.__name__):
         return
     from hardline_mcp import adapters
 

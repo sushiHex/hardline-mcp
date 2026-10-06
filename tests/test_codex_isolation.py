@@ -222,6 +222,36 @@ def test_a_codex_without_the_features_refuses(codex, features, missing):
     assert out.get("ok") is False and missing in out.get("error", "")
 
 
+def test_the_executable_is_resolved_once_for_probes_and_launch(codex, monkeypatch):
+    """A name or shim can resolve differently each time it is looked up."""
+    lookups = iter(["codex-one", "codex-two", "codex-three", "codex-four"])
+    monkeypatch.setattr(adapters, "_prefix_for", lambda agent: [next(lookups), "exec"])
+    adapters.ask_codex("review")
+    assert {c["cmd"][0] for c in codex.calls} == {"codex-one"}, (
+        "the probed executable must be the launched one"
+    )
+
+
+def test_features_are_asked_fresh_on_every_call(codex):
+    """No cache: an upgrade that drops a feature must refuse the very next call."""
+    adapters.ask_codex("first")
+    assert len(_execs(codex.calls)) == 1
+    codex.features = "plugins  stable  true\n"
+    out = adapters.ask_codex("second")
+    assert len(_execs(codex.calls)) == 1, "the second call must not launch"
+    assert out.get("isolation") == "refused"
+
+
+def test_live_flags_never_unstub_unit_tests(monkeypatch):
+    import conftest
+
+    for flag in ("HARDLINE_LIVE_TESTS", "HARDLINE_LIVE_WATCH", "HARDLINE_TEST_SPAWN"):
+        monkeypatch.setenv(flag, "1")
+    assert not conftest._real_probes_for("tests.test_adapters")
+    assert not conftest._real_probes_for("test_codex_isolation")
+    assert conftest._real_probes_for("tests.test_live_agents")
+
+
 def test_a_cancel_at_the_first_probe_stops_the_call(codex):
     out = adapters.ask_codex("review", on_spawn=lambda pid: False)
     assert out.get("cancelled") is True

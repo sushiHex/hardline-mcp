@@ -838,5 +838,37 @@
     "tests": [
       "tests/test_codex_isolation.py::test_a_name_toml_cannot_express_refuses"
     ]
+  },
+  "codex-features-probe-same-executable": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        [exe, \"features\", \"list\"],\n",
+    "after": "        [_prefix_for(\"codex\")[0], \"features\", \"list\"],\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_the_executable_is_resolved_once_for_probes_and_launch"
+    ]
+  },
+  "codex-listing-same-executable": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        [exe, \"mcp\", \"list\", \"--json\", *_CODEX_NO_CONNECTORS],\n",
+    "after": "        [_prefix_for(\"codex\")[0], \"mcp\", \"list\", \"--json\", *_CODEX_NO_CONNECTORS],\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_the_executable_is_resolved_once_for_probes_and_launch"
+    ]
+  },
+  "codex-features-never-cached": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    return frozenset(names), run\n",
+    "after": "    _codex_features.memo = getattr(_codex_features, \"memo\", None) or (frozenset(names), run)\n    return _codex_features.memo\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_features_are_asked_fresh_on_every_call"
+    ]
+  },
+  "live-probes-scoped-by-module": {
+    "file": "tests/conftest.py",
+    "before": "    return module_name.rsplit(\".\", 1)[-1] in _LIVE_MODULES\n",
+    "after": "    return any(os.environ.get(n) == \"1\" for n in (\"HARDLINE_LIVE_TESTS\", \"HARDLINE_LIVE_WATCH\", \"HARDLINE_TEST_SPAWN\"))\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_live_flags_never_unstub_unit_tests"
+    ]
   }
 }
