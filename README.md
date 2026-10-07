@@ -134,11 +134,11 @@ before enabling unattended edits.
 
 ## Inbox signals
 
-Optional watchers alert an **existing session** to unread mail; the agent still
-calls `inbox` to consume it. Claude Code uses Monitor. Codex needs a compatible
-app-server connection, the exact thread ID, and the `codex-watch` extra.
-Follow [inbox signal setup](docs/inbox-signals.md), starting in the recipient
-with `server_info().watch.argv`.
+An **existing session** can be woken when its lanes get mail; the agent still
+calls `inbox` to consume it. Codex sessions are woken automatically through
+`codex queue`, once their top-level thread has made a hardline call. Claude Code sessions
+receive channel pushes when launched with the development-channels flag, and
+use Monitor otherwise. See [inbox signals](docs/inbox-signals.md).
 
 `send(..., deliver=True)` instead launches a separate agent CLI invocation.
 It does not wake an existing conversation.

@@ -35,7 +35,7 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification
 
-from . import adapters, channel, delivery, dispatch, jobs, mailbox, sessions, watch
+from . import adapters, channel, codex_queue, delivery, dispatch, jobs, mailbox, sessions, watch
 
 # Delivered by the host to every connected model, so the rule reaches sessions
 # working in other repositories - which never read this repo's docs.
@@ -683,6 +683,7 @@ async def inbox(
     limit: int = mailbox.DEFAULT_INBOX_LIMIT,
     auto_ack: bool = True,
     receipt: str | None = None,
+    after_id: int = 0,
 ) -> dict:
     """Read messages addressed to ``agent``, oldest first — one bounded batch.
 
@@ -713,6 +714,10 @@ async def inbox(
     ``remaining`` counts only what THIS caller could consume, so reading a
     lane you do not own reports zero rather than looping forever.
 
+    ``after_id`` returns only later messages. With ``auto_ack=false``, pass
+    the previous reply's ``last_message_id`` to read past mail you are leaving
+    unacked; stop when a read returns nothing.
+
     Bodies over ``_MAX_BODY_CHARS`` are truncated with a marker — call
     ``peek(message_id)`` for one message in full.
 
@@ -737,6 +742,15 @@ async def inbox(
         agents = [agent] + [
             lane for lane in adapters.owned_recipients(agent) if lane != agent
         ]
+    # The receipt first, before anything that can fail: it proves the push or
+    # notice reached this conversation whatever happens to the read, and a
+    # Codex wake stays paused until it is accepted. Offered to both
+    # transports; only the one that issued it accepts.
+    accepted = None
+    if receipt:
+        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(
+            codex_queue.accept_receipt, receipt
+        )
     # A throttled heartbeat on the polling path, because startup and
     # list_agents are not enough: if the store is rebuilt underneath the fleet,
     # every session that does neither stays invisible - and an invisible
@@ -750,6 +764,7 @@ async def inbox(
         unread_only=unread_only,
         limit=limit,
         auto_ack=auto_ack,
+        after_id=after_id,
     )
     msgs, truncated, _ = _fit_response(msgs, allow_drop=False)
     response = {
@@ -771,7 +786,6 @@ async def inbox(
             f"history(agent={agent!r}, before_id={msgs[-1]['message_id'] + 1})"
         )
     if receipt:
-        accepted = await _in_thread(channel.accept_receipt, receipt)
         response["receipt"] = "accepted" if accepted else "unknown"
     warning = _last_registration_failure()
     if warning:
@@ -847,8 +861,9 @@ async def list_agents() -> dict:
             f"{waited_as}:{label}"
             for label, waited_as in adapters.pending_claims().items()
         ],
-        # Push to this conversation: proven by receipts, never assumed.
-        "delivery": channel.state() or "none",
+        # Push (Claude) or queue-wake (Codex) to this conversation: proven by
+        # receipts, never assumed.
+        "delivery": channel.state() or codex_queue.state() or "none",
         "note": (
             "Pass your bare agent name as from_agent for background jobs; "
             "completion notices go to your lane. Use job_result for the answer."
@@ -2322,16 +2337,21 @@ async def _serve_stdio() -> None:
         await serve_streams(read, write, channel.Pusher(fulfil=_fulfil_pending))
 
 
-async def serve_streams(read, write, pusher: "channel.Pusher") -> None:
-    """Serve on the given streams: FastMCP's own ``Server.run``, plus two tasks.
+async def serve_streams(
+    read, write, pusher: "channel.Pusher", wake: "codex_queue.CodexWake | None" = None
+) -> None:
+    """Serve on the given streams: FastMCP's own ``Server.run``, plus three tasks.
 
     The initialize result declares ``experimental["claude/channel"]``, which
     FastMCP's ``run_stdio_async`` cannot - it passes no experimental
     capabilities. ``channel.tap`` observes the client's messages on their way
-    in; the pusher writes notifications to a clone of the write stream. All
-    MCP types stay here, so ``channel`` is pure logic like every other module.
+    in; the pusher writes notifications to a clone of the write stream for a
+    Claude Code client, and the Codex wake queues notices for a Codex one -
+    each returns at once for any other client. All MCP types stay here, so
+    ``channel`` and ``codex_queue`` are pure logic like every other module.
     """
     channel.install(pusher)
+    wake = codex_queue.install(wake or codex_queue.CodexWake(fulfil=pusher.fulfil))
     low = mcp._mcp_server
     options = low.create_initialization_options(
         experimental_capabilities={channel.CAPABILITY: {}}
@@ -2342,6 +2362,7 @@ async def serve_streams(read, write, pusher: "channel.Pusher") -> None:
     async with anyio.create_task_group() as tg:
         tg.start_soon(channel.tap, read, forward_send, initialized, client)
         tg.start_soon(_push, write.clone(), pusher, initialized, client)
+        tg.start_soon(wake.run, initialized, client)
         await low.run(forward_recv, write, options)
         tg.cancel_scope.cancel()
 

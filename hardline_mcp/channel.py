@@ -388,8 +388,10 @@ def state() -> Optional[str]:
 async def tap(read, forward, initialized: anyio.Event, client: dict) -> None:
     """Forward every client message unchanged, noting the client and init.
 
-    Duck-typed against the SDK's message objects, so this module needs no MCP
-    import.
+    Each ``tools/call``'s params also go to ``client["on_call"]`` when a
+    transport has set one (``codex_queue`` reads its thread there); this module
+    knows nothing about what it looks for. Duck-typed against the SDK's message
+    objects, so this module needs no MCP import.
     """
     async with read, forward:
         async for item in read:
@@ -404,4 +406,7 @@ async def tap(read, forward, initialized: anyio.Event, client: dict) -> None:
                 client["name"] = name if isinstance(name, str) else None
             elif method == "notifications/initialized":
                 initialized.set()
+            elif method == "tools/call" and client.get("on_call") is not None:
+                with contextlib.suppress(Exception):
+                    client["on_call"](getattr(root, "params", None))
             await forward.send(item)

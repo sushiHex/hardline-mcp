@@ -133,6 +133,24 @@ def test_inbox_limit_caps_batch_and_reports_remaining(tmp_path):
     assert remaining == 10
 
 
+def test_after_id_pages_past_mail_left_unacked(tmp_path):
+    """A reader deferring a full batch would otherwise re-read it forever and
+    never reach what arrived after it."""
+    db = tmp_path / "mb.db"
+    for i in range(10):
+        mailbox.send("codex", "hermes", f"m{i}", db_path=db)
+    first, _ = mailbox.inbox("hermes", limit=4, auto_ack=False, db_path=db)
+    second, remaining = mailbox.inbox(
+        "hermes", limit=4, auto_ack=False, after_id=first[-1]["message_id"], db_path=db
+    )
+    assert [m["body"] for m in second] == ["m4", "m5", "m6", "m7"]
+    assert remaining == 10, "after_id narrows the read, not the count"
+    last, _ = mailbox.inbox(
+        "hermes", auto_ack=False, after_id=second[-1]["message_id"] + 1, db_path=db
+    )
+    assert [m["body"] for m in last] == ["m9"], "strictly after: m8 is skipped"
+
+
 def test_repeated_polls_advance_through_the_backlog(tmp_path):
     """The regression that makes a bare ``limit`` worse than no limit.
 

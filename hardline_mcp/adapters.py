@@ -1098,6 +1098,23 @@ def _run_agent_cmd(
     return _run_cmd(argv, timeout_s=timeout_s, env=_agent_env(env), **kwargs)
 
 
+_CODEX_QUEUE_TIMEOUT_S = 30
+
+
+def queue_codex(thread: str, message: str) -> dict:
+    """Queue ``message`` as the next user turn of a running Codex thread.
+
+    Codex starts it as soon as the thread is idle (docs/codex-queue-wake.md).
+    ``ok`` means queued, never delivered. The thread is looked up in the store
+    this process's environment names, so a thread unknown there is rejected.
+    """
+    return _run_cmd(
+        [_prefix_for("codex")[0], "queue", "--thread", thread, "--message", message],
+        env=_agent_env(None),
+        timeout_s=_CODEX_QUEUE_TIMEOUT_S,
+    )
+
+
 def _codex_features(
     exe: str, env: dict | None, cwd: str | None, on_spawn=None
 ) -> tuple[frozenset | None, dict]:

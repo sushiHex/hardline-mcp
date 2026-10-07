@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -463,3 +464,149 @@ def test_claude_monitor_idle_isolation_and_stop(tmp_path, monkeypatch):
                 json.dumps(events, indent=2), encoding="utf-8"
             )
             process.stdin.close()
+
+
+def test_codex_queue_wake_end_to_end(tmp_path, monkeypatch):
+    """Nothing bound by hand: hardline, spawned by Codex as its MCP server,
+    learns the thread from its own tool calls and wakes it with `codex queue`.
+
+    The thread is persistent (`codex queue` addresses the thread store) and is
+    archived afterwards.
+    """
+    websockets = pytest.importorskip("websockets.sync.client")
+    executable = shutil.which("codex")
+    if not executable:
+        pytest.skip("Codex CLI is unavailable")
+    db = tmp_path / "mailbox.db"
+    monkeypatch.setenv("HARDLINE_DB", str(db))
+    with contextlib.closing(mailbox._connect(db)):
+        pass
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        endpoint = f"ws://127.0.0.1:{reservation.getsockname()[1]}"
+    tools = ("list_agents", "server_info", "inbox", "ack")
+    lane = "codex:queue-probe"
+    # Isolated as #42 isolates ask_codex: the user's own servers and
+    # connectors stay out, so nothing but hardline can stall or answer.
+    from hardline_mcp import adapters
+
+    configured, run = adapters._codex_mcp_servers(executable, None, str(tmp_path))
+    assert configured is not None, run
+    params = {
+        "cwd": str(tmp_path),
+        "sandbox": "read-only",
+        "approvalPolicy": "never",
+        # A top-level thread, as the TUI starts one. Without it the thread is
+        # unclassified, and hardline rightly never adopts it as an address.
+        "threadSource": "user",
+        "config": {
+            "features": {"apps": False, "plugins": False},
+            "mcp_servers": {
+                **{name: {"enabled": False} for name in configured},
+                "hardline": {
+                    "command": sys.executable,
+                    "args": ["-m", "hardline_mcp.server"],
+                    "env": {
+                        "HARDLINE_DB": str(db),
+                        "HARDLINE_AGENT": "codex",
+                        "HARDLINE_AGENT_LABEL": "queue-probe",
+                        # The code under test, not whatever the editable
+                        # install points at.
+                        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+                    },
+                    "enabled_tools": list(tools),
+                    "tools": {name: {"approval_mode": "approve"} for name in tools},
+                },
+            }
+        },
+        "developerInstructions": (
+            "This is an isolated inbox acceptance session. No delegation, filesystem changes, or "
+            "outgoing messages. When asked to get ready, call hardline's list_agents, then reply READY."
+        ),
+    }
+    thread = None
+    with (
+        client_process(
+            [executable, "app-server", "--listen", endpoint],
+            tmp_path,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+        ) as process,
+        contextlib.ExitStack() as stack,
+    ):
+        for _ in range(100):
+            assert process.poll() is None, f"app-server exited; see {tmp_path / 'runtime.log'}"
+            try:
+                ws = stack.enter_context(
+                    websockets.connect(endpoint, proxy=None, open_timeout=1, close_timeout=1)
+                )
+                break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            pytest.fail("app-server listener did not start")
+        host = Host(ws)
+        host.rpc(
+            "initialize",
+            {
+                "clientInfo": {"name": "hardline_acceptance", "version": "1"},
+                "capabilities": {"experimentalApi": True},
+            },
+        )
+        ws.send(json.dumps({"method": "initialized", "params": {}}))
+        thread = host.rpc("thread/start", params)["thread"]["id"]
+
+        def completed(n, timeout):
+            """Wait on the server's own turn/completed notifications. Not
+            thread/read polling: on a persistent thread, rapid reads during
+            startup were seen to wedge the app-server (0.156.1)."""
+            deadline = time.monotonic() + timeout
+            done = lambda: sum(  # noqa: E731
+                e.get("method") == "turn/completed" and e["params"]["threadId"] == thread
+                for e in host.events
+            )
+            while done() < n:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, f"turn {n} did not complete within {timeout}s"
+                try:
+                    host.events.append(json.loads(ws.recv(timeout=min(remaining, 5))))
+                except TimeoutError:
+                    pass
+
+        try:
+            host.rpc(
+                "turn/start",
+                {
+                    "threadId": thread,
+                    "input": [{"type": "text", "text": "Get ready.", "text_elements": []}],
+                },
+            )
+            completed(1, 150)
+
+            started = time.monotonic()
+            sent = mailbox.send("claude", lane, "Isolated queue-wake test data.", db_path=db)
+            completed(2, 180)  # nobody starts this turn but the queued notice
+            print(f"Codex queue-wake turn completed in {time.monotonic() - started:.1f}s")
+            with contextlib.closing(sqlite3.connect(db)) as conn:
+                acked = conn.execute(
+                    "SELECT acked_at FROM messages WHERE id = ?", (sent["message_id"],)
+                ).fetchone()[0]
+            assert acked, "the woken session drained its inbox"
+            assert host.turns(thread) == 2, "exactly one turn, started by the queued notice"
+            receipts = [
+                json.loads(item["result"]["content"][0]["text"]).get("receipt")
+                for e in host.events
+                if e.get("method") == "item/completed"
+                for item in [e["params"]["item"]]
+                if item.get("type") == "mcpToolCall"
+                and item.get("tool") == "inbox"
+                and (item.get("arguments") or {}).get("receipt")
+            ]
+            assert "accepted" in receipts, f"the notice's receipt came back: {receipts}"
+        finally:
+            (tmp_path / "events.json").write_text(
+                json.dumps(host.events, indent=2), encoding="utf-8"
+            )
+            subprocess.run(
+                [executable, "archive", thread], capture_output=True, timeout=60
+            )
