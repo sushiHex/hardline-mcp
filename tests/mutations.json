@@ -1432,5 +1432,143 @@
     "tests": [
       "tests/test_jobs.py::test_cancel_kills_the_child_even_when_finish_clears_it_after_the_claim"
     ]
+  },
+  "codexwake-only-top-level-thread-pins": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "                if turn.get(\"thread_source\") != \"user\":\n                    return  # only a top-level thread is ever the address",
+    "after": "                if False:\n                    return  # only a top-level thread is ever the address",
+    "tests": [
+      "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[subagent]",
+      "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[no-source]"
+    ]
+  },
+  "codexwake-thread-must-be-a-uuid": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "        return str(uuid.UUID(value))",
+    "after": "        return value",
+    "tests": [
+      "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[not-a-uuid]"
+    ]
+  },
+  "codexwake-thread-agrees-with-turn-metadata": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "        if thread is None or turn.get(\"thread_id\") not in (None, thread):",
+    "after": "        if thread is None:",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_thread_id_that_disagrees_with_its_turn_metadata_is_ignored"
+    ]
+  },
+  "codexwake-second-thread-is-a-conflict": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "                    self.conflict = True\n",
+    "after": "                    self.thread = thread\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_second_top_level_thread_stops_waking_rather_than_migrating"
+    ]
+  },
+  "codexwake-conflict-stops-polling": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "            if thread is None or self.conflict or self.outstanding is not None:",
+    "after": "            if thread is None or self.outstanding is not None:",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_second_top_level_thread_stops_waking_rather_than_migrating"
+    ]
+  },
+  "codexwake-one-outstanding-notice": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "            if thread is None or self.conflict or self.outstanding is not None:",
+    "after": "            if thread is None or self.conflict:",
+    "tests": [
+      "tests/test_codex_queue.py::test_one_notice_until_its_receipt",
+      "tests/test_codex_queue.py::test_reading_the_mail_is_not_evidence_the_notice_ran"
+    ]
+  },
+  "codexwake-queued-turn-is-evidence": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "            if turn.get(\"turn_trigger\") == \"queue\":",
+    "after": "            if False:",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_queued_turn_on_the_thread_is_evidence_the_notice_ran"
+    ]
+  },
+  "codexwake-user-turn-is-not-evidence": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "            if turn.get(\"turn_trigger\") == \"queue\":",
+    "after": "            if turn.get(\"turn_trigger\") in (\"queue\", \"user\"):",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_queued_turn_on_the_thread_is_evidence_the_notice_ran"
+    ]
+  },
+  "codexwake-receipt-proves-only-itself": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "            if self.outstanding is None or self.outstanding[0] != nonce:",
+    "after": "            if self.outstanding is None:",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_receipt_proves_only_its_own_notice"
+    ]
+  },
+  "codexwake-failed-attempt-stays-outstanding": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "                    if not result.get(\"ok\"):\n",
+    "after": "                    if not result.get(\"ok\"):\n                        self.outstanding = None\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_failed_attempt_stays_outstanding"
+    ]
+  },
+  "codexwake-new-mail-only": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "        new = [r for r in rows if r[\"id\"] not in self.announced]",
+    "after": "        new = list(rows)",
+    "tests": [
+      "tests/test_codex_queue.py::test_deferred_mail_is_not_re_announced"
+    ]
+  },
+  "codexwake-granted-lanes-only": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "            new = [r for r in new if r[\"recipient\"] in held]",
+    "after": "            new = new",
+    "tests": [
+      "tests/test_codex_queue.py::test_mail_on_an_ungranted_lane_is_not_announced"
+    ]
+  },
+  "codexwake-codex-client-only": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "        if client.get(\"name\") != CLIENT:\n            return\n        client[\"on_call\"]",
+    "after": "        if False:\n            return\n        client[\"on_call\"]",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_claude_client_is_never_queue_woken"
+    ]
+  },
+  "codexwake-tap-forwards-tool-calls": {
+    "file": "hardline_mcp/channel.py",
+    "before": "                    client[\"on_call\"](getattr(root, \"params\", None))",
+    "after": "                    pass",
+    "tests": [
+      "tests/test_codex_queue.py::test_the_session_is_woken_with_only_the_constant_notice"
+    ]
+  },
+  "codexwake-receipt-routed-to-codex": {
+    "file": "hardline_mcp/server.py",
+    "before": "        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(\n            codex_queue.accept_receipt, receipt\n        )",
+    "after": "        accepted = await _in_thread(channel.accept_receipt, receipt)",
+    "tests": [
+      "tests/test_codex_queue.py::test_one_notice_until_its_receipt"
+    ]
+  },
+  "codexwake-delivery-state-reported": {
+    "file": "hardline_mcp/server.py",
+    "before": "        \"delivery\": channel.state() or codex_queue.state() or \"none\",",
+    "after": "        \"delivery\": channel.state() or \"none\",",
+    "tests": [
+      "tests/test_codex_queue.py::test_the_session_reports_its_delivery_state"
+    ]
+  },
+  "codexwake-queue-strips-the-write-gate": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        env=_agent_env(None),\n        timeout_s=_CODEX_QUEUE_TIMEOUT_S,",
+    "after": "        env=None,\n        timeout_s=_CODEX_QUEUE_TIMEOUT_S,",
+    "tests": [
+      "tests/test_codex_queue.py::test_codex_queue_is_run_with_the_resolved_codex_and_no_write_gate"
+    ]
   }
 }

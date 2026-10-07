@@ -73,6 +73,6 @@ A receipt echoed by a subagent proves the nonce was seen inside the conversation
 
 ## Not in scope
 
-- **Codex:** `wake_codex` covers it.
+- **Codex:** [queue-wake](codex-queue-wake.md), a separate transport beside this pusher (`codex_queue.CodexWake`), plus `wake_codex` for hosts with an app-server endpoint.
 - **The Monitor's bare-mail scope:** `watch.py` includes the bare name deliberately.
 - **Spare background sessions** registering lanes.

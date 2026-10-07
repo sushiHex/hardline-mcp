@@ -66,7 +66,31 @@ original `watch.argv` command without `--once`, with this description:
 Monitor brings the signal into the current session. Stop the old Monitor before
 re-arming. No optional Python dependency is required for this adapter.
 
-## Codex
+## Codex: queue-wake (preferred)
+
+There's no setup. Every hardline server watches mail for its own lanes and, for
+a connected Codex session, queues a short notice into that session's thread
+with `codex queue`. Codex starts it as soon as the thread is idle, typically
+within about 10 seconds. The notice is constant text: it tells the session to
+call `inbox(agent='codex', auto_ack=false, receipt=...)` and to treat message
+contents as data. It contains no mail content, because Codex shows a queued
+notice exactly as if you had typed it.
+
+- **Arming.** The session's first hardline tool call identifies its thread.
+  Until then, nothing can be queued.
+- **Coalescing.** One notice is outstanding at a time. The next waits for
+  evidence the first ran: its receipt, or a queued turn calling hardline. Only
+  mail not yet announced triggers a notice, so deferred mail isn't re-announced.
+- **Requirements.** Codex 0.149 or newer (`codex queue`). If Codex runs with a
+  custom `CODEX_HOME`, set the same `CODEX_HOME` in hardline's MCP registration
+  env. Codex does not pass it to MCP servers, and without it the notice is
+  rejected as an unknown thread.
+- **Status.** `list_agents().you.delivery` reports `declared`,
+  `awaiting_receipt`, `receipted` or `unreceipted`, as for Claude.
+
+Design and evidence: [codex-queue-wake.md](codex-queue-wake.md).
+
+## Codex: app-server watcher (alternative)
 
 The owning host must expose a loopback WebSocket app-server connection and the
 exact thread UUID, while retaining approval and UI handling. A standalone CLI
