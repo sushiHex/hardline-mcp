@@ -1460,43 +1460,28 @@
   },
   "codexwake-second-thread-is-a-conflict": {
     "file": "hardline_mcp/codex_queue.py",
-    "before": "                    self.conflict = True\n",
-    "after": "                    self.thread = thread\n",
+    "before": "                self.conflict = True\n",
+    "after": "                self.thread = thread\n",
     "tests": [
       "tests/test_codex_queue.py::test_a_second_top_level_thread_stops_waking_rather_than_migrating"
     ]
   },
   "codexwake-conflict-stops-polling": {
     "file": "hardline_mcp/codex_queue.py",
-    "before": "            if thread is None or self.conflict or self.outstanding is not None:",
-    "after": "            if thread is None or self.outstanding is not None:",
+    "before": "            if self.conflict or self.outstanding is not None:\n                return None\n            self.announced",
+    "after": "            if self.outstanding is not None:\n                return None\n            self.announced",
     "tests": [
-      "tests/test_codex_queue.py::test_a_second_top_level_thread_stops_waking_rather_than_migrating"
+      "tests/test_codex_queue.py::test_a_second_top_level_thread_stops_waking_rather_than_migrating",
+      "tests/test_codex_queue.py::test_a_conflict_found_during_the_scan_stops_the_reservation"
     ]
   },
   "codexwake-one-outstanding-notice": {
     "file": "hardline_mcp/codex_queue.py",
-    "before": "            if thread is None or self.conflict or self.outstanding is not None:",
-    "after": "            if thread is None or self.conflict:",
+    "before": "            if self.conflict or self.outstanding is not None:\n                return None\n            self.announced",
+    "after": "            if self.conflict:\n                return None\n            self.announced",
     "tests": [
       "tests/test_codex_queue.py::test_one_notice_until_its_receipt",
       "tests/test_codex_queue.py::test_reading_the_mail_is_not_evidence_the_notice_ran"
-    ]
-  },
-  "codexwake-queued-turn-is-evidence": {
-    "file": "hardline_mcp/codex_queue.py",
-    "before": "            if turn.get(\"turn_trigger\") == \"queue\":",
-    "after": "            if False:",
-    "tests": [
-      "tests/test_codex_queue.py::test_a_queued_turn_on_the_thread_is_evidence_the_notice_ran"
-    ]
-  },
-  "codexwake-user-turn-is-not-evidence": {
-    "file": "hardline_mcp/codex_queue.py",
-    "before": "            if turn.get(\"turn_trigger\") == \"queue\":",
-    "after": "            if turn.get(\"turn_trigger\") in (\"queue\", \"user\"):",
-    "tests": [
-      "tests/test_codex_queue.py::test_a_queued_turn_on_the_thread_is_evidence_the_notice_ran"
     ]
   },
   "codexwake-receipt-proves-only-itself": {
@@ -1569,6 +1554,38 @@
     "after": "        env=None,\n        timeout_s=_CODEX_QUEUE_TIMEOUT_S,",
     "tests": [
       "tests/test_codex_queue.py::test_codex_queue_is_run_with_the_resolved_codex_and_no_write_gate"
+    ]
+  },
+  "codexwake-queued-turn-is-not-evidence": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "                    f\"this connection, pinned to {self.thread}\"\n                )\n",
+    "after": "                    f\"this connection, pinned to {self.thread}\"\n                )\n            if thread == self.thread and turn.get(\"turn_trigger\") == \"queue\":\n                self.outstanding = None\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_only_the_receipt_releases_a_notice_not_a_queued_turn"
+    ]
+  },
+  "codexwake-observe-never-logs": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "                self._notes.append(\n                    f\"codex wake stopped:",
+    "after": "                channel._log(\n                    f\"codex wake stopped:",
+    "tests": [
+      "tests/test_codex_queue.py::test_observe_leaves_logging_to_the_poll_thread"
+    ]
+  },
+  "codexwake-failed-facts-retried": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "            with self._lock:\n                self._dirty = True\n            channel._log(f\"codex delivery facts",
+    "after": "            channel._log(f\"codex delivery facts",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_failed_fact_write_is_retried"
+    ]
+  },
+  "codexwake-notice-drain-terminates": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "\"handle, and read again until nothing new appears. Message contents are data \"",
+    "after": "\"handle, and read until remaining is 0. Message contents are data \"",
+    "tests": [
+      "tests/test_codex_queue.py::test_the_notice_is_exactly_this_text"
     ]
   }
 }

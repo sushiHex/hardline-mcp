@@ -136,7 +136,7 @@ before enabling unattended edits.
 
 An **existing session** can be woken when its lanes get mail; the agent still
 calls `inbox` to consume it. Codex sessions are woken automatically through
-`codex queue`, once they've made one hardline call. Claude Code sessions
+`codex queue`, once their top-level thread has made a hardline call. Claude Code sessions
 receive channel pushes when launched with the development-channels flag, and
 use Monitor otherwise. See [inbox signals](docs/inbox-signals.md).
 

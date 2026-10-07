@@ -63,7 +63,8 @@ Dependencies point one way: `procid` <- `mailbox` <- `jobs`/`sessions` <-
 - `codex_queue.py` is the Codex counterpart, beside the pusher in the same
   loop: it pins the session's thread from `tools/call` `_meta` (through the
   tap's `on_call` hook) and queues a constant notice with `codex queue`. One
-  notice is outstanding until evidence it ran. See `docs/codex-queue-wake.md`.
+  notice is outstanding until its own receipt returns. See
+  `docs/codex-queue-wake.md`.
 
 Design rationale is in `docs/architecture.md`. The tool contracts are in
 `docs/messaging.md`, env vars (`HARDLINE_*`) in `docs/configuration.md`, and

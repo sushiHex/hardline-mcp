@@ -593,11 +593,16 @@ def test_codex_queue_wake_end_to_end(tmp_path, monkeypatch):
                 ).fetchone()[0]
             assert acked, "the woken session drained its inbox"
             assert host.turns(thread) == 2, "exactly one turn, started by the queued notice"
-            with contextlib.closing(sqlite3.connect(db)) as conn:
-                receipted = conn.execute(
-                    "SELECT last_receipted_push_at FROM push_delivery"
-                ).fetchall()
-            assert any(r[0] for r in receipted), "the notice's receipt came back"
+            receipts = [
+                json.loads(item["result"]["content"][0]["text"]).get("receipt")
+                for e in host.events
+                if e.get("method") == "item/completed"
+                for item in [e["params"]["item"]]
+                if item.get("type") == "mcpToolCall"
+                and item.get("tool") == "inbox"
+                and (item.get("arguments") or {}).get("receipt")
+            ]
+            assert "accepted" in receipts, f"the notice's receipt came back: {receipts}"
         finally:
             (tmp_path / "events.json").write_text(
                 json.dumps(host.events, indent=2), encoding="utf-8"

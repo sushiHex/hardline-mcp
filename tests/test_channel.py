@@ -36,6 +36,7 @@ def store(monkeypatch, tmp_path, in_session):
     assert server._announce_self() == LANE
     yield db
     channel._pusher = None
+    server.codex_queue._wake = None  # serve_streams installs one beside the pusher
 
 
 class Clock:

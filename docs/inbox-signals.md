@@ -76,11 +76,14 @@ call `inbox(agent='codex', auto_ack=false, receipt=...)` and to treat message
 contents as data. It contains no mail content, because Codex shows a queued
 notice exactly as if you had typed it.
 
-- **Arming.** The session's first hardline tool call identifies its thread.
-  Until then, nothing can be queued.
-- **Coalescing.** One notice is outstanding at a time. The next waits for
-  evidence the first ran: its receipt, or a queued turn calling hardline. Only
-  mail not yet announced triggers a notice, so deferred mail isn't re-announced.
+- **Arming.** The session's first hardline tool call from a top-level thread
+  identifies it. A normal Codex session is one; a subagent, or a thread an
+  app-server client started without `threadSource`, is not. Until then, nothing
+  can be queued.
+- **Coalescing.** One notice is outstanding at a time; only its receipt
+  releases it. Only mail not yet announced triggers a notice, so deferred mail
+  isn't re-announced. If a notice's receipt never comes back, waking pauses
+  rather than repeats.
 - **Requirements.** Codex 0.149 or newer (`codex queue`). If Codex runs with a
   custom `CODEX_HOME`, set the same `CODEX_HOME` in hardline's MCP registration
   env. Codex does not pass it to MCP servers, and without it the notice is
