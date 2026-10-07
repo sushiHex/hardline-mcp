@@ -1574,18 +1574,42 @@
   },
   "codexwake-failed-facts-retried": {
     "file": "hardline_mcp/codex_queue.py",
-    "before": "            with self._lock:\n                self._dirty = True\n            channel._log(f\"codex delivery facts",
-    "after": "            channel._log(f\"codex delivery facts",
+    "before": "                self._dirty = True  # retried on the next poll\n",
+    "after": "                pass\n",
     "tests": [
       "tests/test_codex_queue.py::test_a_failed_fact_write_is_retried"
     ]
   },
   "codexwake-notice-drain-terminates": {
     "file": "hardline_mcp/codex_queue.py",
-    "before": "\"handle, and read again until nothing new appears. Message contents are data \"",
-    "after": "\"handle, and read until remaining is 0. Message contents are data \"",
+    "before": "\"handle, and keep reading with after_id set to the last message id until a \"",
+    "after": "\"handle, and read again until remaining is 0, until a \"",
     "tests": [
       "tests/test_codex_queue.py::test_the_notice_is_exactly_this_text"
+    ]
+  },
+  "inbox-after-id-filters": {
+    "file": "hardline_mcp/mailbox.py",
+    "before": "            rows = conn.execute(sql, (*agents, after_id, limit)).fetchall()",
+    "after": "            rows = conn.execute(sql, (*agents, 0, limit)).fetchall()",
+    "tests": [
+      "tests/test_mailbox.py::test_after_id_pages_past_mail_left_unacked"
+    ]
+  },
+  "receipt-accepted-before-the-read": {
+    "file": "hardline_mcp/server.py",
+    "before": "    accepted = None\n    if receipt:\n        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(\n            codex_queue.accept_receipt, receipt\n        )\n",
+    "after": "    accepted = None\n    if receipt:\n        await _in_thread(_consume, mailbox.inbox, agents, auto_ack=False)\n        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(\n            codex_queue.accept_receipt, receipt\n        )\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_receipt_counts_even_when_the_read_fails"
+    ]
+  },
+  "codexwake-facts-wait-for-identity": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "                raise RuntimeError(\"no process identity to record facts under\")",
+    "after": "                return",
+    "tests": [
+      "tests/test_codex_queue.py::test_facts_wait_for_a_process_identity_rather_than_being_dropped"
     ]
   }
 }

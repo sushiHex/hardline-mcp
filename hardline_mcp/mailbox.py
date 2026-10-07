@@ -449,11 +449,17 @@ def inbox(
     unread_only: bool = True,
     limit: int = DEFAULT_INBOX_LIMIT,
     auto_ack: bool = True,
+    after_id: int = 0,
     owned: LaneSpec | Callable[[sqlite3.Connection], LaneSpec] = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
 ) -> tuple[list[dict], int]:
     """Messages addressed TO ``agent``, oldest first (read in arrival order).
+
+    ``after_id`` returns only messages with a larger id: how a reader that
+    leaves mail unacked (``auto_ack=False``, deferring it) pages past it to
+    what came later, instead of re-reading the same first batch. It does not
+    change ``remaining``.
 
     Returns ``(messages, remaining)`` where ``remaining`` counts the messages
     still unacked for these recipients AFTER this call - a caller polls again
@@ -502,6 +508,10 @@ def inbox(
     except (TypeError, ValueError):
         limit = DEFAULT_INBOX_LIMIT
     limit = max(1, min(limit, MAX_INBOX_LIMIT))
+    try:
+        after_id = max(0, int(after_id or 0))
+    except (TypeError, ValueError):
+        after_id = 0
 
     # Consuming an already-acked row is impossible, so pairing auto_ack with
     # unread_only=False would re-serve the same oldest acked batch on every
@@ -510,7 +520,7 @@ def inbox(
     consuming = auto_ack and unread_only
 
     placeholders = ", ".join("?" for _ in agents)
-    sql = f"SELECT * FROM messages WHERE recipient IN ({placeholders})"
+    sql = f"SELECT * FROM messages WHERE recipient IN ({placeholders}) AND id > ?"
     if unread_only:
         sql += " AND acked_at IS NULL"
     sql += " ORDER BY id ASC LIMIT ?"
@@ -528,8 +538,8 @@ def inbox(
             # what would have happened had it arrived a moment later.
             probe = conn.execute(
                 f"SELECT 1 FROM messages WHERE recipient IN ({placeholders})"
-                " AND acked_at IS NULL LIMIT 1",
-                tuple(agents),
+                " AND id > ? AND acked_at IS NULL LIMIT 1",
+                (*agents, after_id),
             ).fetchone()
             if probe is None:
                 return [], 0
@@ -554,7 +564,7 @@ def inbox(
             elif callable(owned):
                 conn.execute("BEGIN")
             owned = _lanes(owned(conn)) if callable(owned) else owned
-            rows = conn.execute(sql, (*agents, limit)).fetchall()
+            rows = conn.execute(sql, (*agents, after_id, limit)).fetchall()
             messages = [_row_to_dict(r) for r in rows]
 
             if consuming and messages:

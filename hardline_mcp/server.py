@@ -683,6 +683,7 @@ async def inbox(
     limit: int = mailbox.DEFAULT_INBOX_LIMIT,
     auto_ack: bool = True,
     receipt: str | None = None,
+    after_id: int = 0,
 ) -> dict:
     """Read messages addressed to ``agent``, oldest first — one bounded batch.
 
@@ -713,6 +714,10 @@ async def inbox(
     ``remaining`` counts only what THIS caller could consume, so reading a
     lane you do not own reports zero rather than looping forever.
 
+    ``after_id`` returns only later messages. With ``auto_ack=false``, pass
+    the previous reply's ``last_message_id`` to read past mail you are leaving
+    unacked; stop when a read returns nothing.
+
     Bodies over ``_MAX_BODY_CHARS`` are truncated with a marker — call
     ``peek(message_id)`` for one message in full.
 
@@ -737,6 +742,15 @@ async def inbox(
         agents = [agent] + [
             lane for lane in adapters.owned_recipients(agent) if lane != agent
         ]
+    # The receipt first, before anything that can fail: it proves the push or
+    # notice reached this conversation whatever happens to the read, and a
+    # Codex wake stays paused until it is accepted. Offered to both
+    # transports; only the one that issued it accepts.
+    accepted = None
+    if receipt:
+        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(
+            codex_queue.accept_receipt, receipt
+        )
     # A throttled heartbeat on the polling path, because startup and
     # list_agents are not enough: if the store is rebuilt underneath the fleet,
     # every session that does neither stays invisible - and an invisible
@@ -750,6 +764,7 @@ async def inbox(
         unread_only=unread_only,
         limit=limit,
         auto_ack=auto_ack,
+        after_id=after_id,
     )
     msgs, truncated, _ = _fit_response(msgs, allow_drop=False)
     response = {
@@ -771,10 +786,6 @@ async def inbox(
             f"history(agent={agent!r}, before_id={msgs[-1]['message_id'] + 1})"
         )
     if receipt:
-        # Offered to both transports; only the one that issued it accepts.
-        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(
-            codex_queue.accept_receipt, receipt
-        )
         response["receipt"] = "accepted" if accepted else "unknown"
     warning = _last_registration_failure()
     if warning:
