@@ -73,6 +73,7 @@ A receipt echoed by a subagent proves the nonce was seen inside the conversation
 
 ## Not in scope
 
+- **Claude Code without the flag:** [inbox wake](claude-inbox-wake.md) serves any session whose own inbox hardline can prove, and replaces this pusher there. This pusher is the fallback.
 - **Codex:** [queue-wake](codex-queue-wake.md), a separate transport beside this pusher (`codex_queue.CodexWake`), plus `wake_codex` for hosts with an app-server endpoint.
 - **The Monitor's bare-mail scope:** `watch.py` includes the bare name deliberately.
 - **Spare background sessions** registering lanes.

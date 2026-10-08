@@ -24,6 +24,13 @@ os.environ["HARDLINE_DB"] = str(Path(_store.name) / "mailbox.db")
 _previous_snapshots = os.environ.get("HARDLINE_GITHUB_SNAPSHOT_DIR")
 os.environ["HARDLINE_GITHUB_SNAPSHOT_DIR"] = str(Path(_store.name) / "github")
 
+# Run inside a Claude Code session, the suite inherits that session's own
+# inbox and the token that makes a message its own child's. A server under test
+# - in process or spawned - would prove it the session's (its ancestors include
+# that claude.exe) and post real notices into it. Never the operator's inbox.
+_INBOX_ENV = ("CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN")
+_previous_inbox = {name: os.environ.pop(name, None) for name in _INBOX_ENV}
+
 from hardline_mcp import mailbox
 
 _previous_default = mailbox._DEFAULT_PATH
@@ -45,6 +52,7 @@ def pytest_unconfigure(config):
     for name, previous in (
         ("HARDLINE_DB", _previous_db),
         ("HARDLINE_GITHUB_SNAPSHOT_DIR", _previous_snapshots),
+        *_previous_inbox.items(),
     ):
         if previous is None:
             os.environ.pop(name, None)

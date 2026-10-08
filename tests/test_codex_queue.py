@@ -12,7 +12,7 @@ import os
 import anyio
 import pytest
 
-from hardline_mcp import adapters, channel, codex_queue, mailbox, server
+from hardline_mcp import adapters, announce, channel, codex_queue, mailbox, server
 from test_channel import serving
 
 THREAD = "01a11615-8a45-7d40-a4d2-7912b0a4a28e"
@@ -30,7 +30,7 @@ def lane(monkeypatch, tmp_path, spawned_by_codex):
     lane = f"codex:{spawned_by_codex}"
     assert server._announce_self() == lane
     yield lane
-    codex_queue._wake = None
+    announce.install()
     channel._pusher = None
 
 
@@ -134,7 +134,7 @@ async def test_only_a_top_level_thread_becomes_the_address(lane, kw):
         await call(wire, **kw)
         mailbox.send("claude", lane, "hello")
         await queue.none_beyond(0)
-        assert wake.thread is None
+        assert wake.address is None
         tg.cancel_scope.cancel()
 
 
@@ -147,7 +147,7 @@ async def test_a_second_top_level_thread_stops_waking_rather_than_migrating(lane
         await call(wire, thread=OTHER)
         mailbox.send("claude", lane, "hello")
         await queue.none_beyond(0)
-        assert wake.thread == THREAD and wake.conflict
+        assert wake.address == THREAD and wake.stopped
         tg.cancel_scope.cancel()
 
 
@@ -294,7 +294,7 @@ async def test_bare_mail_never_wakes(lane):
 def _armed(monkeypatch, rows, held):
     monkeypatch.setattr(channel, "unread", lambda owned, after=0: (list(rows), 0))
     monkeypatch.setattr(adapters, "owned_recipients", lambda agent=None: tuple(held))
-    monkeypatch.setattr(codex_queue.sessions, "granted", lambda owned: list(held))
+    monkeypatch.setattr(announce.sessions, "granted", lambda owned: list(held))
     wake = codex_queue.CodexWake(queue=Queue())
     wake.observe({"_meta": meta()})
     return wake
@@ -303,11 +303,11 @@ def _armed(monkeypatch, rows, held):
 def test_mail_on_a_lane_claimed_later_is_announced_despite_lower_ids(monkeypatch):
     rows = [{"id": 10, "recipient": "codex:a"}]
     wake = _armed(monkeypatch, rows, ["codex:a"])
-    _, nonce = wake.poll()
+    _, nonce, _ = wake.poll()
     assert wake.accept_receipt(nonce)
     rows.append({"id": 5, "recipient": "codex:b"})  # its backlog predates id 10
     monkeypatch.setattr(channel, "unread", lambda owned, after=0: (list(rows), 0))
-    monkeypatch.setattr(codex_queue.sessions, "granted", lambda owned: ["codex:a", "codex:b"])
+    monkeypatch.setattr(announce.sessions, "granted", lambda owned: ["codex:a", "codex:b"])
     assert wake.poll() is not None
 
 
@@ -325,7 +325,7 @@ def test_a_conflict_found_during_the_scan_stops_the_reservation(monkeypatch):
 
     monkeypatch.setattr(channel, "unread", scan_while_another_thread_calls)
     assert wake.poll() is None
-    assert wake.conflict and wake.outstanding is None
+    assert wake.stopped and wake.outstanding is None
 
 
 def test_observe_leaves_logging_to_the_poll_thread(monkeypatch):
@@ -335,7 +335,7 @@ def test_observe_leaves_logging_to_the_poll_thread(monkeypatch):
     logged = []
     monkeypatch.setattr(channel, "_log", logged.append)
     wake.observe({"_meta": meta(thread=OTHER)})
-    assert wake.conflict and logged == [], "nothing written on the event loop"
+    assert wake.stopped and logged == [], "nothing written on the event loop"
     wake.poll()
     assert any("second top-level thread" in line for line in logged)
 
@@ -345,9 +345,9 @@ async def test_a_receipt_counts_even_when_the_read_fails(monkeypatch):
     """Otherwise a store error during that one read would pause waking for
     good: later reads do not repeat the nonce."""
     wake = _armed(monkeypatch, [{"id": 1, "recipient": "codex:a"}], ["codex:a"])
-    codex_queue.install(wake)
+    announce.install(wake)
     try:
-        _, nonce = wake.poll()
+        _, nonce, _ = wake.poll()
 
         def store_error(*a, **k):
             raise OSError("database is locked")
@@ -357,16 +357,16 @@ async def test_a_receipt_counts_even_when_the_read_fails(monkeypatch):
             await server.inbox(agent="codex", auto_ack=False, receipt=nonce)
         assert wake.outstanding is None, "the receipt was accepted before the read"
     finally:
-        codex_queue._wake = None
+        announce.install()
 
 
 def test_facts_wait_for_a_process_identity_rather_than_being_dropped(monkeypatch):
     wake = _armed(monkeypatch, [], ["codex:a"])
     writes = []
     identities = iter([(1, None), (1, "key")])
-    monkeypatch.setattr(codex_queue.procid, "current_identity", lambda: next(identities))
-    monkeypatch.setattr(codex_queue.delivery, "record", lambda pid, key, **f: writes.append(f))
-    monkeypatch.setattr(codex_queue.delivery, "prune", lambda: None)
+    monkeypatch.setattr(announce.procid, "current_identity", lambda: next(identities))
+    monkeypatch.setattr(announce.delivery, "record", lambda pid, key, **f: writes.append(f))
+    monkeypatch.setattr(announce.delivery, "prune", lambda: None)
     wake.poll()
     wake.poll()
     assert len(writes) == 1, "written once an identity exists, not dropped"
@@ -381,9 +381,9 @@ def test_a_failed_fact_write_is_retried(monkeypatch):
         if len(writes) == 1:
             raise OSError("database is locked")
 
-    monkeypatch.setattr(codex_queue.delivery, "record", record)
-    monkeypatch.setattr(codex_queue.delivery, "prune", lambda: None)
-    monkeypatch.setattr(codex_queue.procid, "current_identity", lambda: (1, "key"))
+    monkeypatch.setattr(announce.delivery, "record", record)
+    monkeypatch.setattr(announce.delivery, "prune", lambda: None)
+    monkeypatch.setattr(announce.procid, "current_identity", lambda: (1, "key"))
     wake.poll()
     wake.poll()
     assert len(writes) == 2, "the report the store refused is written on the next poll"
@@ -391,7 +391,7 @@ def test_a_failed_fact_write_is_retried(monkeypatch):
 
 def test_a_receipt_proves_only_its_own_notice(monkeypatch):
     wake = _armed(monkeypatch, [{"id": 1, "recipient": "codex:a"}], ["codex:a"])
-    _, nonce = wake.poll()
+    _, nonce, _ = wake.poll()
     assert not wake.accept_receipt("00000000")
     assert not channel.accept_receipt(nonce), "a Claude pusher never accepts a Codex nonce"
     assert wake.accept_receipt(nonce)
@@ -434,4 +434,4 @@ def test_a_thread_id_that_disagrees_with_its_turn_metadata_is_ignored():
     mixed = meta()
     mixed["x-codex-turn-metadata"]["thread_id"] = OTHER
     wake.observe({"_meta": mixed})
-    assert wake.thread is None
+    assert wake.address is None

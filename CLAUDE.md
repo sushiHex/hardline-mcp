@@ -60,11 +60,16 @@ Dependencies point one way: `procid` <- `mailbox` <- `jobs`/`sessions` <-
   `server.serve_streams` - FastMCP's own `Server.run` with `channel.tap` and
   the pusher spliced onto the raw streams - not `mcp.run()`. See
   `docs/push-delivery.md`.
-- `codex_queue.py` is the Codex counterpart, beside the pusher in the same
-  loop: it pins the session's thread from `tools/call` `_meta` (through the
-  tap's `on_call` hook) and queues a constant notice with `codex queue`. One
-  notice is outstanding until its own receipt returns. See
-  `docs/codex-queue-wake.md`.
+- `announce.py` is the notice wake beside the pusher in the same loop: one
+  constant notice outstanding until its own receipt returns, new mail only.
+  Two subclasses supply the address and transport:
+  - `claude_inbox.py` posts into the Claude Code session's own cross-session
+    inbox (the pipe and token in hardline's environment, proven the host's by
+    `~/.claude/sessions/<pid>.json`). It replaces channel push whenever the
+    inbox is proven; push is the fallback. See `docs/claude-inbox-wake.md`.
+  - `codex_queue.py` pins the Codex thread from `tools/call` `_meta` (through
+    the tap's `on_call` hook) and queues with `codex queue`. See
+    `docs/codex-queue-wake.md`.
 
 Design rationale is in `docs/architecture.md`. The tool contracts are in
 `docs/messaging.md`, env vars (`HARDLINE_*`) in `docs/configuration.md`, and
@@ -124,12 +129,15 @@ with isolated mailboxes; opt in with `HARDLINE_LIVE_WATCH=1`. It requires
 
 ### Inbox signals in a Claude session
 
-Prefer push: a session launched with
-`--dangerously-load-development-channels server:hardline-mcp` receives its lane
-mail as `<channel>` events, idle or busy. If `list_agents().you.delivery` is
-`unreceipted` (no flag, or the conversation moved to a background session),
-fall back to the Monitor below. A conversation that lost its lane in such a move
-gets it back with `register_session(label=<old lane>, wait=true)`.
+No launch flag needed: hardline posts a notice into the session's own inbox
+when its lanes get mail (`list_agents().you.transport` is `inbox`), which
+starts a turn in an idle session. Allowlist `inbox` and `ack` so the turn does
+not stop at a permission prompt.
+Where the inbox cannot be proven the session's own it falls back to channel
+push, which needs `--dangerously-load-development-channels server:hardline-mcp`
+(`transport` is `channel`). If `list_agents().you.delivery` is `unreceipted`,
+fall back to the Monitor below. A conversation that lost its lane in a move to
+the background gets it back with `register_session(label=<old lane>, wait=true)`.
 
 When working here in Claude Code with Monitor available, call `list_agents()`
 and `server_info()`. If `watch.argv` is available, quote those arguments for

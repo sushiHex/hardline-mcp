@@ -36,7 +36,7 @@ def store(monkeypatch, tmp_path, in_session):
     assert server._announce_self() == LANE
     yield db
     channel._pusher = None
-    server.codex_queue._wake = None  # serve_streams installs one beside the pusher
+    server.announce.install()  # serve_streams installs one beside the pusher
 
 
 class Clock:
@@ -98,12 +98,12 @@ def is_push(msg):
     return msg.get("method") == channel.METHOD
 
 
-async def serving(tg, pusher, buffer=32, wake=None):
+async def serving(tg, pusher, buffer=32, wake=None, inbox=None):
     from hardline_mcp import server
 
     c2s_send, c2s_recv = anyio.create_memory_object_stream(32)
     s2c_send, s2c_recv = anyio.create_memory_object_stream(buffer)
-    tg.start_soon(server.serve_streams, c2s_recv, s2c_send, pusher, wake)
+    tg.start_soon(server.serve_streams, c2s_recv, s2c_send, pusher, wake, lambda: inbox)
     return Wire(c2s_send, s2c_recv)
 
 
