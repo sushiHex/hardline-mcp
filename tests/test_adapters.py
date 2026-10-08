@@ -608,6 +608,29 @@ def test_ask_codex_on_windows_defaults_to_the_unelevated_sandbox(monkeypatch, ef
     assert argv[argv.index("--sandbox") + 1] == "read-only"
 
 
+def test_windows_detection_is_the_real_platform():
+    """Every other sandbox test forces _ON_WINDOWS; this one pins it to the host,
+    so Windows CI fails if detection ever stops selecting the override."""
+    import os
+
+    assert adapters._ON_WINDOWS is (os.name == "nt")
+
+
+@pytest.mark.parametrize("kwargs", [{"write": True}, {"mode": "advisory"}])
+def test_the_windows_sandbox_reaches_write_and_advisory(
+    monkeypatch, tmp_path, allow_write, kwargs
+):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.delenv("HARDLINE_CODEX_WINDOWS_SANDBOX", raising=False)
+    monkeypatch.setattr(
+        adapters, "_prepare_codex_advisory", lambda: (None, None, str(tmp_path))
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    workdir = None if kwargs.get("mode") == "advisory" else str(tmp_path)
+    adapters.ask_codex("go", workdir=workdir, **kwargs)
+    assert _windows_sandbox(calls[0]["cmd"]) == ['windows.sandbox="unelevated"']
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [("elevated", ['windows.sandbox="elevated"']), ("inherit", []), (" Unelevated ", ['windows.sandbox="unelevated"'])],
