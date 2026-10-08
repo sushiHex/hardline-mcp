@@ -294,7 +294,7 @@ def test_ask_codex_routes_model_effort_and_reports_json_telemetry(monkeypatch):
     assert out["usage"]["input_tokens"] == 12
     argv = calls[0]["cmd"]
     assert argv[argv.index("--model") + 1] == "gpt-5.6-terra"
-    assert argv[argv.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+    assert argv[argv.index('model_reasoning_effort="xhigh"') - 1] == "-c"
     assert "--json" in argv
     assert "--ephemeral" in argv
     assert argv[-2:] == ["--", "review this"]
@@ -587,6 +587,98 @@ def test_ask_codex_write_still_gets_workspace_write(monkeypatch, tmp_path, allow
     assert argv[argv.index("--sandbox") + 1] == "workspace-write"
     assert "read-only" not in argv
     assert argv[argv.index("-a") + 1] == "never"
+
+
+def _windows_sandbox(argv: list[str]) -> list[str]:
+    return [a for a in argv if a.startswith("windows.sandbox=")]
+
+
+@pytest.mark.parametrize("effort", ["default", "high"])  # plain and structured paths
+def test_ask_codex_on_windows_defaults_to_the_unelevated_sandbox(monkeypatch, effort):
+    """#47: Codex 0.161.0's elevated sandbox refuses every command while the
+    desktop app runs its computer-use runtime, so every review came back
+    unread. A spawned Codex asks for the unelevated one, read-only intact."""
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.delenv("HARDLINE_CODEX_WINDOWS_SANDBOX", raising=False)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    adapters.ask_codex("summarize", effort=effort)
+    argv = calls[0]["cmd"]
+    assert _windows_sandbox(argv) == ['windows.sandbox="unelevated"']
+    assert argv[argv.index('windows.sandbox="unelevated"') - 1] == "-c"
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+
+
+def test_windows_detection_is_the_real_platform():
+    """Every other sandbox test forces _ON_WINDOWS; this one pins it to the host,
+    so Windows CI fails if detection ever stops selecting the override."""
+    import os
+
+    assert adapters._ON_WINDOWS is (os.name == "nt")
+
+
+@pytest.mark.parametrize("kwargs", [{"write": True}, {"mode": "advisory"}])
+def test_the_windows_sandbox_reaches_write_and_advisory(
+    monkeypatch, tmp_path, allow_write, kwargs
+):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.delenv("HARDLINE_CODEX_WINDOWS_SANDBOX", raising=False)
+    monkeypatch.setattr(
+        adapters, "_prepare_codex_advisory", lambda: (None, None, str(tmp_path))
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    workdir = None if kwargs.get("mode") == "advisory" else str(tmp_path)
+    adapters.ask_codex("go", workdir=workdir, **kwargs)
+    assert _windows_sandbox(calls[0]["cmd"]) == ['windows.sandbox="unelevated"']
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("elevated", ['windows.sandbox="elevated"']), ("inherit", []), (" Unelevated ", ['windows.sandbox="unelevated"'])],
+)
+def test_ask_codex_windows_sandbox_is_configurable(monkeypatch, value, expected):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", value)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    adapters.ask_codex("summarize")
+    assert _windows_sandbox(calls[0]["cmd"]) == expected
+
+
+def test_ask_codex_rejects_an_unknown_windows_sandbox_before_spawning(monkeypatch):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "unelevate")
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    out = adapters.ask_codex("summarize")
+    assert out["ok"] is False
+    assert "HARDLINE_CODEX_WINDOWS_SANDBOX" in out["error"]
+    assert calls == []
+
+
+def test_an_unknown_windows_sandbox_refuses_before_model_resolution(monkeypatch):
+    """A family model resolves through `codex debug models`, and async admission
+    resolves before it queues: the shared validator must refuse first."""
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "unelevate")
+
+    def no_resolution(*args, **kwargs):
+        raise AssertionError("resolved a model despite an invalid configuration")
+
+    monkeypatch.setattr(adapters, "resolve_codex_model", no_resolution)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    error, _ = adapters.validate_request(
+        "codex", model="sol", effort="default", mode="default", workdir=None, write=False
+    )
+    assert error is not None and "HARDLINE_CODEX_WINDOWS_SANDBOX" in error["error"]
+    out = adapters.ask_codex("summarize", model="sol")
+    assert out["ok"] is False and "HARDLINE_CODEX_WINDOWS_SANDBOX" in out["error"]
+    assert calls == []
+
+
+def test_ask_codex_passes_no_windows_sandbox_elsewhere(monkeypatch):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", False)
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "elevated")
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    adapters.ask_codex("summarize")
+    assert _windows_sandbox(calls[0]["cmd"]) == []
 
 
 def test_ask_codex_ignores_transient_error_before_completed_turn(monkeypatch):
