@@ -1734,5 +1734,29 @@
       "tests/test_adapters.py::test_some_commands_not_starting_is_counted_not_demoted",
       "tests/test_adapters.py::test_not_starting_survives_a_damaged_stream"
     ]
+  },
+  "push-line-leads-with-sender-and-preview": {
+    "file": "hardline_mcp/channel.py",
+    "before": "            f\"{r['sender']}: {_preview(r['body'])} (#{r['id']} to {r['recipient']})\"",
+    "after": "            f\"#{r['id']} from {r['sender']} to {r['recipient']}: {_preview(r['body'])}\"",
+    "tests": [
+      "tests/test_channel.py::test_lane_mail_is_pushed_once_with_a_receipt_and_bare_mail_never"
+    ]
+  },
+  "push-asks-to-show-the-user": {
+    "file": "hardline_mcp/channel.py",
+    "before": "                f\"receipt='{nonce}'), tell the user who sent each message and \"\n                \"what it says, act, then ack the ids. \"",
+    "after": "                f\"receipt='{nonce}'), act, then ack the ids. \"",
+    "tests": [
+      "tests/test_channel.py::test_lane_mail_is_pushed_once_with_a_receipt_and_bare_mail_never"
+    ]
+  },
+  "instructions-ask-to-show-the-user": {
+    "file": "hardline_mcp/server.py",
+    "before": "    \"receipt>) even if you defer the work, tell the user who sent each \"\n    \"message and what it says, act, then ack the ids. \"",
+    "after": "    \"receipt>) even if you defer the work, act, then ack the ids. \"",
+    "tests": [
+      "tests/test_channel.py::test_initialize_declares_the_channel_and_the_standing_rule"
+    ]
   }
 }
