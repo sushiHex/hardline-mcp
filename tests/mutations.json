@@ -691,22 +691,6 @@
       "tests/test_continuity.py::test_a_waiting_claim_counts_toward_the_name_cap"
     ]
   },
-  "codex-plain-isolation-applied": {
-    "file": "hardline_mcp/adapters.py",
-    "before": "            argv + _CODEX_READONLY_SANDBOX + isolation + [\"--\", prompt],\n",
-    "after": "            argv + _CODEX_READONLY_SANDBOX + [\"--\", prompt],\n",
-    "tests": [
-      "tests/test_codex_isolation.py::test_every_codex_child_gets_no_connectors_and_no_servers[plain]"
-    ]
-  },
-  "codex-plain-refusal-honoured": {
-    "file": "hardline_mcp/adapters.py",
-    "before": "        isolation, refusal = _codex_isolation(exe, env, None, on_spawn)\n        if refusal is not None:\n            return refusal\n",
-    "after": "        isolation, refusal = _codex_isolation(exe, env, None, on_spawn)\n        isolation = isolation or []\n",
-    "tests": [
-      "tests/test_codex_isolation.py::test_an_unprovable_listing_refuses_the_call[object]"
-    ]
-  },
   "codex-every-mode-isolation-applied": {
     "file": "hardline_mcp/adapters.py",
     "before": "        argv += isolation\n",
@@ -895,22 +879,6 @@
     "after": "_CODEX_WINDOWS_SANDBOX_DEFAULT = \"unelevated\"",
     "tests": [
       "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[default]"
-    ]
-  },
-  "codex-runtime-redirect-reaches-the-plain-call": {
-    "file": "hardline_mcp/adapters.py",
-    "before": "        env = {**os.environ, **sandbox.env}\n",
-    "after": "        env = dict(os.environ)\n",
-    "tests": [
-      "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[default]"
-    ]
-  },
-  "codex-plain-call-probed-with-the-decoy": {
-    "file": "hardline_mcp/adapters.py",
-    "before": "        isolation, refusal = _codex_isolation(exe, env, None, on_spawn)\n",
-    "after": "        isolation, refusal = _codex_isolation(exe, None, None, on_spawn)\n",
-    "tests": [
-      "tests/test_codex_isolation.py::test_codex_is_probed_exactly_where_and_how_the_child_will_run[plain]"
     ]
   },
   "codex-runtime-redirect-reaches-the-structured-call": {
@@ -1894,6 +1862,14 @@
     "after": "    except OSError:  # noqa: BLE001 - a wake must never stop the server starting\n",
     "tests": [
       "tests/test_claude_inbox.py::test_anything_unexpected_while_resolving_is_no_inbox"
+    ]
+  },
+  "codex-bare-call-reads-jsonl": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    # Every call, bare ones included, reads Codex's JSONL events: only they\n    # show a turn whose commands never started (#47), which plain text hides.\n    attachment = None\n",
+    "after": "    if _is_plain_call(model, effort, mode, workdir, write, github):\n        env = {**os.environ, **sandbox.env}\n        isolation, refusal = _codex_isolation(argv[0], env, None, on_spawn)\n        if refusal is not None:\n            return refusal\n        return _run_agent_cmd(\n            \"codex\",\n            argv + _CODEX_READONLY_SANDBOX + isolation + [\"--\", prompt],\n            env=env,\n            on_spawn=on_spawn,\n        )\n    attachment = None\n",
+    "tests": [
+      "tests/test_adapters.py::test_a_bare_call_detects_a_turn_whose_commands_never_started"
     ]
   }
 }

@@ -1503,9 +1503,9 @@ def _is_plain_call(
 ) -> bool:
     """Whether this is the unqualified default call - no option set at all.
 
-    That call keeps a lightweight one-shot invocation and the original
-    compact ``{"ok", "reply"}`` reply shape; any option at all opts into the
-    structured/telemetry path instead.
+    For Claude, that call keeps a lightweight one-shot invocation and the
+    original compact ``{"ok", "reply"}`` reply shape; any option at all opts
+    into the structured/telemetry path instead. Codex is always structured.
     """
     return (
         model is None
@@ -2236,19 +2236,8 @@ def _ask_codex_validated(
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     argv += sandbox.overrides
-    # Resolved once: the executable that is probed is the executable launched.
-    exe = argv[0]
-    if _is_plain_call(model, effort, mode, workdir, write, github):
-        env = {**os.environ, **sandbox.env}
-        isolation, refusal = _codex_isolation(exe, env, None, on_spawn)
-        if refusal is not None:
-            return refusal
-        return _run_agent_cmd(
-            "codex",
-            argv + _CODEX_READONLY_SANDBOX + isolation + ["--", prompt],
-            env=env,
-            on_spawn=on_spawn,
-        )
+    # Every call, bare ones included, reads Codex's JSONL events: only they
+    # show a turn whose commands never started (#47), which plain text hides.
     attachment = None
     if github is not None:
         # A Codex child always has its read-only shell, so any workdir is readable.

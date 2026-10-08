@@ -114,6 +114,16 @@ def test_ask_hermes_shells_hermes_chat(monkeypatch):
     assert calls[0]["kwargs"]["timeout"] == 180
 
 
+def _codex_reply(text):
+    """What `codex exec --json` prints for a turn that answered ``text``."""
+    return (
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}})
+        + "\n"
+        + json.dumps({"type": "turn.completed", "usage": {}})
+        + "\n"
+    )
+
+
 def test_ask_codex_shells_codex_exec(monkeypatch):
     # A current PATH install must win over a stale legacy app installation.
     monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
@@ -121,11 +131,13 @@ def test_ask_codex_shells_codex_exec(monkeypatch):
     monkeypatch.setattr(
         adapters, "_discover_codex", lambda: "C:/legacy/codex.exe"
     )
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     out = adapters.ask("codex", "summarize")
     assert out["ok"] is True
     assert out["reply"] == "codex reply"
     argv = calls[0]["cmd"]
+    # A bare call reads JSONL too: only events show commands that never ran.
+    assert "--json" in argv
     assert argv[0] == "C:/path/codex.exe" and "exec" in argv
     # Omitted model -> no --model flag at all; Codex's own configured default
     # applies, same posture ask_hermes already has toward Hermes's default.
@@ -138,7 +150,7 @@ def test_deliver_to_codex_defers_to_codex_own_default(monkeypatch):
     monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
     monkeypatch.setattr(adapters.shutil, "which", lambda _: None)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="delivered"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("delivered")))
 
     out = adapters.deliver("codex", "--dangerously-bypass-approvals-and-sandbox")
 
@@ -304,7 +316,7 @@ def test_ask_codex_allows_deep_multi_hour_reviews_by_default(monkeypatch):
     monkeypatch.delenv("HARDLINE_CODEX_TIMEOUT_S", raising=False)
     monkeypatch.setattr(adapters.shutil, "which", lambda _: None)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="reply"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("reply")))
 
     out = adapters.ask("codex", "substantive review")
 
@@ -316,7 +328,7 @@ def test_ask_codex_uses_configurable_long_timeout(monkeypatch):
     monkeypatch.setenv("HARDLINE_CODEX_TIMEOUT_S", "1200")
     monkeypatch.setattr(adapters.shutil, "which", lambda _: None)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="reply"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("reply")))
 
     out = adapters.ask("codex", "substantive review")
 
@@ -562,7 +574,7 @@ def test_ask_codex_default_pins_the_read_only_sandbox(monkeypatch):
     monkeypatch.delenv("HARDLINE_CODEX_CMD", raising=False)
     monkeypatch.setattr(adapters.shutil, "which", lambda _: None)
     monkeypatch.setattr(adapters, "_discover_codex", lambda: None)
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
 
     out = adapters.ask_codex("summarize")
 
@@ -1637,6 +1649,17 @@ def _codex_turn(*commands: dict, damaged: bool = False) -> str:
 def _ask_codex_after(monkeypatch, stdout: str) -> dict:
     _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
     return adapters.ask_codex("review", model="gpt-5.6-sol")
+
+
+def test_a_bare_call_detects_a_turn_whose_commands_never_started(monkeypatch):
+    """The commonest call - ask_codex(prompt) - read plain text, which hides
+    the refused commands; it returned ok=True for a review that read nothing."""
+    _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_turn(_NOT_STARTED)))
+
+    out = adapters.ask_codex("review")
+
+    assert out["ok"] is False
+    assert out.get("commands_not_started") == 1
 
 
 def test_a_turn_none_of_whose_commands_started_is_not_a_success(monkeypatch):

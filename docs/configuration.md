@@ -94,10 +94,11 @@ for admission and recovery behavior.
 ## Models, effort, and results
 
 `ask_codex` and `ask_claude` accept `model`, `effort`, `mode`, `workdir`, and
-`write`; their async forms use the same options. Bare `ask_*(prompt=...)` calls
-return the compact `ok`/`reply` shape. Additional options select structured
-execution and telemetry. `ask_hermes` accepts only `prompt` and uses Hermes's
-own defaults.
+`write`; their async forms use the same options. A bare `ask_claude(prompt=...)`
+returns the compact `ok`/`reply` shape, and options select structured execution
+and telemetry. Every `ask_codex` call is structured, a bare one included: only
+Codex's JSONL events show a turn whose commands never started. `ask_hermes`
+accepts only `prompt` and uses Hermes's own defaults.
 
 Omitting `model` passes no model flag. Hardline passes identifiers through
 unchanged; use an identifier supported by the selected CLI. Claude Code accepts
@@ -152,8 +153,7 @@ available execution metadata:
   `partial_reply` and the count in `commands_not_started`: it was written
   without reading anything. When only some did not start, the count is
   reported and `ok` is kept. A command that started and failed is ordinary.
-  The unqualified call (no option set) does not use JSONL, so this is not
-  detected there.
+  This holds for every `ask_codex` call, a bare one included.
 - Claude uses stream JSON, reports `actual_model`, `api_key_source`, usage,
   model usage, rate limits, and parsed fallback metadata when provided.
   `effective_effort` remains null.
