@@ -48,7 +48,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from . import github_context, procid
 
@@ -181,29 +181,44 @@ _CODEX_READONLY_SANDBOX = ["--sandbox", "read-only"]
 # not quietly let its connectors back in.
 _CODEX_NO_CONNECTORS = ["-c", "features.apps=false", "-c", "features.plugins=false"]
 
-# Which Windows sandbox a spawned Codex uses. Codex 0.161.0's elevated sandbox
-# refuses to start any command while the Codex desktop app runs its
-# computer-use runtime: its setup refresh opens every file under
+# Which Windows sandbox a spawned Codex uses: the elevated one, pinned as
+# --sandbox read-only is. HARDLINE_CODEX_WINDOWS_SANDBOX=unelevated picks
+# upstream's weaker fallback; `inherit` passes nothing.
+#
+# Codex 0.161.0's elevated sandbox refused to start any command while the Codex
+# desktop app ran its computer-use runtime (#47, openai/codex#51590). Before
+# each command its setup refresh opens every file under
 # %LOCALAPPDATA%\OpenAI\Codex\runtimes with MAXIMUM_ALLOWED, the running
-# node_repl.exe answers with a sharing violation, and the refresh fails whole
-# (#47, openai/codex#51590). Every review then came back unread. So on Windows
-# a spawned Codex defaults to the unelevated sandbox, upstream's documented
-# fallback: weaker isolation, the network above all, but --sandbox read-only
-# still holds. HARDLINE_CODEX_WINDOWS_SANDBOX=elevated restores the elevated
-# one, `inherit` passes nothing. Remove the default once upstream fixes this.
+# node_repl.exe answers with a sharing violation, and the refresh fails whole.
+# The refresh finds that tree through the LOCALAPPDATA it inherits and skips
+# a missing one. So an elevated Codex gets a LOCALAPPDATA that does not exist,
+# and its commands get the real one back through shell_environment_policy.
+# The tree holds only that computer-use runtime, which a hardline-spawned
+# Codex has no connectors to run. Measured on 0.161.0: refused without the
+# decoy; with it the command ran, saw the real LOCALAPPDATA, and nothing
+# created the decoy. Upstream main still opened that way on 2026-10-08.
+# Remove the decoy once Codex opens those files without asking to write them.
 _CODEX_WINDOWS_SANDBOXES = ("elevated", "unelevated", "inherit")
-_CODEX_WINDOWS_SANDBOX_DEFAULT = "unelevated"
+_CODEX_WINDOWS_SANDBOX_DEFAULT = "elevated"
+_CODEX_DECOY_LOCALAPPDATA = Path.home() / ".cache" / "hardline-mcp" / "no-localappdata"
 _ON_WINDOWS = os.name == "nt"  # module-level, so tests need not patch os.name
 
 
-def _codex_windows_sandbox() -> list[str]:
-    """The ``-c windows.sandbox=...`` override; empty off Windows or on ``inherit``.
+class _WindowsSandbox(NamedTuple):
+    overrides: list[str]  # Codex -c arguments
+    env: dict[str, str]  # laid over the child's environment
+
+
+def _codex_windows_sandbox() -> _WindowsSandbox:
+    """The Windows sandbox a spawned Codex runs in: nothing off Windows or on
+    ``inherit``, and the decoy only for the elevated sandbox with a real,
+    TOML-expressible LOCALAPPDATA to give its commands back.
 
     Raises ValueError on an unknown value, so a typo is a configuration error
     rather than a silent fall back to whatever the host config says.
     """
     if not _ON_WINDOWS:
-        return []
+        return _WindowsSandbox([], {})
     raw = os.environ.get("HARDLINE_CODEX_WINDOWS_SANDBOX", "").strip().lower()
     value = raw or _CODEX_WINDOWS_SANDBOX_DEFAULT
     if value not in _CODEX_WINDOWS_SANDBOXES:
@@ -211,7 +226,17 @@ def _codex_windows_sandbox() -> list[str]:
             "HARDLINE_CODEX_WINDOWS_SANDBOX must be one of "
             f"{', '.join(_CODEX_WINDOWS_SANDBOXES)}; got {raw!r}"
         )
-    return [] if value == "inherit" else ["-c", f'windows.sandbox="{value}"']
+    if value == "inherit":
+        return _WindowsSandbox([], {})
+    overrides = ["-c", f'windows.sandbox="{value}"']
+    real = os.environ.get("LOCALAPPDATA")
+    restored = _toml_basic_string(real) if real else None
+    if value != "elevated" or restored is None:
+        return _WindowsSandbox(overrides, {})
+    return _WindowsSandbox(
+        overrides + ["-c", f"shell_environment_policy.set.LOCALAPPDATA={restored}"],
+        {"LOCALAPPDATA": str(_CODEX_DECOY_LOCALAPPDATA)},
+    )
 _CODEX_REQUIRED_FEATURES = ("apps", "plugins")
 _CODEX_ISOLATION_TIMEOUT_S = 15
 
@@ -1700,7 +1725,8 @@ def _codex_catalog(mode: str, workdir: str | None) -> tuple[list | None, str | N
     while the refreshed one - keyed to the signed-in account - listed both.
 
     Run the way the call will run: same executable, same environment, same
-    working directory. Advisory runs in a fresh isolated home, because user
+    working directory - all but the Windows sandbox's decoy LOCALAPPDATA,
+    which only a sandboxed command needs, and the catalog runs none. Advisory runs in a fresh isolated home, because user
     configuration can supply its own catalog (``model_catalog_json``) that the
     advisory call will not see. Measured: an auth-only home refreshes the full
     account catalog in ~0.35s.
@@ -2201,18 +2227,21 @@ def _ask_codex_validated(
     # has run.
     try:
         _timeout_for("codex")
-        argv += _codex_windows_sandbox()
+        sandbox = _codex_windows_sandbox()
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+    argv += sandbox.overrides
     # Resolved once: the executable that is probed is the executable launched.
     exe = argv[0]
     if _is_plain_call(model, effort, mode, workdir, write, github):
-        isolation, refusal = _codex_isolation(exe, None, None, on_spawn)
+        env = {**os.environ, **sandbox.env}
+        isolation, refusal = _codex_isolation(exe, env, None, on_spawn)
         if refusal is not None:
             return refusal
         return _run_agent_cmd(
             "codex",
             argv + _CODEX_READONLY_SANDBOX + isolation + ["--", prompt],
+            env=env,
             on_spawn=on_spawn,
         )
     attachment = None
@@ -2233,6 +2262,7 @@ def _ask_codex_validated(
         write=write,
         on_spawn=on_spawn,
         attachment=attachment,
+        sandbox_env=sandbox.env,
     )
     if attachment is not None:
         result["github"] = attachment["summary"]
@@ -2250,8 +2280,10 @@ def _ask_codex_structured(
     write: bool,
     on_spawn: "Callable[[int], None] | None",
     attachment: dict | None,
+    sandbox_env: dict[str, str],
 ) -> dict:
-    """The telemetry path; ``argv`` is the resolved ``codex exec --ephemeral``."""
+    """The telemetry path; ``argv`` is the resolved ``codex exec --ephemeral``,
+    ``sandbox_env`` what its Windows sandbox adds to the child's environment."""
     exe = argv[0]
     if model is not None:
         argv += ["--model", model]
@@ -2314,6 +2346,7 @@ def _ask_codex_structured(
             "-c",
             "developer_instructions=" + _toml_basic_string("\n\n".join(instructions)),
         ]
+    child_env = {**(os.environ if child_env is None else child_env), **sandbox_env}
     try:
         # Every mode, write and advisory included: a write-enabled child that
         # could reach hardline is the worst version of #42, and advisory's

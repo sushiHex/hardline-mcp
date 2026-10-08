@@ -125,13 +125,20 @@ def _features_probe(calls):
     return call
 
 
+@pytest.mark.parametrize("plain", [True, False], ids=["plain", "telemetry"])
 def test_codex_is_probed_exactly_where_and_how_the_child_will_run(
-    codex, monkeypatch, tmp_path
+    codex, monkeypatch, tmp_path, plain
 ):
+    # On Windows the elevated sandbox's decoy LOCALAPPDATA is part of the
+    # child's environment, so the probes must see it too - on every platform.
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.delenv("HARDLINE_CODEX_WINDOWS_SANDBOX", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "real"))
     monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
-    adapters.ask_codex("review", workdir=str(tmp_path))
+    adapters.ask_codex("review", **({} if plain else {"workdir": str(tmp_path)}))
     listing, probe = _listing(codex.calls), _features_probe(codex.calls)
     (child,) = _execs(codex.calls)
+    assert child["kwargs"]["env"]["LOCALAPPDATA"] == str(adapters._CODEX_DECOY_LOCALAPPDATA)
     assert listing["cmd"][3:] == ["--json", *CONNECTORS], (
         "listed with plugins and apps off, or it names servers no layer defines"
     )
