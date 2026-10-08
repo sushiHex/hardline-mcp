@@ -121,6 +121,7 @@ async def test_initialize_declares_the_channel_and_the_standing_rule(store):
         result = await wire.handshake(client="anything")
         assert result["capabilities"]["experimental"] == {channel.CAPABILITY: {}}
         assert "receipt" in result["instructions"]
+        assert "tell the user who sent each message" in result["instructions"]
         tg.cancel_scope.cancel()
 
 
@@ -139,6 +140,10 @@ async def test_lane_mail_is_pushed_once_with_a_receipt_and_bare_mail_never(store
         assert meta["receipt"] in push["params"]["content"]
         first_line = push["params"]["content"].splitlines()[0]
         assert len(first_line) < 300, "a preview, not the whole body"
+        # The user sees only the start of the first line: it must say who
+        # wrote what, not open with ids and lanes that crowd the body out.
+        assert first_line.startswith("codex: for you xxx")
+        assert "tell the user who sent each message" in push["params"]["content"]
         assert str(bare["message_id"]) not in meta["message_ids"].split(",")
 
         await wire.none(is_push)  # pushed once, not every poll
