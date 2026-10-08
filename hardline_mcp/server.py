@@ -27,7 +27,7 @@ import time
 import traceback
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
@@ -35,16 +35,29 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification
 
-from . import adapters, channel, codex_queue, delivery, dispatch, jobs, mailbox, sessions, watch
+from . import (
+    adapters,
+    announce,
+    channel,
+    claude_inbox,
+    codex_queue,
+    delivery,
+    dispatch,
+    jobs,
+    mailbox,
+    sessions,
+    watch,
+)
 
 # Delivered by the host to every connected model, so the rule reaches sessions
 # working in other repositories - which never read this repo's docs.
 INSTRUCTIONS = (
     "Mail for this conversation may arrive as <channel source=\"...\"> events "
-    "listing message ids and a receipt. Use the tools of the server named in "
-    "source: read with inbox(agent=..., auto_ack=false, receipt=<the event's "
-    "receipt>) even if you defer the work, tell the user who sent each "
-    "message and what it says, act, then ack the ids. "
+    "listing message ids and a receipt, or as a message from hardline-mcp in "
+    "your own inbox carrying a receipt (no reply needed). Use the tools of the "
+    "server that sent it: read with inbox(agent=..., auto_ack=false, "
+    "receipt=<its receipt>) even if you defer the work, tell the user who sent "
+    "each message and what it says, act, then ack the ids. "
     "hardline names belong to the process serving this conversation. If an "
     "earlier hardline result in this conversation shows a lane you no longer "
     "hold (for example after the conversation moved to a background session), "
@@ -745,12 +758,12 @@ async def inbox(
         ]
     # The receipt first, before anything that can fail: it proves the push or
     # notice reached this conversation whatever happens to the read, and a
-    # Codex wake stays paused until it is accepted. Offered to both
-    # transports; only the one that issued it accepts.
+    # notice wake stays paused until it is accepted. Offered to every
+    # transport; only the one that issued it accepts.
     accepted = None
     if receipt:
         accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(
-            codex_queue.accept_receipt, receipt
+            announce.accept_receipt, receipt
         )
     # A throttled heartbeat on the polling path, because startup and
     # list_agents are not enough: if the store is rebuilt underneath the fleet,
@@ -853,6 +866,10 @@ async def list_agents() -> dict:
     suffix = adapters.lane_suffix()
     held = adapters.held_lanes()
     agent = adapters.self_agent()
+    # Push or inbox notice (Claude), queue-wake (Codex): proven by receipts,
+    # never assumed. No transport until one has an address.
+    pushed = channel.state()
+    delivered, transport = (pushed, "channel") if pushed else announce.status()
     you: dict = {
         "agent": agent,
         "lane_suffix": suffix or None,
@@ -862,9 +879,8 @@ async def list_agents() -> dict:
             f"{waited_as}:{label}"
             for label, waited_as in adapters.pending_claims().items()
         ],
-        # Push (Claude) or queue-wake (Codex) to this conversation: proven by
-        # receipts, never assumed.
-        "delivery": channel.state() or codex_queue.state() or "none",
+        "delivery": delivered or "none",
+        "transport": transport,
         "note": (
             "Pass your bare agent name as from_agent for background jobs; "
             "completion notices go to your lane. Use job_result for the answer."
@@ -2339,24 +2355,33 @@ async def _serve_stdio() -> None:
     name within seconds of the old holder exiting.
     """
     async with stdio_server() as (read, write):
-        await serve_streams(read, write, channel.Pusher(fulfil=_fulfil_pending))
+        await serve_streams(
+            read,
+            write,
+            channel.Pusher(fulfil=_fulfil_pending),
+            resolve_inbox=claude_inbox.address,
+        )
 
 
 async def serve_streams(
-    read, write, pusher: "channel.Pusher", wake: "codex_queue.CodexWake | None" = None
+    read,
+    write,
+    pusher: "channel.Pusher",
+    wake: "codex_queue.CodexWake | None" = None,
+    resolve_inbox: "Callable[[], claude_inbox.Inbox | None]" = lambda: None,
 ) -> None:
     """Serve on the given streams: FastMCP's own ``Server.run``, plus three tasks.
 
     The initialize result declares ``experimental["claude/channel"]``, which
     FastMCP's ``run_stdio_async`` cannot - it passes no experimental
     capabilities. ``channel.tap`` observes the client's messages on their way
-    in; the pusher writes notifications to a clone of the write stream for a
-    Claude Code client, and the Codex wake queues notices for a Codex one -
-    each returns at once for any other client. All MCP types stay here, so
-    ``channel`` and ``codex_queue`` are pure logic like every other module.
+    in; a Claude Code client is woken by ``_wake_claude`` and a Codex one by
+    queue-wake, each returning at once for any other client. All MCP types stay
+    here, so the transports are pure logic like every other module.
     """
     channel.install(pusher)
-    wake = codex_queue.install(wake or codex_queue.CodexWake(fulfil=pusher.fulfil))
+    wake = wake or codex_queue.CodexWake(fulfil=pusher.fulfil)
+    announce.install(wake)
     low = mcp._mcp_server
     options = low.create_initialization_options(
         experimental_capabilities={channel.CAPABILITY: {}}
@@ -2366,19 +2391,33 @@ async def serve_streams(
     forward_send, forward_recv = anyio.create_memory_object_stream(0)
     async with anyio.create_task_group() as tg:
         tg.start_soon(channel.tap, read, forward_send, initialized, client)
-        tg.start_soon(_push, write.clone(), pusher, initialized, client)
+        tg.start_soon(_wake_claude, write.clone(), pusher, initialized, client, resolve_inbox)
         tg.start_soon(wake.run, initialized, client)
         await low.run(forward_recv, write, options)
         tg.cancel_scope.cancel()
 
 
-async def _push(out, pusher: "channel.Pusher", initialized, client: dict) -> None:
+async def _wake_claude(out, pusher: "channel.Pusher", initialized, client: dict, resolve_inbox) -> None:
+    """Wake a Claude Code client through its own inbox when one is proven,
+    else by channel notifications on ``out`` - never both.
+
+    Resolved once the client is known, not at startup, so a session record
+    Claude Code writes after spawning its MCP servers is still found.
+    """
     async def send(params: dict) -> None:
         note = JSONRPCNotification(jsonrpc="2.0", method=channel.METHOD, params=params)
         await out.send(SessionMessage(message=JSONRPCMessage(note)))
 
     async with out:  # closed on every exit, so the stdio writer can finish
-        await pusher.run(send, initialized, client)
+        await initialized.wait()
+        inbox = await anyio.to_thread.run_sync(resolve_inbox)
+        if inbox is None:
+            await pusher.run(send, initialized, client)
+            return
+    claude = announce.add(
+        claude_inbox.ClaudeInboxWake(address=inbox, fulfil=pusher.fulfil, poll_s=pusher.poll_s)
+    )
+    await claude.run(initialized, client)
 
 
 def _unregister_self() -> None:

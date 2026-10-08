@@ -1534,15 +1534,15 @@
   },
   "codexwake-second-thread-is-a-conflict": {
     "file": "hardline_mcp/codex_queue.py",
-    "before": "                self.conflict = True\n",
-    "after": "                self.thread = thread\n",
+    "before": "                self.stopped = True\n",
+    "after": "                self.address = thread\n",
     "tests": [
       "tests/test_codex_queue.py::test_a_second_top_level_thread_stops_waking_rather_than_migrating"
     ]
   },
   "codexwake-conflict-stops-polling": {
-    "file": "hardline_mcp/codex_queue.py",
-    "before": "            if self.conflict or self.outstanding is not None:\n                return None\n            self.announced",
+    "file": "hardline_mcp/announce.py",
+    "before": "            if self.stopped or self.outstanding is not None:\n                return None\n            self.announced",
     "after": "            if self.outstanding is not None:\n                return None\n            self.announced",
     "tests": [
       "tests/test_codex_queue.py::test_a_second_top_level_thread_stops_waking_rather_than_migrating",
@@ -1550,32 +1550,32 @@
     ]
   },
   "codexwake-one-outstanding-notice": {
-    "file": "hardline_mcp/codex_queue.py",
-    "before": "            if self.conflict or self.outstanding is not None:\n                return None\n            self.announced",
-    "after": "            if self.conflict:\n                return None\n            self.announced",
+    "file": "hardline_mcp/announce.py",
+    "before": "            if self.stopped or self.outstanding is not None:\n                return None\n            self.announced",
+    "after": "            if self.stopped:\n                return None\n            self.announced",
     "tests": [
       "tests/test_codex_queue.py::test_one_notice_until_its_receipt",
       "tests/test_codex_queue.py::test_reading_the_mail_is_not_evidence_the_notice_ran"
     ]
   },
   "codexwake-receipt-proves-only-itself": {
-    "file": "hardline_mcp/codex_queue.py",
-    "before": "            if self.outstanding is None or self.outstanding[0] != nonce:",
-    "after": "            if self.outstanding is None:",
+    "file": "hardline_mcp/announce.py",
+    "before": "            if self.outstanding is None or self.outstanding[0] != nonce:\n                return False",
+    "after": "            if self.outstanding is None:\n                return False",
     "tests": [
       "tests/test_codex_queue.py::test_a_receipt_proves_only_its_own_notice"
     ]
   },
   "codexwake-failed-attempt-stays-outstanding": {
     "file": "hardline_mcp/codex_queue.py",
-    "before": "                    if not result.get(\"ok\"):\n",
-    "after": "                    if not result.get(\"ok\"):\n                        self.outstanding = None\n",
+    "before": "            raise RuntimeError(f\"codex queue failed: {result.get('error')}\")",
+    "after": "            raise announce.NotSent(f\"codex queue failed: {result.get('error')}\")",
     "tests": [
       "tests/test_codex_queue.py::test_a_failed_attempt_stays_outstanding"
     ]
   },
   "codexwake-new-mail-only": {
-    "file": "hardline_mcp/codex_queue.py",
+    "file": "hardline_mcp/announce.py",
     "before": "        new = [r for r in rows if r[\"id\"] not in self.announced]",
     "after": "        new = list(rows)",
     "tests": [
@@ -1583,7 +1583,7 @@
     ]
   },
   "codexwake-granted-lanes-only": {
-    "file": "hardline_mcp/codex_queue.py",
+    "file": "hardline_mcp/announce.py",
     "before": "            new = [r for r in new if r[\"recipient\"] in held]",
     "after": "            new = new",
     "tests": [
@@ -1591,11 +1591,12 @@
     ]
   },
   "codexwake-codex-client-only": {
-    "file": "hardline_mcp/codex_queue.py",
-    "before": "        if client.get(\"name\") != CLIENT:\n            return\n        client[\"on_call\"]",
-    "after": "        if False:\n            return\n        client[\"on_call\"]",
+    "file": "hardline_mcp/announce.py",
+    "before": "        if client.get(\"name\") != self.client:\n            return\n",
+    "after": "        if False:\n            return\n",
     "tests": [
-      "tests/test_codex_queue.py::test_a_claude_client_is_never_queue_woken"
+      "tests/test_codex_queue.py::test_a_claude_client_is_never_queue_woken",
+      "tests/test_claude_inbox.py::test_a_codex_client_is_never_inbox_woken"
     ]
   },
   "codexwake-tap-forwards-tool-calls": {
@@ -1608,7 +1609,7 @@
   },
   "codexwake-receipt-routed-to-codex": {
     "file": "hardline_mcp/server.py",
-    "before": "        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(\n            codex_queue.accept_receipt, receipt\n        )",
+    "before": "        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(\n            announce.accept_receipt, receipt\n        )",
     "after": "        accepted = await _in_thread(channel.accept_receipt, receipt)",
     "tests": [
       "tests/test_codex_queue.py::test_one_notice_until_its_receipt"
@@ -1616,8 +1617,8 @@
   },
   "codexwake-delivery-state-reported": {
     "file": "hardline_mcp/server.py",
-    "before": "        \"delivery\": channel.state() or codex_queue.state() or \"none\",",
-    "after": "        \"delivery\": channel.state() or \"none\",",
+    "before": "    delivered, transport = (pushed, \"channel\") if pushed else announce.status()",
+    "after": "    delivered, transport = (pushed, \"channel\") if pushed else (None, None)",
     "tests": [
       "tests/test_codex_queue.py::test_the_session_reports_its_delivery_state"
     ]
@@ -1632,8 +1633,8 @@
   },
   "codexwake-queued-turn-is-not-evidence": {
     "file": "hardline_mcp/codex_queue.py",
-    "before": "                    f\"this connection, pinned to {self.thread}\"\n                )\n",
-    "after": "                    f\"this connection, pinned to {self.thread}\"\n                )\n            if thread == self.thread and turn.get(\"turn_trigger\") == \"queue\":\n                self.outstanding = None\n",
+    "before": "                    f\"this connection, pinned to {self.address}\"\n                )\n",
+    "after": "                    f\"this connection, pinned to {self.address}\"\n                )\n            if thread == self.address and turn.get(\"turn_trigger\") == \"queue\":\n                self.outstanding = None\n",
     "tests": [
       "tests/test_codex_queue.py::test_only_the_receipt_releases_a_notice_not_a_queued_turn"
     ]
@@ -1641,13 +1642,13 @@
   "codexwake-observe-never-logs": {
     "file": "hardline_mcp/codex_queue.py",
     "before": "                self._notes.append(\n                    f\"codex wake stopped:",
-    "after": "                channel._log(\n                    f\"codex wake stopped:",
+    "after": "                announce.channel._log(\n                    f\"codex wake stopped:",
     "tests": [
       "tests/test_codex_queue.py::test_observe_leaves_logging_to_the_poll_thread"
     ]
   },
   "codexwake-failed-facts-retried": {
-    "file": "hardline_mcp/codex_queue.py",
+    "file": "hardline_mcp/announce.py",
     "before": "                self._dirty = True  # retried on the next poll\n",
     "after": "                pass\n",
     "tests": [
@@ -1672,14 +1673,14 @@
   },
   "receipt-accepted-before-the-read": {
     "file": "hardline_mcp/server.py",
-    "before": "    accepted = None\n    if receipt:\n        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(\n            codex_queue.accept_receipt, receipt\n        )\n",
-    "after": "    accepted = None\n    if receipt:\n        await _in_thread(_consume, mailbox.inbox, agents, auto_ack=False)\n        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(\n            codex_queue.accept_receipt, receipt\n        )\n",
+    "before": "    accepted = None\n    if receipt:\n        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(\n            announce.accept_receipt, receipt\n        )\n",
+    "after": "    accepted = None\n    if receipt:\n        await _in_thread(_consume, mailbox.inbox, agents, auto_ack=False)\n        accepted = await _in_thread(channel.accept_receipt, receipt) or await _in_thread(\n            announce.accept_receipt, receipt\n        )\n",
     "tests": [
       "tests/test_codex_queue.py::test_a_receipt_counts_even_when_the_read_fails"
     ]
   },
   "codexwake-facts-wait-for-identity": {
-    "file": "hardline_mcp/codex_queue.py",
+    "file": "hardline_mcp/announce.py",
     "before": "                raise RuntimeError(\"no process identity to record facts under\")",
     "after": "                return",
     "tests": [
@@ -1753,10 +1754,146 @@
   },
   "instructions-ask-to-show-the-user": {
     "file": "hardline_mcp/server.py",
-    "before": "    \"receipt>) even if you defer the work, tell the user who sent each \"\n    \"message and what it says, act, then ack the ids. \"",
-    "after": "    \"receipt>) even if you defer the work, act, then ack the ids. \"",
+    "before": "    \"receipt=<its receipt>) even if you defer the work, tell the user who sent \"\n    \"each message and what it says, act, then ack the ids. \"",
+    "after": "    \"receipt=<its receipt>) even if you defer the work, act, then ack the ids. \"",
     "tests": [
       "tests/test_channel.py::test_initialize_declares_the_channel_and_the_standing_rule"
+    ]
+  },
+  "inbox-transport-reported": {
+    "file": "hardline_mcp/server.py",
+    "before": "    delivered, transport = (pushed, \"channel\") if pushed else announce.status()",
+    "after": "    delivered, transport = (pushed, \"channel\") if pushed else (announce.status()[0], None)",
+    "tests": [
+      "tests/test_claude_inbox.py::test_the_session_reports_its_transport_and_delivery"
+    ]
+  },
+  "inbox-declared-from-the-start": {
+    "file": "hardline_mcp/claude_inbox.py",
+    "before": "        self.declare()  # the address was known from the start",
+    "after": "        pass",
+    "tests": [
+      "tests/test_claude_inbox.py::test_the_session_reports_its_transport_and_delivery"
+    ]
+  },
+  "inbox-must-be-the-hosts-own": {
+    "file": "hardline_mcp/claude_inbox.py",
+    "before": "    return isinstance(record, dict) and record.get(\"messagingSocketPath\") == socket",
+    "after": "    return isinstance(record, dict)",
+    "tests": [
+      "tests/test_claude_inbox.py::test_an_inbox_no_ancestor_records_is_not_used"
+    ]
+  },
+  "inbox-unreachable-is-not-sent": {
+    "file": "hardline_mcp/claude_inbox.py",
+    "before": "        outcome.append(announce.NotSent(f\"{type(exc).__name__}: {exc}\"))",
+    "after": "        outcome.append(exc)",
+    "tests": [
+      "tests/test_claude_inbox.py::test_an_inbox_never_reached_delivered_nothing[error0]"
+    ]
+  },
+  "inbox-failed-write-may-have-delivered": {
+    "file": "hardline_mcp/claude_inbox.py",
+    "before": "    except Exception as exc:  # noqa: BLE001 - written: it may have been delivered\n        outcome.append(exc)",
+    "after": "    except Exception as exc:  # noqa: BLE001 - written: it may have been delivered\n        outcome.append(announce.NotSent(str(exc)))",
+    "tests": [
+      "tests/test_claude_inbox.py::test_a_failed_write_may_have_delivered"
+    ]
+  },
+  "inbox-write-bounded": {
+    "file": "hardline_mcp/claude_inbox.py",
+    "before": "    writer.join(SEND_TIMEOUT_S)",
+    "after": "    writer.join()",
+    "tests": [
+      "tests/test_claude_inbox.py::test_a_write_the_host_never_drains_is_abandoned"
+    ]
+  },
+  "inbox-env-stripped-from-agents": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        \"CLAUDE_CODE_MESSAGING_SOCKET\",\n        \"CLAUDE_CODE_MESSAGING_TOKEN\",\n",
+    "after": "",
+    "tests": [
+      "tests/test_claude_inbox.py::test_spawned_agents_never_inherit_the_inbox"
+    ]
+  },
+  "notsent-is-taken-back": {
+    "file": "hardline_mcp/announce.py",
+    "before": "                    except NotSent:\n                        await anyio.to_thread.run_sync(self.take_back, nonce, ids)\n",
+    "after": "                    except NotSent:\n",
+    "tests": [
+      "tests/test_claude_inbox.py::test_an_inbox_that_cannot_be_reached_is_tried_again"
+    ]
+  },
+  "take-back-announces-again": {
+    "file": "hardline_mcp/announce.py",
+    "before": "            self.announced -= ids\n",
+    "after": "",
+    "tests": [
+      "tests/test_claude_inbox.py::test_a_notice_taken_back_is_no_push_and_its_mail_is_due_again"
+    ]
+  },
+  "take-back-reverts-the-push": {
+    "file": "hardline_mcp/announce.py",
+    "before": "            self.facts[\"last_push_at\"] = self._previous_push\n",
+    "after": "",
+    "tests": [
+      "tests/test_claude_inbox.py::test_a_notice_taken_back_is_no_push_and_its_mail_is_due_again"
+    ]
+  },
+  "inbox-notice-asks-even-if-deferred": {
+    "file": "hardline_mcp/claude_inbox.py",
+    "before": "f\"inbox(agent='claude', auto_ack=false, receipt='{nonce}') even if you \"\n        \"defer the work, tell",
+    "after": "f\"inbox(agent='claude', auto_ack=false, receipt='{nonce}'), tell",
+    "tests": [
+      "tests/test_claude_inbox.py::test_the_notice_is_exactly_this_text"
+    ]
+  },
+  "inbox-chosen-when-proven": {
+    "file": "hardline_mcp/server.py",
+    "before": "        if inbox is None:\n            await pusher.run(send, initialized, client)\n",
+    "after": "        if True:\n            await pusher.run(send, initialized, client)\n",
+    "tests": [
+      "tests/test_claude_inbox.py::test_the_session_is_woken_through_its_inbox_with_only_the_notice"
+    ]
+  },
+  "take-back-only-an-unreceipted-notice": {
+    "file": "hardline_mcp/announce.py",
+    "before": "            if self.outstanding is None or self.outstanding[0] != nonce:\n                return  # already receipted",
+    "after": "            if False:\n                return  # already receipted",
+    "tests": [
+      "tests/test_claude_inbox.py::test_a_receipted_notice_is_not_taken_back"
+    ]
+  },
+  "take-back-writes-its-facts-now": {
+    "file": "hardline_mcp/announce.py",
+    "before": "            self._dirty = True\n        self._flush()\n\n    # ── the loop",
+    "after": "            self._dirty = True\n\n    # ── the loop",
+    "tests": [
+      "tests/test_claude_inbox.py::test_a_notice_taken_back_is_no_push_and_its_mail_is_due_again"
+    ]
+  },
+  "inbox-any-connect-failure-is-not-sent": {
+    "file": "hardline_mcp/claude_inbox.py",
+    "before": "    except Exception as exc:  # noqa: BLE001 - not connected: nothing delivered",
+    "after": "    except OSError as exc:  # noqa: BLE001 - not connected: nothing delivered",
+    "tests": [
+      "tests/test_claude_inbox.py::test_an_inbox_never_reached_delivered_nothing[error1]"
+    ]
+  },
+  "inbox-short-write-is-a-failure": {
+    "file": "hardline_mcp/claude_inbox.py",
+    "before": "        if written is not None and written != len(payload):\n",
+    "after": "        if False:\n",
+    "tests": [
+      "tests/test_claude_inbox.py::test_a_short_write_is_a_failed_write"
+    ]
+  },
+  "inbox-resolution-fails-safe": {
+    "file": "hardline_mcp/claude_inbox.py",
+    "before": "    except Exception:  # noqa: BLE001 - a wake must never stop the server starting\n",
+    "after": "    except OSError:  # noqa: BLE001 - a wake must never stop the server starting\n",
+    "tests": [
+      "tests/test_claude_inbox.py::test_anything_unexpected_while_resolving_is_no_inbox"
     ]
   }
 }

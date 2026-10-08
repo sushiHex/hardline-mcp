@@ -20,11 +20,39 @@ separate mechanism that launches a new CLI invocation.
 
 Persist the setup instructions, not transient PIDs, tokens, or thread bindings.
 
-## Claude Code: push (preferred)
+## Claude Code: inbox wake (preferred, no launch flag)
 
-Every hardline server pushes mail for its own lanes to a connected Claude Code
-client as a channel event. Claude Code injects the event only into a session
-launched with the development-channels flag, so launch through an alias:
+Every interactive Claude Code session has its own cross-session inbox, and its
+hardline server posts one notice there when the session's lanes get mail. No
+launch flag, no dialog. Then:
+
+- **An idle session wakes:** the notice starts a turn. Claude Code's docs say a
+  busy session reads it between tool calls (not yet observed with hardline).
+  It shows as "Message from @hardline-mcp".
+- **Allowlist the tools** `mcp__hardline-mcp__inbox` and
+  `mcp__hardline-mcp__ack`, so an unattended wake does not stop at a permission
+  prompt.
+- **Receipts prove delivery,** as for push below. `list_agents().you` reports
+  `transport: "inbox"` and the delivery state.
+- **One notice at a time.** The next goes out once the session has read its
+  inbox with the receipt. Deferred mail is not re-announced; new mail is.
+- **`unreceipted` means notices are not arriving.** A `crossSessionInbound`
+  setting of `hold` or `refuse` blocks them silently. Fall back to the
+  Monitor below.
+
+Used when Claude Code's own record of an ancestor session names the inbox
+hardline was given (`~/.claude/sessions/<pid>.json`); otherwise hardline falls
+back to push. `transport` is `null` until a wake has an address.
+See [inbox wake](claude-inbox-wake.md) for the design and the live evidence.
+
+## Claude Code: push (fallback)
+
+When the inbox cannot be shown to be the session's own (an older Claude Code,
+`--bare`, a host that filters MCP environments), every hardline server pushes
+mail for its own lanes to a connected Claude Code client as a channel event.
+Claude Code injects the event only into a session launched with the
+development-channels flag, which shows a confirmation dialog at every launch,
+so launch through an alias:
 
 ```powershell
 function claudeh { claude --dangerously-load-development-channels server:hardline-mcp @args }

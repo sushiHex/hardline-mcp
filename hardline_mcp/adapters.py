@@ -1125,7 +1125,10 @@ def _as_text(stream: object) -> str:
 # hardline, and that child would read whichever of these it inherited and
 # register as a SECOND consumer of the spawning session's lane - draining the
 # very mail it was dispatched to help with. The ancestry guard cannot catch
-# that, because both variables are consulted BEFORE it runs.
+# that, because both variables are consulted BEFORE it runs. The messaging pair
+# is the session's inbox and the token that makes a message its own child's
+# (claude_inbox): a spawned agent - lower trust by design - holding it could
+# post turns into the operator's session.
 _AGENT_CHILD_STRIPPED_ENV = frozenset(
     {
         "HARDLINE_ALLOW_WRITE",
@@ -1133,6 +1136,8 @@ _AGENT_CHILD_STRIPPED_ENV = frozenset(
         "HARDLINE_AGENT",
         "CLAUDE_CODE_SESSION_ID",
         "CLAUDE_PROJECT_DIR",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
     }
 )
 
