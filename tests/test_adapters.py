@@ -294,7 +294,7 @@ def test_ask_codex_routes_model_effort_and_reports_json_telemetry(monkeypatch):
     assert out["usage"]["input_tokens"] == 12
     argv = calls[0]["cmd"]
     assert argv[argv.index("--model") + 1] == "gpt-5.6-terra"
-    assert argv[argv.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+    assert argv[argv.index('model_reasoning_effort="xhigh"') - 1] == "-c"
     assert "--json" in argv
     assert "--ephemeral" in argv
     assert argv[-2:] == ["--", "review this"]
