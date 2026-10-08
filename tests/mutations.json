@@ -701,8 +701,8 @@
   },
   "codex-plain-refusal-honoured": {
     "file": "hardline_mcp/adapters.py",
-    "before": "        isolation, refusal = _codex_isolation(exe, None, None, on_spawn)\n        if refusal is not None:\n            return refusal\n",
-    "after": "        isolation, refusal = _codex_isolation(exe, None, None, on_spawn)\n        isolation = isolation or []\n",
+    "before": "        isolation, refusal = _codex_isolation(exe, env, None, on_spawn)\n        if refusal is not None:\n            return refusal\n",
+    "after": "        isolation, refusal = _codex_isolation(exe, env, None, on_spawn)\n        isolation = isolation or []\n",
     "tests": [
       "tests/test_codex_isolation.py::test_an_unprovable_listing_refuses_the_call[object]"
     ]
@@ -1038,8 +1038,8 @@
   },
   "github-codex-result-summary": {
     "file": "hardline_mcp/adapters.py",
-    "before": "        attachment=attachment,\n    )\n    if attachment is not None:\n        result[\"github\"] = attachment[\"summary\"]",
-    "after": "        attachment=attachment,\n    )\n    if attachment is not None:\n        pass",
+    "before": "        sandbox_env=sandbox.env,\n    )\n    if attachment is not None:\n        result[\"github\"] = attachment[\"summary\"]",
+    "after": "        sandbox_env=sandbox.env,\n    )\n    if attachment is not None:\n        pass",
     "tests": [
       "tests/test_github_review.py::test_a_codex_reviewer_gets_the_evidence_on_stdin_and_no_web"
     ]
