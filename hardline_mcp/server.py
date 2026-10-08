@@ -1444,6 +1444,10 @@ async def ask_codex(
     certified, because a skipped line may have been a later answer or the
     terminal event, making the survivor stale. Do not discard a
     ``partial_reply`` on ``ok: false`` alone; read it and judge it.
+
+    BLIND TURN: if Codex could start none of its shell commands, the result is
+    ``ok: false`` the same way, with ``commands_not_started``: its reply was
+    written without reading anything. Some not starting is only counted.
     """
     return await _in_thread(
         adapters.ask_codex,

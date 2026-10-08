@@ -1462,6 +1462,98 @@ def test_damaged_terminal_event_is_not_reported_as_success(monkeypatch):
     assert "partial_reply" in out and "reply" not in out
 
 
+# Captured from live Codex 0.161.0 jobs (#47): a process the sandbox could not
+# start, and a missing executable, which the shell starts and reports.
+_NOT_STARTED = {
+    "aggregated_output": "Failed to create unified exec process: "
+    "helper_unknown_error: setup refresh had errors",
+    "exit_code": -1, "status": "failed"}
+_NOT_FOUND = {
+    "aggregated_output": "The term 'definitely-not-a-command-xyz' is not "
+    "recognized as a name of a cmdlet, function, script file, or executable",
+    "exit_code": 1, "status": "failed"}
+_RAN = {"aggregated_output": "[build-system]\r\n", "exit_code": 0,
+        "status": "completed"}
+
+
+def _codex_turn(*commands: dict, damaged: bool = False) -> str:
+    """A completed Codex turn that ran `commands`, then answered."""
+    lines = [json.dumps({"type": "thread.started", "thread_id": "t-47"})]
+    lines += [
+        json.dumps({"type": "item.completed", "item": {
+            "type": "command_execution", "command": "pwsh.exe -Command ...",
+            **command}})
+        for command in commands
+    ]
+    if damaged:
+        lines.append("{ a truncated line")
+    lines.append(json.dumps({"type": "item.completed", "item": {
+        "type": "agent_message", "text": "the answer"}}))
+    lines.append(json.dumps({"type": "turn.completed", "usage": {}}))
+    return "\n".join(lines) + "\n"
+
+
+def _ask_codex_after(monkeypatch, stdout: str) -> dict:
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout))
+    return adapters.ask_codex("review", model="gpt-5.6-sol")
+
+
+def test_a_turn_none_of_whose_commands_started_is_not_a_success(monkeypatch):
+    """#47: Codex 0.161.0's Windows sandbox could start no process, the turn
+    still completed, and a review that read nothing came back ok=True."""
+    out = _ask_codex_after(monkeypatch, _codex_turn(_NOT_STARTED, _NOT_STARTED))
+
+    assert out["ok"] is False
+    assert "none of its 2 command(s)" in out["error"]
+    assert "setup refresh had errors" in out["error"]
+    assert out["partial_reply"] == "the answer" and "reply" not in out
+    assert out.get("commands_not_started") == 2
+
+
+def test_a_command_that_ran_and_failed_is_ordinary(monkeypatch):
+    """A missing executable fails after its shell started. Demoting that
+    would fail every review that ever reached for an absent tool."""
+    out = _ask_codex_after(monkeypatch, _codex_turn(_NOT_FOUND))
+
+    assert out["ok"] is True
+    assert "commands_not_started" not in out
+
+
+def test_some_commands_not_starting_is_counted_not_demoted(monkeypatch):
+    """What did run informed the reply; a caller can still see the gap."""
+    out = _ask_codex_after(monkeypatch, _codex_turn(_NOT_STARTED, _RAN))
+
+    assert out["ok"] is True
+    assert out["reply"] == "the answer"
+    assert out.get("commands_not_started") == 1
+
+
+def test_a_command_quoting_the_message_after_it_ran_is_ordinary(monkeypatch):
+    """A session investigating #47 greps the sandbox log and prints the
+    message. Its command started; only `status` tells the two apart."""
+    out = _ask_codex_after(monkeypatch, _codex_turn(
+        {**_RAN, "aggregated_output": _NOT_STARTED["aggregated_output"]}))
+
+    assert out["ok"] is True
+    assert "commands_not_started" not in out
+
+
+def test_an_exit_code_alone_does_not_mean_not_started(monkeypatch):
+    """-1 is what one sample carried; the message is the contract."""
+    out = _ask_codex_after(monkeypatch, _codex_turn({**_NOT_FOUND, "exit_code": -1}))
+
+    assert out["ok"] is True
+
+
+def test_not_starting_survives_a_damaged_stream(monkeypatch):
+    """The damaged-stream demotion rewrites `error`; the count stays."""
+    out = _ask_codex_after(monkeypatch, _codex_turn(_NOT_STARTED, damaged=True))
+
+    assert out["ok"] is False
+    assert out["malformed_lines"] == 1
+    assert out.get("commands_not_started") == 1
+
+
 def test_unparseable_output_returns_evidence_not_just_an_error(monkeypatch):
     """The raw output used to be dropped, making a parse failure
     unrecoverable. Keep a bounded excerpt so it stays diagnosable."""

@@ -1611,5 +1611,54 @@
     "tests": [
       "tests/test_codex_queue.py::test_facts_wait_for_a_process_identity_rather_than_being_dropped"
     ]
+  },
+  "codex-blind-turn-demotes": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    return _demote_if_damaged(_demote_if_blind(response, events), malformed, output)",
+    "after": "    return _demote_if_damaged(response, malformed, output)",
+    "tests": [
+      "tests/test_adapters.py::test_a_turn_none_of_whose_commands_started_is_not_a_success"
+    ]
+  },
+  "codex-blind-needs-the-not-started-message": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        and _CODEX_NOT_STARTED in str(c.get(\"aggregated_output\") or \"\")\n",
+    "after": "",
+    "tests": [
+      "tests/test_adapters.py::test_a_command_that_ran_and_failed_is_ordinary"
+    ]
+  },
+  "codex-blind-message-not-exit-code": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        and _CODEX_NOT_STARTED in str(c.get(\"aggregated_output\") or \"\")\n",
+    "after": "        and c.get(\"exit_code\") == -1\n",
+    "tests": [
+      "tests/test_adapters.py::test_an_exit_code_alone_does_not_mean_not_started"
+    ]
+  },
+  "codex-blind-needs-a-failed-status": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if c.get(\"status\") == \"failed\"\n        and _CODEX_NOT_STARTED",
+    "after": "        if _CODEX_NOT_STARTED",
+    "tests": [
+      "tests/test_adapters.py::test_a_command_quoting_the_message_after_it_ran_is_ordinary"
+    ]
+  },
+  "codex-blind-only-when-none-started": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if len(not_started) < len(commands):\n        return response\n",
+    "after": "",
+    "tests": [
+      "tests/test_adapters.py::test_some_commands_not_starting_is_counted_not_demoted"
+    ]
+  },
+  "codex-blind-count-is-a-field": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    response = {**response, \"commands_not_started\": len(not_started)}\n",
+    "after": "    response = dict(response)\n",
+    "tests": [
+      "tests/test_adapters.py::test_some_commands_not_starting_is_counted_not_demoted",
+      "tests/test_adapters.py::test_not_starting_survives_a_damaged_stream"
+    ]
   }
 }

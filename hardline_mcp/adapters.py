@@ -1927,6 +1927,56 @@ def _demote_if_damaged(response: dict, malformed: int, output: str) -> dict:
     return demoted
 
 
+def _completed_items(events: list[dict], kind: str) -> list[dict]:
+    """The completed items of one ``kind`` in a Codex event stream."""
+    return [
+        e["item"]
+        for e in events
+        if e.get("type") == "item.completed"
+        and isinstance(e.get("item"), dict)
+        and e["item"].get("type") == kind
+    ]
+
+
+# What a Codex command item holds when its process was never started - not a
+# command that ran and failed. A missing executable is the latter: the shell
+# starts and says "not recognized" (measured, #47).
+_CODEX_NOT_STARTED = "Failed to create unified exec process"
+
+
+def _demote_if_blind(response: dict, events: list[dict]) -> dict:
+    """Never report ``ok: True`` for a turn none of whose commands started.
+
+    Codex 0.161.0 on Windows could start no process at all (#47), and the
+    turn still completed: the reply said it could not read the workdir, and
+    the job read as a finished review to any caller that took ``ok`` at its
+    word. Demoted like a damaged stream, the reply kept under
+    ``partial_reply``. Some commands not starting is only counted, in
+    ``commands_not_started``: what did run informed the reply. The count is a
+    field so it survives ``_demote_if_damaged`` rewriting ``error``.
+    """
+    commands = _completed_items(events, "command_execution")
+    not_started = [
+        c
+        for c in commands
+        if c.get("status") == "failed"
+        and _CODEX_NOT_STARTED in str(c.get("aggregated_output") or "")
+    ]
+    if not not_started:
+        return response
+    response = {**response, "commands_not_started": len(not_started)}
+    if len(not_started) < len(commands):
+        return response
+    why = str(not_started[0]["aggregated_output"]).strip().split("\n")[0].strip()
+    response["ok"] = False
+    response["error"] = (
+        f"Codex could start none of its {len(commands)} command(s) ({why[:200]}): "
+        "nothing its reply says it ran or read was - see partial_reply"
+    )
+    response["partial_reply"] = response.pop("reply")
+    return response
+
+
 def _parse_codex_jsonl(
     output: str,
     *,
@@ -1976,12 +2026,9 @@ def _parse_codex_jsonl(
                 malformed,
             )
     messages = [
-        e.get("item", {}).get("text")
-        for e in events
-        if e.get("type") == "item.completed"
-        and isinstance(e.get("item"), dict)
-        and e["item"].get("type") == "agent_message"
-        and isinstance(e["item"].get("text"), str)
+        item["text"]
+        for item in _completed_items(events, "agent_message")
+        if isinstance(item.get("text"), str)
     ]
     if completed is None or not messages:
         return _unparsed_error("Codex JSONL", malformed, first_error, output)
@@ -2000,7 +2047,7 @@ def _parse_codex_jsonl(
         response["subscription_configured"] = subscription_configured
         # A local auth-file preflight is not post-call runtime evidence.
         response["subscription_verified"] = None
-    return _demote_if_damaged(response, malformed, output)
+    return _demote_if_damaged(_demote_if_blind(response, events), malformed, output)
 
 
 def _codex_auth_mode(env: dict[str, str]) -> str | None:
