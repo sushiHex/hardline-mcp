@@ -163,6 +163,37 @@ Live, still to do: an idle session woken through hardline itself; a busy
 session; the old host after a move to the background; a session with
 `crossSessionInbound` set; Linux.
 
+## Alternatives considered (2026-10-07/08)
+
+Each was researched against Claude Code 2.1.293-294's docs and binary before
+this design was chosen.
+
+- **A shell wrapper adding the channels flag to every interactive launch.**
+  Built and removed: the flag's confirmation dialog appears at every launch,
+  so the wrapper put a prompt in front of every unattended launch, reloaded's
+  restore and relaunch loops included.
+- **Hook wake** (a background `asyncRewake` hook waiting on the store). Four
+  revisions, shelved after two reviews; rev 4 and its reviews are kept in the
+  maintainer's local research notes (`research/` is not tracked). A moved
+  conversation gets a new
+  lane, so its waiter missed mail to the old address; "quiet if push
+  delivered it" could not be proven from `push_delivery`; ancestry binding
+  had nested-session cases; and the installer raced Claude Code's own
+  settings writes. The inbox needs no waiter and no installer, and the OS
+  binds each server to its own host's inbox.
+- **A channel plugin with an approved-channels allowlist.** Workable: a
+  plugin served from hardline's own repo, allowlisted through managed settings
+  or the `HKCU\SOFTWARE\Policies\ClaudeCode` registry value, then launched with
+  `--channels`, which shows no dialog. But it still needs a flag on every
+  launch, renames every hardline tool, and rests on allowlist behaviour the
+  docs describe only for Team and Enterprise plans.
+- **A plugin monitor** (a command Claude Code starts in every session).
+  Flagless, but one more process per session, a new watch mode to find the
+  session's lanes, no proof the model saw the mail, and armed behind a
+  server-side feature flag that can switch off silently.
+- **`FileChanged`, `Notification` or `MessageDisplay` hooks.** None can start
+  a turn in an idle session.
+
 ## Review record (Fable, rev 1 → rev 2)
 
 **Adopted:**
