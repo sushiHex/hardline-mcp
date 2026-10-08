@@ -139,6 +139,13 @@ available execution metadata:
 - Codex uses JSONL events, reports the ephemeral `thread_id`, and preserves
   structured `turn.failed` errors. `actual_model` and `effective_effort` remain
   null; the adapter does not infer served settings from the request.
+- A Codex turn that could start none of its shell commands ("Failed to
+  create unified exec process") is reported `ok: false`, with the reply under
+  `partial_reply` and the count in `commands_not_started`: it was written
+  without reading anything. When only some did not start, the count is
+  reported and `ok` is kept. A command that started and failed is ordinary.
+  The unqualified call (no option set) does not use JSONL, so this is not
+  detected there.
 - Claude uses stream JSON, reports `actual_model`, `api_key_source`, usage,
   model usage, rate limits, and parsed fallback metadata when provided.
   `effective_effort` remains null.
