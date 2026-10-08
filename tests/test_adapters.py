@@ -630,6 +630,26 @@ def test_ask_codex_rejects_an_unknown_windows_sandbox_before_spawning(monkeypatc
     assert calls == []
 
 
+def test_an_unknown_windows_sandbox_refuses_before_model_resolution(monkeypatch):
+    """A family model resolves through `codex debug models`, and async admission
+    resolves before it queues: the shared validator must refuse first."""
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "unelevate")
+
+    def no_resolution(*args, **kwargs):
+        raise AssertionError("resolved a model despite an invalid configuration")
+
+    monkeypatch.setattr(adapters, "resolve_codex_model", no_resolution)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    error, _ = adapters.validate_request(
+        "codex", model="sol", effort="default", mode="default", workdir=None, write=False
+    )
+    assert error is not None and "HARDLINE_CODEX_WINDOWS_SANDBOX" in error["error"]
+    out = adapters.ask_codex("summarize", model="sol")
+    assert out["ok"] is False and "HARDLINE_CODEX_WINDOWS_SANDBOX" in out["error"]
+    assert calls == []
+
+
 def test_ask_codex_passes_no_windows_sandbox_elsewhere(monkeypatch):
     monkeypatch.setattr(adapters, "_ON_WINDOWS", False)
     monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "elevated")

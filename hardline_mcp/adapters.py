@@ -1619,6 +1619,13 @@ def validate_request(
             "ok": False,
             "error": f"unsupported {name} mode {mode!r}; expected one of {sorted(modes)}",
         }, None
+    if agent == "codex":
+        # Here, before a family model is resolved through `codex debug models`
+        # or an async job admitted: a typo must spawn nothing.
+        try:
+            _codex_windows_sandbox()
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}, None
     error, resolved = _validate_workdir_write(name, mode, workdir, write)
     error = error or _validate_github(
         name, github, github_exclude, github_tools, workdir, write
