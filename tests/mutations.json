@@ -873,8 +873,8 @@
   },
   "codex-timeout-validated-before-probes": {
     "file": "hardline_mcp/adapters.py",
-    "before": "    try:\n        _timeout_for(\"codex\")\n        argv += _codex_windows_sandbox()\n    except ValueError as exc:\n        return {\"ok\": False, \"error\": str(exc)}\n",
-    "after": "    argv += _codex_windows_sandbox()\n",
+    "before": "    try:\n        _timeout_for(\"codex\")\n        sandbox = _codex_windows_sandbox()\n    except ValueError as exc:\n        return {\"ok\": False, \"error\": str(exc)}\n",
+    "after": "    sandbox = _codex_windows_sandbox()\n",
     "tests": [
       "tests/test_codex_isolation.py::test_an_invalid_timeout_fails_before_any_probe[plain]",
       "tests/test_codex_isolation.py::test_an_invalid_timeout_fails_before_any_probe[telemetry]"
@@ -882,11 +882,68 @@
   },
   "codex-windows-sandbox-passed": {
     "file": "hardline_mcp/adapters.py",
-    "before": "        argv += _codex_windows_sandbox()\n",
+    "before": "    argv += sandbox.overrides\n",
     "after": "",
     "tests": [
-      "tests/test_adapters.py::test_ask_codex_on_windows_defaults_to_the_unelevated_sandbox[default]",
-      "tests/test_adapters.py::test_ask_codex_on_windows_defaults_to_the_unelevated_sandbox[high]"
+      "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[default]",
+      "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[high]"
+    ]
+  },
+  "codex-windows-sandbox-defaults-to-elevated": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "_CODEX_WINDOWS_SANDBOX_DEFAULT = \"elevated\"",
+    "after": "_CODEX_WINDOWS_SANDBOX_DEFAULT = \"unelevated\"",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[default]"
+    ]
+  },
+  "codex-runtime-redirect-reaches-the-plain-call": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        env = {**os.environ, **sandbox.env}\n",
+    "after": "        env = dict(os.environ)\n",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[default]"
+    ]
+  },
+  "codex-plain-call-probed-with-the-decoy": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        isolation, refusal = _codex_isolation(exe, env, None, on_spawn)\n",
+    "after": "        isolation, refusal = _codex_isolation(exe, None, None, on_spawn)\n",
+    "tests": [
+      "tests/test_codex_isolation.py::test_codex_is_probed_exactly_where_and_how_the_child_will_run[plain]"
+    ]
+  },
+  "codex-runtime-redirect-reaches-the-structured-call": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    child_env = {**(os.environ if child_env is None else child_env), **sandbox_env}\n",
+    "after": "",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[high]",
+      "tests/test_adapters.py::test_the_windows_sandbox_reaches_write_and_advisory[advisory]"
+    ]
+  },
+  "codex-runtime-redirect-gives-commands-the-real-one": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        overrides + [\"-c\", f\"shell_environment_policy.set.LOCALAPPDATA={restored}\"],\n",
+    "after": "        overrides,\n",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[default]"
+    ]
+  },
+  "codex-runtime-redirect-only-when-elevated": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if value != \"elevated\" or restored is None:",
+    "after": "    if restored is None:",
+    "tests": [
+      "tests/test_adapters.py::test_only_the_elevated_sandbox_is_redirected[unelevated]"
+    ]
+  },
+  "codex-runtime-redirect-needs-a-real-one": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if value != \"elevated\" or restored is None:",
+    "after": "    if value != \"elevated\":",
+    "tests": [
+      "tests/test_adapters.py::test_no_redirect_without_a_real_localappdata_to_give_back"
     ]
   },
   "codex-windows-sandbox-validated-before-resolution": {

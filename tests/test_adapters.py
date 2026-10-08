@@ -593,19 +593,62 @@ def _windows_sandbox(argv: list[str]) -> list[str]:
     return [a for a in argv if a.startswith("windows.sandbox=")]
 
 
-@pytest.mark.parametrize("effort", ["default", "high"])  # plain and structured paths
-def test_ask_codex_on_windows_defaults_to_the_unelevated_sandbox(monkeypatch, effort):
-    """#47: Codex 0.161.0's elevated sandbox refuses every command while the
-    desktop app runs its computer-use runtime, so every review came back
-    unread. A spawned Codex asks for the unelevated one, read-only intact."""
+REAL_LOCALAPPDATA = r"C:\Users\you\AppData\Local"
+
+
+DECOY = str(adapters._CODEX_DECOY_LOCALAPPDATA)
+
+
+@pytest.fixture
+def windows(monkeypatch):
+    """Windows, the default sandbox, and a known LOCALAPPDATA."""
     monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
     monkeypatch.delenv("HARDLINE_CODEX_WINDOWS_SANDBOX", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", REAL_LOCALAPPDATA)
+
+
+def _restored(argv: list[str]) -> list[str]:
+    return [a for a in argv if a.startswith("shell_environment_policy.set.")]
+
+
+@pytest.mark.parametrize("effort", ["default", "high"])  # plain and structured paths
+def test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes(
+    monkeypatch, windows, effort
+):
+    """#47: Codex 0.161.0's elevated sandbox refused every command while the
+    desktop app ran its computer-use runtime, because its refresh walks
+    LOCALAPPDATA's runtime tree. The child gets a LOCALAPPDATA that does not
+    exist, which the refresh skips, and its commands get the real one back."""
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
     adapters.ask_codex("summarize", effort=effort)
-    argv = calls[0]["cmd"]
-    assert _windows_sandbox(argv) == ['windows.sandbox="unelevated"']
-    assert argv[argv.index('windows.sandbox="unelevated"') - 1] == "-c"
+    argv, env = calls[0]["cmd"], calls[0]["kwargs"]["env"]
+    assert _windows_sandbox(argv) == ['windows.sandbox="elevated"']
     assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert env["LOCALAPPDATA"] == DECOY
+    assert _restored(argv) == [
+        r'shell_environment_policy.set.LOCALAPPDATA="C:\\Users\\you\\AppData\\Local"'
+    ]
+    assert argv[argv.index(_restored(argv)[0]) - 1] == "-c"
+
+
+@pytest.mark.parametrize("value", ["unelevated", "inherit"])
+def test_only_the_elevated_sandbox_is_redirected(monkeypatch, windows, value):
+    """The other two do not run the refresh hardline steers around."""
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", value)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    adapters.ask_codex("summarize")
+    assert _restored(calls[0]["cmd"]) == []
+    assert calls[0]["kwargs"]["env"]["LOCALAPPDATA"] == REAL_LOCALAPPDATA
+
+
+def test_no_redirect_without_a_real_localappdata_to_give_back(monkeypatch, windows):
+    """Redirected, the commands would keep the decoy."""
+    monkeypatch.delenv("LOCALAPPDATA")
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    adapters.ask_codex("summarize")
+    assert _windows_sandbox(calls[0]["cmd"]) == ['windows.sandbox="elevated"']
+    assert _restored(calls[0]["cmd"]) == []
+    assert "LOCALAPPDATA" not in calls[0]["kwargs"]["env"]
 
 
 def test_windows_detection_is_the_real_platform():
@@ -616,19 +659,25 @@ def test_windows_detection_is_the_real_platform():
     assert adapters._ON_WINDOWS is (os.name == "nt")
 
 
-@pytest.mark.parametrize("kwargs", [{"write": True}, {"mode": "advisory"}])
+@pytest.mark.parametrize(
+    "kwargs", [{"write": True}, {"mode": "advisory"}], ids=["write", "advisory"]
+)
 def test_the_windows_sandbox_reaches_write_and_advisory(
-    monkeypatch, tmp_path, allow_write, kwargs
+    monkeypatch, tmp_path, windows, allow_write, kwargs
 ):
-    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
-    monkeypatch.delenv("HARDLINE_CODEX_WINDOWS_SANDBOX", raising=False)
+    """Advisory builds an environment of its own; the decoy lands in it."""
+    advisory_env = {"CODEX_HOME": str(tmp_path / "home"), "LOCALAPPDATA": REAL_LOCALAPPDATA}
     monkeypatch.setattr(
-        adapters, "_prepare_codex_advisory", lambda: (None, None, str(tmp_path))
+        adapters, "_prepare_codex_advisory", lambda: (None, advisory_env, str(tmp_path))
     )
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
     workdir = None if kwargs.get("mode") == "advisory" else str(tmp_path)
     adapters.ask_codex("go", workdir=workdir, **kwargs)
-    assert _windows_sandbox(calls[0]["cmd"]) == ['windows.sandbox="unelevated"']
+    (spawn,) = calls
+    assert _windows_sandbox(spawn["cmd"]) == ['windows.sandbox="elevated"']
+    assert spawn["kwargs"]["env"]["LOCALAPPDATA"] == DECOY
+    if kwargs.get("mode") == "advisory":
+        assert spawn["kwargs"]["env"]["CODEX_HOME"] == advisory_env["CODEX_HOME"]
 
 
 @pytest.mark.parametrize(

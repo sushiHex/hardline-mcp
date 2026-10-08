@@ -16,7 +16,7 @@ and watcher command. Check `code_revision` when confirming an update is loaded.
 | `HARDLINE_CLAUDE_CMD` | Override the Claude executable path. |
 | `HARDLINE_CODEX_CMD` | Override the Codex executable path. |
 | `HARDLINE_HERMES_CMD` | Override the Hermes executable path. |
-| `HARDLINE_CODEX_WINDOWS_SANDBOX` | Windows only. `unelevated` (default), `elevated`, or `inherit` (pass nothing; Codex's own configuration decides, which in advisory mode excludes the host's `config.toml`). See [the Windows sandbox](#codex-windows-sandbox). |
+| `HARDLINE_CODEX_WINDOWS_SANDBOX` | Windows only. `elevated` (default), `unelevated`, or `inherit` (pass nothing; Codex's own configuration decides, which in advisory mode excludes the host's `config.toml`). See [the Windows sandbox](#codex-windows-sandbox). |
 | `HARDLINE_AGENT` | Declare `claude`, `codex`, or `hermes` when needed. |
 | `HARDLINE_AGENT_LABEL` | Select a fixed session role; see [ownership and reconnects](messaging.md#name-a-session). |
 | `CODEX_HOME` | Not a hardline variable, but read by the `codex queue` it runs to wake a Codex session. Codex does not pass it to MCP servers, so if Codex uses a custom home, set the same value in hardline's MCP registration env. See [queue-wake](inbox-signals.md#codex-queue-wake-preferred). |
@@ -33,21 +33,29 @@ When pinning Codex, prefer its maintained launcher over a versioned release path
 
 ### Codex Windows sandbox
 
-On Windows a spawned Codex runs with `-c windows.sandbox="unelevated"` unless
-`HARDLINE_CODEX_WINDOWS_SANDBOX` says otherwise. The reason is Codex 0.161.0
-(#47, openai/codex#51590). Its elevated sandbox refreshes ACLs on every file
-under `%LOCALAPPDATA%\OpenAI\Codex\runtimes` before each command. While the
-Codex desktop app runs its computer-use runtime, the refresh fails with a
-sharing violation (os error 32), and no command starts. The symptom is
+On Windows a spawned Codex runs with `-c windows.sandbox="elevated"` unless
+`HARDLINE_CODEX_WINDOWS_SANDBOX` says otherwise. `unelevated` is upstream's
+fallback, whose isolation is weaker, especially for the network. Hardline's
+`--sandbox read-only` pin applies under either. Reconnect the MCP server after
+changing the variable.
+
+The elevated sandbox needs one workaround for Codex 0.161.0 (#47,
+openai/codex#51590). Before each command its setup refresh opens every file
+under `%LOCALAPPDATA%\OpenAI\Codex\runtimes` for an ACL update. While the
+Codex desktop app runs its computer-use runtime, that fails with a sharing
+violation (os error 32) and no command starts:
 `helper_unknown_error: setup refresh had errors`, with `runtime read/execute
 validation failed` in `~/.codex/.sandbox/sandbox.<date>.log`.
 
-The unelevated sandbox is upstream's documented fallback. Its isolation is
-weaker, the network above all. Hardline's `--sandbox read-only` pin still
-applies. Set `elevated` to opt back in. A managed installation that allows
-only the elevated implementation refuses the default: set `elevated` there.
-The default reverts once upstream fixes the refresh. Reconnect the MCP server
-after changing the variable.
+The refresh finds that tree through `LOCALAPPDATA` and skips a missing one.
+So an elevated Codex gets `LOCALAPPDATA` pointed at a path that does not
+exist, and its commands get the real value back through
+`-c shell_environment_policy.set.LOCALAPPDATA=...`. The skip costs the sandbox
+its read grant on the desktop app's computer-use runtime, which a
+hardline-spawned Codex has no connectors to use. That `set` also wins over a
+`shell_environment_policy` of yours that would drop `LOCALAPPDATA`. The
+workaround applies only to the elevated sandbox chosen here: under `inherit`,
+an elevated sandbox from Codex's own configuration still fails this way.
 
 ### Codex compatibility errors
 
