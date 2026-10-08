@@ -589,6 +589,55 @@ def test_ask_codex_write_still_gets_workspace_write(monkeypatch, tmp_path, allow
     assert argv[argv.index("-a") + 1] == "never"
 
 
+def _windows_sandbox(argv: list[str]) -> list[str]:
+    return [a for a in argv if a.startswith("windows.sandbox=")]
+
+
+@pytest.mark.parametrize("effort", ["default", "high"])  # plain and structured paths
+def test_ask_codex_on_windows_defaults_to_the_unelevated_sandbox(monkeypatch, effort):
+    """#47: Codex 0.161.0's elevated sandbox refuses every command while the
+    desktop app runs its computer-use runtime, so every review came back
+    unread. A spawned Codex asks for the unelevated one, read-only intact."""
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.delenv("HARDLINE_CODEX_WINDOWS_SANDBOX", raising=False)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    adapters.ask_codex("summarize", effort=effort)
+    argv = calls[0]["cmd"]
+    assert _windows_sandbox(argv) == ['windows.sandbox="unelevated"']
+    assert argv[argv.index('windows.sandbox="unelevated"') - 1] == "-c"
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("elevated", ['windows.sandbox="elevated"']), ("inherit", []), (" Unelevated ", ['windows.sandbox="unelevated"'])],
+)
+def test_ask_codex_windows_sandbox_is_configurable(monkeypatch, value, expected):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", value)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    adapters.ask_codex("summarize")
+    assert _windows_sandbox(calls[0]["cmd"]) == expected
+
+
+def test_ask_codex_rejects_an_unknown_windows_sandbox_before_spawning(monkeypatch):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "unelevate")
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    out = adapters.ask_codex("summarize")
+    assert out["ok"] is False
+    assert "HARDLINE_CODEX_WINDOWS_SANDBOX" in out["error"]
+    assert calls == []
+
+
+def test_ask_codex_passes_no_windows_sandbox_elsewhere(monkeypatch):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", False)
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "elevated")
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    adapters.ask_codex("summarize")
+    assert _windows_sandbox(calls[0]["cmd"]) == []
+
+
 def test_ask_codex_ignores_transient_error_before_completed_turn(monkeypatch):
     stdout = _codex_stream(
         {"type": "thread.started", "thread_id": "thread-retried"},

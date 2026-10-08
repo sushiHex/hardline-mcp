@@ -180,6 +180,38 @@ _CODEX_READONLY_SANDBOX = ["--sandbox", "read-only"]
 # checked against `codex features list`: a Codex that renamed one must refuse,
 # not quietly let its connectors back in.
 _CODEX_NO_CONNECTORS = ["-c", "features.apps=false", "-c", "features.plugins=false"]
+
+# Which Windows sandbox a spawned Codex uses. Codex 0.161.0's elevated sandbox
+# refuses to start any command while the Codex desktop app runs its
+# computer-use runtime: its setup refresh opens every file under
+# %LOCALAPPDATA%\OpenAI\Codex\runtimes with MAXIMUM_ALLOWED, the running
+# node_repl.exe answers with a sharing violation, and the refresh fails whole
+# (#47, openai/codex#51590). Every review then came back unread. So on Windows
+# a spawned Codex defaults to the unelevated sandbox, upstream's documented
+# fallback: weaker isolation, the network above all, but --sandbox read-only
+# still holds. HARDLINE_CODEX_WINDOWS_SANDBOX=elevated restores the elevated
+# one, `inherit` passes nothing. Remove the default once upstream fixes this.
+_CODEX_WINDOWS_SANDBOXES = ("elevated", "unelevated", "inherit")
+_CODEX_WINDOWS_SANDBOX_DEFAULT = "unelevated"
+_ON_WINDOWS = os.name == "nt"  # module-level, so tests need not patch os.name
+
+
+def _codex_windows_sandbox() -> list[str]:
+    """The ``-c windows.sandbox=...`` override; empty off Windows or on ``inherit``.
+
+    Raises ValueError on an unknown value, so a typo is a configuration error
+    rather than a silent fall back to whatever the host config says.
+    """
+    if not _ON_WINDOWS:
+        return []
+    raw = os.environ.get("HARDLINE_CODEX_WINDOWS_SANDBOX", "").strip().lower()
+    value = raw or _CODEX_WINDOWS_SANDBOX_DEFAULT
+    if value not in _CODEX_WINDOWS_SANDBOXES:
+        raise ValueError(
+            "HARDLINE_CODEX_WINDOWS_SANDBOX must be one of "
+            f"{', '.join(_CODEX_WINDOWS_SANDBOXES)}; got {raw!r}"
+        )
+    return [] if value == "inherit" else ["-c", f'windows.sandbox="{value}"']
 _CODEX_REQUIRED_FEATURES = ("apps", "plugins")
 _CODEX_ISOLATION_TIMEOUT_S = 15
 
@@ -2111,9 +2143,11 @@ def _ask_codex_validated(
 ) -> dict:
     argv = _prefix_for("codex") + ["--ephemeral"]
     # Before anything is spawned, isolation probes included: an invalid timeout
-    # is a configuration error to report at once, not after a probe has run.
+    # or sandbox is a configuration error to report at once, not after a probe
+    # has run.
     try:
         _timeout_for("codex")
+        argv += _codex_windows_sandbox()
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     # Resolved once: the executable that is probed is the executable launched.
