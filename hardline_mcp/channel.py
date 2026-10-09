@@ -31,7 +31,7 @@ from typing import Awaitable, Callable, Optional
 
 import anyio
 
-from . import adapters, delivery, mailbox, procid, sessions
+from . import adapters, delivery, hints, mailbox, procid, sessions
 
 CAPABILITY = "claude/channel"
 METHOD = "notifications/claude/channel"
@@ -110,6 +110,57 @@ def unread(recipients: tuple[str, ...], after: int = 0) -> tuple[list[dict], int
     return found, after
 
 
+def held_before() -> list[str]:
+    """Names this conversation held in an earlier hardline process, as the
+    agent this process serves, and neither holds nor awaits now (``hints``).
+    Advice: outside what this process reads. Another agent's name is left out:
+    ``register_session`` here could only ask for this agent's."""
+    agent = adapters.self_agent()
+    if not agent:
+        return []
+    current = set(adapters.owned_recipients()) | {
+        f"{waited_as}:{label}" for label, waited_as in adapters.pending_claims().items()
+    }
+    return [
+        lane
+        for lane in hints.held_before(adapters.conversation_id())
+        if lane.startswith(f"{agent}:") and lane not in current
+    ]
+
+
+def waiting(recipients: tuple[str, ...]) -> dict[str, tuple[int, int]]:
+    """``{recipient: (newest unread id, unread count)}``, in one grouped read:
+    exact however much is waiting, where a paged scan would stop short."""
+    if not recipients:
+        return {}
+    marks = ",".join("?" for _ in recipients)
+    rows = _read(
+        f"SELECT recipient, MAX(id), COUNT(*) FROM messages WHERE recipient IN ({marks})"
+        " AND acked_at IS NULL GROUP BY recipient",
+        recipients,
+    )
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def waiting_before() -> dict[str, tuple[int, int]]:
+    """``waiting`` at the names held before; empty, and logged, when that
+    cannot be read. Advice must never stop the mail this session holds."""
+    try:
+        return waiting(tuple(held_before()))
+    except Exception as exc:  # noqa: BLE001
+        _log(f"names held before not read: {type(exc).__name__}: {exc}")
+        return {}
+
+
+def pointer(lane: str) -> str:
+    """What a session is told about mail waiting at a name it held before."""
+    return (
+        f"hardline: mail is waiting at {lane}, a name this conversation held "
+        "before. If you still answer to it, register_session(label="
+        f"'{lane.split(':', 1)[-1]}', wait=true) asks for it back."
+    )
+
+
 def bodies(ids: list[int]) -> dict[int, dict]:
     """Sender and body for the messages about to be pushed."""
     if not ids:
@@ -144,6 +195,7 @@ class Pusher:
         self.receipts: dict[str, datetime] = {}
         self.unreceipted: list[datetime] = []
         self.notices: list[str] = []
+        self.pointed: dict[str, int] = {}  # name held before -> newest id told
         self.facts: dict = {}
         self._last_fulfil: Optional[datetime] = None
         self._cursor = 0  # where the unread sweep resumes
@@ -229,6 +281,15 @@ class Pusher:
                 f"hardline: this session now holds {lane}; its previous holder exited."
                 for lane in self.fulfil()
             ]
+        # Told again only when newer mail arrives, and tracked apart from the
+        # schedule of mail this session holds, so telling never delays the
+        # push after a reclaim. Kept while a name is hidden (held, awaited),
+        # so cancelling a wait does not tell the same mail twice.
+        for lane, (newest, _) in sorted(waiting_before().items()):
+            if newest > self.pointed.get(lane, 0):
+                self.pointed[lane] = newest
+                if pointer(lane) not in self.notices:  # queued across failed sends
+                    self.notices.append(pointer(lane))
         owned = adapters.owned_recipients()
         start = self._cursor
         rows, self._cursor = unread(owned, after=start)

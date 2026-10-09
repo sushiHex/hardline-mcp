@@ -70,6 +70,10 @@ Dependencies point one way: `procid` <- `mailbox` <- `jobs`/`sessions` <-
   - `codex_queue.py` pins the Codex thread from `tools/call` `_meta` (through
     the tap's `on_call` hook) and queues with `codex queue`. See
     `docs/codex-queue-wake.md`.
+- `hints.py` remembers which Claude conversation last held each claimed name
+  (`lane_hints`), so a relaunched or reconnected conversation is told about
+  its old names and their mail. Advice only: it never claims, routes or reads.
+  See `docs/session-continuity.md`.
 
 Design rationale is in `docs/architecture.md`. The tool contracts are in
 `docs/messaging.md`, env vars (`HARDLINE_*`) in `docs/configuration.md`, and
@@ -107,8 +111,12 @@ trusting a stranger.
 
 **Absence is not evidence.** The registry cannot see every consumer — a process
 on older code never registers, one whose announcement failed is absent, one
-behind an unanswerable probe looks gone. So absence from it never grants
-ownership of a lane. A claim needs positive evidence that nobody is there.
+behind an unanswerable probe looks gone. So absence from it is never treated
+as proof: a claim is refused while a registered holder might be alive or
+unprobeable, or while live work is still owed to the lane. Know the limit,
+though: with no registered holder and no outstanding work, `sessions._refusal`
+grants, so a consumer that never registered and owns no jobs cannot be seen.
+New checks should narrow that gap, never widen it.
 
 Related: liveness has **three** states, not two. `UNKNOWN` means the probe
 could not answer, which is not death. Reads are optimistic about it; deletion
@@ -137,7 +145,9 @@ Where the inbox cannot be proven the session's own it falls back to channel
 push, which needs `--dangerously-load-development-channels server:hardline-mcp`
 (`transport` is `channel`). If `list_agents().you.delivery` is `unreceipted`,
 fall back to the Monitor below. A conversation that lost its lane in a move to
-the background gets it back with `register_session(label=<old lane>, wait=true)`.
+the background gets it back with `register_session(label=<old lane>, wait=true)`;
+after a relaunch or reconnect, `list_agents().you.previously_held` lists the
+names it had claimed.
 
 When working here in Claude Code with Monitor available, call `list_agents()`
 and `server_info()`. If `watch.argv` is available, quote those arguments for

@@ -292,7 +292,7 @@ async def test_bare_mail_never_wakes(lane):
 
 
 def _armed(monkeypatch, rows, held):
-    monkeypatch.setattr(channel, "unread", lambda owned, after=0: (list(rows), 0))
+    monkeypatch.setattr(channel, "unread", lambda owned, after=0: (list(rows) if owned else [], 0))
     monkeypatch.setattr(adapters, "owned_recipients", lambda agent=None: tuple(held))
     monkeypatch.setattr(announce.sessions, "granted", lambda owned: list(held))
     wake = codex_queue.CodexWake(queue=Queue())
@@ -306,13 +306,15 @@ def test_mail_on_a_lane_claimed_later_is_announced_despite_lower_ids(monkeypatch
     _, nonce, _ = wake.poll()
     assert wake.accept_receipt(nonce)
     rows.append({"id": 5, "recipient": "codex:b"})  # its backlog predates id 10
-    monkeypatch.setattr(channel, "unread", lambda owned, after=0: (list(rows), 0))
+    monkeypatch.setattr(channel, "unread", lambda owned, after=0: (list(rows) if owned else [], 0))
     monkeypatch.setattr(announce.sessions, "granted", lambda owned: ["codex:a", "codex:b"])
     assert wake.poll() is not None
 
 
 def test_mail_on_an_ungranted_lane_is_not_announced(monkeypatch):
     wake = _armed(monkeypatch, [{"id": 1, "recipient": "codex:a"}], [])
+    # Expected by this process, but with no durable grant behind it.
+    monkeypatch.setattr(adapters, "owned_recipients", lambda agent=None: ("codex:a",))
     assert wake.poll() is None
 
 
