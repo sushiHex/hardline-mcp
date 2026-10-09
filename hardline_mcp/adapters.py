@@ -1503,9 +1503,9 @@ def _is_plain_call(
 ) -> bool:
     """Whether this is the unqualified default call - no option set at all.
 
-    That call keeps a lightweight one-shot invocation and the original
-    compact ``{"ok", "reply"}`` reply shape; any option at all opts into the
-    structured/telemetry path instead.
+    For Claude, that call keeps a lightweight one-shot invocation and the
+    original compact ``{"ok", "reply"}`` reply shape; any option at all opts
+    into the structured/telemetry path instead. Codex is always structured.
     """
     return (
         model is None
@@ -2145,7 +2145,7 @@ def ask_codex(
     github_exclude: list | None = None,
     github_tools: str = "none",
 ) -> dict:
-    """Query Codex with explicit routing and optional structured telemetry.
+    """Query Codex with explicit routing, reading its JSONL events.
 
     Omitting ``model`` passes no ``--model`` flag at all, so Codex's own
     configured default applies - the same posture ``ask_hermes`` already has
@@ -2236,19 +2236,8 @@ def _ask_codex_validated(
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     argv += sandbox.overrides
-    # Resolved once: the executable that is probed is the executable launched.
-    exe = argv[0]
-    if _is_plain_call(model, effort, mode, workdir, write, github):
-        env = {**os.environ, **sandbox.env}
-        isolation, refusal = _codex_isolation(exe, env, None, on_spawn)
-        if refusal is not None:
-            return refusal
-        return _run_agent_cmd(
-            "codex",
-            argv + _CODEX_READONLY_SANDBOX + isolation + ["--", prompt],
-            env=env,
-            on_spawn=on_spawn,
-        )
+    # Every call, bare ones included, reads Codex's JSONL events: only they
+    # show a turn whose commands never started (#47), which plain text hides.
     attachment = None
     if github is not None:
         # A Codex child always has its read-only shell, so any workdir is readable.
@@ -2381,9 +2370,10 @@ def _ask_codex_structured(
                 requested_effort=effort,
                 subscription_configured=subscription_configured,
             )
-            # A structured turn.failed is the most useful answer; return it.
+            # A structured turn.failed is the most useful answer; return it,
+            # with the exit code and timing the process reported.
             if not parsed.get("ok") and "thread_id" in parsed:
-                return parsed
+                return _carry_process_telemetry(parsed, run)
             # Otherwise the excerpt was computed and then thrown away, so a
             # nonzero exit surfaced only "exit 1: ..." and the agent's actual
             # output vanished - the same unrecoverable-failure shape this
@@ -2403,11 +2393,10 @@ def _ask_codex_structured(
 
 # Process-level facts that belong to the RUN, not to anything the agent said.
 # The JSONL parsers build a fresh result dict from the stream, so without this
-# they silently dropped them: a plain call reported elapsed_s and timeout_s
-# while the same call with a model or effort set reported neither, and "how
-# long did that take / what budget was it under" became unanswerable on
-# exactly the calls slow enough for anyone to ask.
-_PROCESS_TELEMETRY = ("elapsed_s", "timeout_s")
+# they silently dropped them, on success and on a structured failure alike, and
+# "how long did that take / what budget was it under / how did it exit" became
+# unanswerable on exactly the calls slow or broken enough for anyone to ask.
+_PROCESS_TELEMETRY = ("elapsed_s", "timeout_s", "exit_code")
 
 
 def _carry_process_telemetry(parsed: dict, run: dict) -> dict:
