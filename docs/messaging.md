@@ -12,7 +12,7 @@ Call `list_agents()` before addressing another session:
 | Field | Meaning |
 | --- | --- |
 | `agents` | Supported agent names: `claude`, `hermes`, `codex`. |
-| `you` | Your inferred or declared identity and session lanes. |
+| `you` | Your inferred or declared identity and session lanes; `previously_held` lists names this conversation held in an earlier hardline process. |
 | `live_sessions` | Registered sessions not known to be dead; inspect `liveness`. |
 | `observed_recipients`, `observed_senders` | Names seen in message history, including departed sessions. |
 | `contested_lanes`, `registration_warning` | Ownership conflicts or a failure to register this server. |
@@ -46,13 +46,15 @@ sessions distinct labels.
 Claims and automatic registration use the same atomic ownership check. A
 foreign holder whose liveness is `alive` or `unknown` blocks acquisition, as
 does unfinished work for that lane owned by a potentially live foreign process.
-An empty registry alone does not permit takeover.
+That is all it can check: a consumer that never registered (older code, a
+failed announcement) and owns no outstanding work is invisible to it.
 
 Renaming retains earlier lanes so outstanding replies remain reachable.
 `release_session(label="review")` relinquishes a name you hold; release it only
 when you no longer need its mail. Runtime names must be reclaimed after an MCP
-reconnect, though an automatic or configured lane may register again. A label
-is reusable: a successful later claimant inherits its unread backlog.
+reconnect or a relaunch, though an automatic or configured lane registers again
+by itself (see [names held before](#names-held-before)). A label is reusable: a
+successful later claimant inherits its unread backlog.
 
 ### Wait for a held name
 
@@ -66,8 +68,8 @@ becomes a pending claim:
 - The result stays `ok: false`, with `status: "pending"`, and this session does
   not hold the name yet.
 - The claim is granted, with the name's unread backlog, through the ordinary
-  ownership rule once the holder has exited. Fulfilment runs on the heartbeat
-  and on `list_agents`.
+  ownership rule once the holder has exited. Fulfilment runs on the heartbeat,
+  on `list_agents`, and every 15 s in the wake loop.
 - `release_session(label=...)` cancels it.
 - It ends with the process that made it.
 
@@ -76,6 +78,29 @@ to a background session: the move gives it a new process and a new derived
 lane, while the old process keeps the old one until its window closes. The
 server's MCP instructions tell every connected model to do this. See
 [session continuity](session-continuity.md).
+
+### Names held before
+
+A relaunch (`/relaunch`, `claude --resume`) or an `/mcp` reconnect gives a
+Claude Code conversation a new hardline process. Its derived lane comes back
+by itself; names it claimed with `register_session` do not, because a claim
+lives in its process. Hardline remembers which conversation (by the full
+`CLAUDE_CODE_SESSION_ID`) last held each claimed name, and tells it:
+- `list_agents().you.previously_held` lists them, each with its unread count,
+  beside `previously_held_note`.
+- `inbox` lists those with mail waiting.
+- Newer mail arriving at one wakes the session, through its inbox notice or
+  channel push.
+
+Only names of the agent this session serves are listed. Nothing is taken back
+automatically. The conversation chooses: if it still answers to a name,
+`register_session(label=..., wait=true)` asks for it under the ordinary
+ownership rule; `release_session(label=...)` forgets one it does not
+(`forgotten` in the result). On current code the next grant of a name, claimed
+or automatic, replaces its hint, and the granting process's release removes
+it; older revisions leave hints stale, which costs only advice. A fork gets a
+new id and inherits no hints. Codex and Hermes sessions have no conversation
+id, so they get none.
 
 Qualified messages can be inspected without ownership, but `inbox` and `ack`
 consume them only with this process's uncontested durable grant, checked in the

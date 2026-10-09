@@ -193,7 +193,7 @@ def armed(monkeypatch):
     """A Claude inbox wake with one unread message on a granted lane, and the
     facts it writes."""
     rows = [{"id": 7, "recipient": LANE}]
-    monkeypatch.setattr(channel, "unread", lambda owned, after=0: (list(rows), 0))
+    monkeypatch.setattr(channel, "unread", lambda owned, after=0: (list(rows) if owned else [], 0))
     monkeypatch.setattr(adapters, "owned_recipients", lambda agent=None: (LANE,))
     monkeypatch.setattr(announce.sessions, "granted", lambda owned: [LANE])
     writes = []

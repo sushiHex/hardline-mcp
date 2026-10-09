@@ -25,6 +25,16 @@ Nothing can tell a conversation that moved away from a copy that is still being 
 
 A moved conversation therefore gets its old address back, with nothing lost and no overlap, the moment the old window closes.
 
+## Names held before: tell, don't restore
+
+A relaunch or an `/mcp` reconnect keeps the conversation id but starts a new hardline. The derived lane comes back by itself; a name the conversation claimed does not, since claims live in their process. Before this, only the model's own reading of its transcript recovered one.
+
+`hints` records, at each successful grant, which conversation (full `CLAUDE_CODE_SESSION_ID`) now holds the name, and which process granted it, in a table of its own (`lane_hints`). On current code, the next grant of that name replaces the row. A claimant with no conversation id (Codex, Hermes), or an automatic grant, only clears it. The granting process's release removes it, and the table is bounded. Older revisions write and clear nothing, so their hints can go stale, which costs only advice. A restarted conversation is then told:
+- `list_agents().you.previously_held`, with unread counts, and `inbox` for those with mail. Only names of the agent this process serves are listed.
+- A wake when newer mail arrives at such a name, through the same notice or push as its own mail. It's tracked apart from that mail, so a later reclaim is still announced, and it shares the one-outstanding-notice gate.
+
+The conversation decides. `register_session(..., wait=true)` asks under the ordinary rule; `release_session` forgets a hint it does not want. Nothing is claimed, routed or read on a hint's behalf, so a stale hint costs a suggestion and never a name.
+
 ## Review record (gpt-6-astra, two rounds)
 
 **Adopted:**
@@ -34,7 +44,37 @@ A moved conversation therefore gets its old address back, with nothing lost and 
 - **Fulfilment is serialized.** `_claim_mutex` serializes it against explicit claims and against the **whole** of `release_session`, not only pending-claim cancellation. Round 3 reproduced the gap: a fulfilment snapshots every held lane and re-claims them together with the awaited one, so a release landing between the snapshot and the write saw its lane written back.
 
 **Deferred:**
-- **Automatic restoration of runtime names after a same-host reconnect**, keyed by verified host plus session id. It's valid evidence, but a separate change; the docs still say to re-claim after a reconnect.
+- **Automatic restoration of runtime names after a same-host reconnect**, keyed by verified host plus session id. Superseded by [names held before](#names-held-before-tell-dont-restore), which tell rather than restore.
+
+## Review record: names held before (Fable, gpt-6-astra, 2026-10-09)
+
+A first design restored claimed names automatically at startup from a `lane_holders` table. Fable rejected it as the cut durable intents under a new name:
+- its wait rule was always true, so a second window on one transcript would inherit the name and its mail when the first closed;
+- replayed claims rename the process, because `lane_suffix` returns the last claim;
+- old names refill the claim cap;
+- a release on older code leaves a row that new code would restore;
+- claiming before `anyio.run` delays the MCP handshake;
+- a relaunch is a new host, so it lacks the verified-host evidence the deferral required.
+
+Both reviewers chose hints instead. Astra's corrections are adopted:
+- the field says what was held, not what may be reclaimed;
+- the wake for such mail is tracked apart from announced mail;
+- a hint is never turned into an automatic `register_session` by the instructions;
+- release forgets a hint;
+- recovery never initializes before serving, never fetches unclaimed bodies, and never fails a tool.
+
+**Rejected:** restoring on a verified-host reconnect only. It's syntax-guarded rather than provenance-guarded, an immediate grant can lose to an exiting predecessor, and a release by older code can be replayed. A relaunch, the case actually hit, would need the hint anyway.
+
+**Implementation review (Astra), all adopted:**
+- **A grant generation is needed after all.** My claim that a release and a later grant of the same name can't interleave was false. The next claim needs only the registry row gone, and a second window on the same transcript can claim in the gap between the release committing and its hint delete. A hint therefore records its `writer` (the granting process's identity), and a release forgets only its own. Dismissal forgets whatever hint the conversation has for the name.
+- **Hint reads are isolated from the wake.** A failed hint read had aborted the whole poll, and with it the mail the session holds.
+- **The scan for mail at old names is one grouped read** of the newest id and count per name. A paged scan had stopped short and lost names past it. A name is told again only when newer mail arrives.
+- **Automatic grants clear the hint for their name**, looking before taking the writer.
+- **Hints are limited to the agent this process serves**, since `register_session` could ask only for that agent's name.
+
+**Longer term:** both reviews point at the root cause, one name serving as process, conversation and role. That's the stable-address question in CLAUDE.md, a routing migration rather than a continuity fix.
+
+Also corrected in passing: the docs claimed acquisition needs positive evidence that nobody holds a lane. `sessions._refusal` grants when no registered holder and no live owed work exist, so an unregistered consumer with no jobs is invisible to it.
 
 **Rejected:**
 - **Parsing `--fork-session --resume` from the host command line.** It's undocumented and per-host, and it proves ancestry, not move-versus-copy.

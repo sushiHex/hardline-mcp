@@ -538,8 +538,8 @@
   },
   "only-server-imports-mcp": {
     "file": "hardline_mcp/channel.py",
-    "before": "import anyio\n\nfrom . import adapters, delivery, mailbox, procid, sessions\n",
-    "after": "import anyio\nimport mcp.types  # noqa: F401\n\nfrom . import adapters, delivery, mailbox, procid, sessions\n",
+    "before": "import anyio\n\nfrom . import adapters, delivery, hints, mailbox, procid, sessions\n",
+    "after": "import anyio\nimport mcp.types  # noqa: F401\n\nfrom . import adapters, delivery, hints, mailbox, procid, sessions\n",
     "tests": [
       "tests/test_channel.py::test_only_the_server_module_imports_mcp"
     ]
@@ -2088,6 +2088,214 @@
     "after": "            channel.Pusher(fulfil=_fulfil_pending),\n",
     "tests": [
       "tests/test_channel.py::test_the_served_wake_regains_lanes"
+    ]
+  },
+  "hint-cleared-by-an-unnamed-claimant": {
+    "file": "hardline_mcp/hints.py",
+    "before": "            conn.execute(\"DELETE FROM lane_hints WHERE recipient = ?\", (lane,))\n            if not conversation:\n                return\n",
+    "after": "            if not conversation:\n                return\n            conn.execute(\"DELETE FROM lane_hints WHERE recipient = ?\", (lane,))\n",
+    "tests": [
+      "tests/test_hints.py::test_a_claimant_hardline_cannot_name_clears_the_hint"
+    ]
+  },
+  "hint-bounded-per-conversation": {
+    "file": "hardline_mcp/hints.py",
+    "before": "(conversation, conversation, PER_CONVERSATION)",
+    "after": "(conversation, conversation, ROWS)",
+    "tests": [
+      "tests/test_hints.py::test_hints_are_bounded_newest_kept"
+    ]
+  },
+  "hint-bounded-overall": {
+    "file": "hardline_mcp/hints.py",
+    "before": "            conn.execute(\n                \"DELETE FROM lane_hints WHERE rowid NOT IN (\"\n",
+    "after": "            0 and conn.execute(\n                \"DELETE FROM lane_hints WHERE rowid NOT IN (\"\n",
+    "tests": [
+      "tests/test_hints.py::test_hints_are_bounded_newest_kept"
+    ]
+  },
+  "hint-forgotten-only-by-its-conversation": {
+    "file": "hardline_mcp/hints.py",
+    "before": "\"DELETE FROM lane_hints WHERE recipient = ? AND conversation = ?\"\n                \" AND (? IS NULL OR writer = ?)\",\n                (lane, conversation, writer, writer),",
+    "after": "\"DELETE FROM lane_hints WHERE recipient = ?\"\n                \" AND (? IS NULL OR writer = ?)\",\n                (lane, writer, writer),",
+    "tests": [
+      "tests/test_hints.py::test_only_the_conversation_that_held_a_name_forgets_it"
+    ]
+  },
+  "hint-read-by-its-conversation-only": {
+    "file": "hardline_mcp/hints.py",
+    "before": "\"SELECT recipient FROM lane_hints WHERE conversation = ? ORDER BY rowid\", conversation",
+    "after": "\"SELECT recipient FROM lane_hints WHERE ? IS NOT NULL ORDER BY rowid\", conversation",
+    "tests": [
+      "tests/test_hints.py::test_a_name_is_hinted_to_the_conversation_that_held_it_only"
+    ]
+  },
+  "hint-keyed-on-the-whole-conversation": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "return os.environ.get(\"CLAUDE_CODE_SESSION_ID\", \"\").strip() or None",
+    "after": "return os.environ.get(\"CLAUDE_CODE_SESSION_ID\", \"\").strip()[:8] or None",
+    "tests": [
+      "tests/test_hints.py::test_a_restarted_conversation_is_told_what_it_held_and_holds_none_of_it"
+    ]
+  },
+  "hint-written-on-grant": {
+    "file": "hardline_mcp/server.py",
+    "before": "    _remember(claimed[\"lane\"])\n",
+    "after": "",
+    "tests": [
+      "tests/test_hints.py::test_a_restarted_conversation_is_told_what_it_held_and_holds_none_of_it"
+    ]
+  },
+  "hint-forgotten-on-release": {
+    "file": "hardline_mcp/server.py",
+    "before": "    if lane:\n        _forget(lane, own_grant=True)\n",
+    "after": "",
+    "tests": [
+      "tests/test_hints.py::test_releasing_a_name_forgets_it"
+    ]
+  },
+  "hint-dismissed-by-release": {
+    "file": "hardline_mcp/server.py",
+    "before": "        if agent and _forget(f\"{agent}:{label}\", own_grant=False):\n",
+    "after": "        if False:\n",
+    "tests": [
+      "tests/test_hints.py::test_a_hint_not_wanted_is_forgotten_by_release"
+    ]
+  },
+  "hint-shown-by-inbox": {
+    "file": "hardline_mcp/server.py",
+    "before": "        response[\"previously_held\"] = waiting\n",
+    "after": "        pass\n",
+    "tests": [
+      "tests/test_hints.py::test_a_restarted_conversation_is_told_what_it_held_and_holds_none_of_it"
+    ]
+  },
+  "hint-in-inbox-only-with-mail": {
+    "file": "hardline_mcp/server.py",
+    "before": "[h for h in await _in_thread(_previously_held) if h[\"unread\"]]",
+    "after": "[h for h in await _in_thread(_previously_held)]",
+    "tests": [
+      "tests/test_hints.py::test_a_read_mentions_only_names_with_mail_waiting"
+    ]
+  },
+  "hint-shown-by-list-agents": {
+    "file": "hardline_mcp/server.py",
+    "before": "        you[\"previously_held\"] = previously_held\n",
+    "after": "        pass\n",
+    "tests": [
+      "tests/test_hints.py::test_a_restarted_conversation_is_told_what_it_held_and_holds_none_of_it"
+    ]
+  },
+  "hint-never-a-name-held-or-awaited": {
+    "file": "hardline_mcp/channel.py",
+    "before": "if lane.startswith(f\"{agent}:\") and lane not in current",
+    "after": "if lane.startswith(f\"{agent}:\")",
+    "tests": [
+      "tests/test_hints.py::test_a_name_held_or_awaited_again_is_no_longer_hinted"
+    ]
+  },
+  "hint-pointed-once": {
+    "file": "hardline_mcp/announce.py",
+    "before": "            self.pointed.update(told)\n",
+    "after": "",
+    "tests": [
+      "tests/test_hints.py::test_mail_at_a_name_held_before_wakes_the_session_per_newer_mail"
+    ]
+  },
+  "hint-pointer-taken-back": {
+    "file": "hardline_mcp/announce.py",
+    "before": "            self.pointed = self._previous_pointed\n",
+    "after": "",
+    "tests": [
+      "tests/test_hints.py::test_a_pointer_taken_back_is_told_again"
+    ]
+  },
+  "hint-pushed-once": {
+    "file": "hardline_mcp/channel.py",
+    "before": "                self.pointed[lane] = newest\n",
+    "after": "",
+    "tests": [
+      "tests/test_hints.py::test_a_push_names_the_lane_once_and_never_shows_the_mail"
+    ]
+  },
+  "hint-forgotten-only-by-its-writer": {
+    "file": "hardline_mcp/hints.py",
+    "before": "\" AND (? IS NULL OR writer = ?)\",",
+    "after": "\" AND (? IS NULL OR writer = ? OR 1)\",",
+    "tests": [
+      "tests/test_hints.py::test_a_writer_forgets_only_the_hint_its_grant_wrote"
+    ]
+  },
+  "hint-release-forgets-its-own-grant-only": {
+    "file": "hardline_mcp/server.py",
+    "before": "        _forget(lane, own_grant=True)\n",
+    "after": "        _forget(lane, own_grant=False)\n",
+    "tests": [
+      "tests/test_hints.py::test_a_release_never_forgets_a_newer_grants_hint"
+    ]
+  },
+  "hint-dismissal-forgets-any-writer": {
+    "file": "hardline_mcp/server.py",
+    "before": "_forget(f\"{agent}:{label}\", own_grant=False)",
+    "after": "_forget(f\"{agent}:{label}\", own_grant=True)",
+    "tests": [
+      "tests/test_hints.py::test_a_hint_not_wanted_is_forgotten_by_release"
+    ]
+  },
+  "hint-only-this-agents-names": {
+    "file": "hardline_mcp/channel.py",
+    "before": "if lane.startswith(f\"{agent}:\") and lane not in current",
+    "after": "if lane not in current",
+    "tests": [
+      "tests/test_hints.py::test_another_agents_name_is_never_suggested"
+    ]
+  },
+  "hint-cleared-by-an-automatic-grant": {
+    "file": "hardline_mcp/server.py",
+    "before": "    if derived := adapters.derived_lane_suffix():\n        _advise(lambda: hints.record(f\"{agent}:{derived}\", None))\n",
+    "after": "",
+    "tests": [
+      "tests/test_hints.py::test_an_automatic_grant_clears_the_hint_for_its_name"
+    ]
+  },
+  "hint-counts-are-grouped": {
+    "file": "hardline_mcp/channel.py",
+    "before": "\" AND acked_at IS NULL GROUP BY recipient\",",
+    "after": "\" AND acked_at IS NULL GROUP BY recipient LIMIT 1\",",
+    "tests": [
+      "tests/test_hints.py::test_counts_are_exact_however_much_is_waiting"
+    ]
+  },
+  "hint-unread-count-reported": {
+    "file": "hardline_mcp/server.py",
+    "before": "counts.get(lane, (0, 0))[1]",
+    "after": "counts.get(lane, (0, 0))[0]",
+    "tests": [
+      "tests/test_hints.py::test_a_restarted_conversation_is_told_what_it_held_and_holds_none_of_it"
+    ]
+  },
+  "hint-failure-never-stops-held-mail": {
+    "file": "hardline_mcp/channel.py",
+    "before": "    try:\n        return waiting(tuple(held_before()))\n    except Exception as exc:  # noqa: BLE001\n",
+    "after": "    try:\n        return waiting(tuple(held_before()))\n    except OSError as exc:\n",
+    "tests": [
+      "tests/test_hints.py::test_names_held_before_that_cannot_be_read_never_stop_the_mail_held"
+    ]
+  },
+  "hint-told-again-only-for-newer-mail": {
+    "file": "hardline_mcp/announce.py",
+    "before": "            if newest > self.pointed.get(lane, 0)\n",
+    "after": "            if newest >= self.pointed.get(lane, 0)\n",
+    "tests": [
+      "tests/test_hints.py::test_mail_at_a_name_held_before_wakes_the_session_per_newer_mail"
+    ]
+  },
+  "hint-pusher-keeps-hidden-names": {
+    "file": "hardline_mcp/channel.py",
+    "before": "        for lane, (newest, _) in sorted(waiting_before().items()):\n",
+    "after": "        self.pointed = {k: v for k, v in self.pointed.items() if k in held_before()}\n        for lane, (newest, _) in sorted(waiting_before().items()):\n",
+    "tests": [
+      "tests/test_hints.py::test_a_push_names_the_lane_once_and_never_shows_the_mail"
     ]
   }
 }

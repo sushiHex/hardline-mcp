@@ -61,7 +61,20 @@ CREATE TABLE IF NOT EXISTS push_delivery (
 );
 """
 
-_SCHEMA = PUSH_DELIVERY_TABLE + """
+# Which conversation last held each claimed name: advice for that conversation
+# after a restart, never ownership (see ``hints``). Created on use too, like
+# push_delivery.
+LANE_HINTS_TABLE = """
+CREATE TABLE IF NOT EXISTS lane_hints (
+    recipient    TEXT PRIMARY KEY,
+    conversation TEXT NOT NULL,
+    writer       TEXT NOT NULL,
+    held_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS lane_hints_conversation_idx ON lane_hints (conversation);
+"""
+
+_SCHEMA = PUSH_DELIVERY_TABLE + LANE_HINTS_TABLE + """
 CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     sender     TEXT NOT NULL,

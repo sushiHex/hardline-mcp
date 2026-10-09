@@ -472,6 +472,13 @@ def derived_lane_suffix() -> str:
     return parent_lane_suffix()
 
 
+def conversation_id() -> Optional[str]:
+    """The full id of the Claude Code conversation this process serves, if its
+    host supplied one: what ``hints`` keys names on. Whole, not the eight
+    characters a lane carries, so two conversations never share hints."""
+    return os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip() or None
+
+
 # A hardline running underneath another hardline was spawned by ask_codex or
 # ask_claude: a one-shot subprocess doing a single piece of work, not a session
 # anybody can address. Giving those lanes would fill the live list with things

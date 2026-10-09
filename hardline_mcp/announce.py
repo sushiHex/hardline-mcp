@@ -53,6 +53,8 @@ class Announcer:
         self.stopped = False  # set once, never cleared: no further notices
         self.outstanding: Optional[tuple[str, datetime]] = None  # (nonce, sent at)
         self.announced: set[int] = set()
+        self.pointed: dict[str, int] = {}  # name held before -> newest id told
+        self._previous_pointed: dict[str, int] = {}  # restored by take_back
         self.facts: dict = {}
         self._previous_push: Optional[datetime] = None  # restored by take_back
         self._dirty = False
@@ -157,7 +159,17 @@ class Announcer:
         if new:
             held = set(sessions.granted(owned))
             new = [r for r in new if r["recipient"] in held]
-        if not new:
+        # Newer mail at a name this conversation held before wakes it too: the
+        # same notice, whose inbox read lists the name as previously_held. Kept
+        # apart from ``announced``, so a reclaim is still announced afterwards.
+        # It shares the one-outstanding gate: until its receipt, it holds the
+        # next notice too, as any notice does.
+        told = {
+            lane: newest
+            for lane, (newest, _) in channel.waiting_before().items()
+            if newest > self.pointed.get(lane, 0)
+        }
+        if not new and not told:
             return None
         nonce = secrets.token_hex(8)
         ids = {r["id"] for r in new}
@@ -167,6 +179,8 @@ class Announcer:
             if self.stopped or self.outstanding is not None:
                 return None
             self.announced |= ids
+            self._previous_pointed = dict(self.pointed)
+            self.pointed.update(told)
             self.outstanding = (nonce, now)
             self._previous_push = self.facts.get("last_push_at")
             self.facts["last_push_at"] = now
@@ -184,6 +198,7 @@ class Announcer:
                 return  # already receipted: it was delivered after all
             self.outstanding = None
             self.announced -= ids
+            self.pointed = self._previous_pointed
             self.facts["last_push_at"] = self._previous_push
             self.facts["oldest_unreceipted_at"] = None
             self._dirty = True
