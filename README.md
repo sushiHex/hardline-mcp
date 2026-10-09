@@ -35,7 +35,7 @@ placeholder below with that path.
 claude mcp add hardline-mcp --scope user -- "/absolute/path/to/hardline-mcp"
 ```
 
-**Codex** — add to `~/.codex/config.toml`:
+**Codex:** add to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.hardline]
@@ -43,7 +43,7 @@ command = '/absolute/path/to/hardline-mcp'
 args = []
 ```
 
-**Hermes** — add to `~/.hermes/config.yaml`:
+**Hermes:** add to `~/.hermes/config.yaml`:
 
 ```yaml
 mcp_servers:
@@ -212,5 +212,5 @@ See [Repository Guidelines](AGENTS.md) for contributor conventions and
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Companion project:
+MIT. See [LICENSE](LICENSE). Companion project:
 [vram-mcp](https://github.com/sushiHex/vram-mcp).
