@@ -66,7 +66,12 @@ hardline's mailbox, and whatever a command reads can reach the model.
 
 Codex's machine-wide requirements file denies chosen paths to every Codex
 sandbox, hardline's reviewers included, and works with hardline's
-`--sandbox read-only` pin. On Windows it is
+`--sandbox read-only` pin. **It also forbids full access,** since an
+unsandboxed session could not honour the denials. Once it denies anything, a
+session asking for `danger-full-access` falls back to read-only with a startup
+warning, and with approvals off (`--dangerously-bypass-approvals-and-sandbox`)
+Codex refuses to start. Use it only on a machine where no Codex session runs
+with full access. On Windows it is
 `%ProgramData%\OpenAI\Codex\requirements.toml`:
 
 ```toml
@@ -83,8 +88,9 @@ deny_read = [
   a directory when a sandbox starts. A file such as `~/.codex/auth.json`,
   which `codex logout` deletes, would come back as a directory and break its
   owner.
-- **Every Codex session is affected,** your own included; Codex's own process
-  (login, API, sessions) runs outside the sandbox and is not.
+- **Every Codex session is bound by it,** your own included; Codex's own
+  process (login, API, sessions) runs outside the sandbox and is not. Delete
+  the file to undo.
 - **Lock the file down:** let only you, SYSTEM and Administrators change it,
   since the sandbox's users are ordinary local users.
 
