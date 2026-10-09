@@ -873,17 +873,9 @@
       "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[high]"
     ]
   },
-  "codex-windows-sandbox-defaults-to-elevated": {
-    "file": "hardline_mcp/adapters.py",
-    "before": "_CODEX_WINDOWS_SANDBOX_DEFAULT = \"elevated\"",
-    "after": "_CODEX_WINDOWS_SANDBOX_DEFAULT = \"unelevated\"",
-    "tests": [
-      "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[default]"
-    ]
-  },
   "codex-runtime-redirect-reaches-the-structured-call": {
     "file": "hardline_mcp/adapters.py",
-    "before": "    child_env = {**(os.environ if child_env is None else child_env), **sandbox_env}\n",
+    "before": "    child_env = {**(os.environ if child_env is None else child_env), **sandbox.env}\n",
     "after": "",
     "tests": [
       "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[high]",
@@ -1006,8 +998,8 @@
   },
   "github-codex-result-summary": {
     "file": "hardline_mcp/adapters.py",
-    "before": "        sandbox_env=sandbox.env,\n    )\n    if attachment is not None:\n        result[\"github\"] = attachment[\"summary\"]",
-    "after": "        sandbox_env=sandbox.env,\n    )\n    if attachment is not None:\n        pass",
+    "before": "        sandbox=sandbox,\n    )\n    if attachment is not None:\n        result[\"github\"] = attachment[\"summary\"]",
+    "after": "        sandbox=sandbox,\n    )\n    if attachment is not None:\n        pass",
     "tests": [
       "tests/test_github_review.py::test_a_codex_reviewer_gets_the_evidence_on_stdin_and_no_web"
     ]
@@ -1867,7 +1859,7 @@
   "codex-bare-call-reads-jsonl": {
     "file": "hardline_mcp/adapters.py",
     "before": "    # Every call, bare ones included, reads Codex's JSONL events: only they\n    # show a turn whose commands never started (#47), which plain text hides.\n    attachment = None\n",
-    "after": "    if _is_plain_call(model, effort, mode, workdir, write, github):\n        env = {**os.environ, **sandbox.env}\n        isolation, refusal = _codex_isolation(argv[0], env, None, on_spawn)\n        if refusal is not None:\n            return refusal\n        return _run_agent_cmd(\n            \"codex\",\n            argv + _CODEX_READONLY_SANDBOX + isolation + [\"--\", prompt],\n            env=env,\n            on_spawn=on_spawn,\n        )\n    attachment = None\n",
+    "after": "    if _is_plain_call(model, effort, mode, workdir, write, github):\n        env = {**os.environ, **sandbox.env}\n        isolation, refusal = _codex_isolation(argv[0], env, None, on_spawn)\n        if refusal is not None:\n            return refusal\n        return _run_agent_cmd(\n            \"codex\",\n            argv + [\"--sandbox\", \"read-only\"] + isolation + [\"--\", prompt],\n            env=env,\n            on_spawn=on_spawn,\n        )\n    attachment = None\n",
     "tests": [
       "tests/test_adapters.py::test_a_bare_call_detects_a_turn_whose_commands_never_started"
     ]
@@ -1886,6 +1878,184 @@
     "after": "_PROCESS_TELEMETRY = (\"elapsed_s\", \"timeout_s\")",
     "tests": [
       "tests/test_adapters.py::test_a_bare_call_reports_how_a_failed_turn_exited"
+    ]
+  },
+  "codex-windows-default-is-mxc": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "_CODEX_WINDOWS_SANDBOX_DEFAULT = \"mxc\"",
+    "after": "_CODEX_WINDOWS_SANDBOX_DEFAULT = \"elevated\"",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_on_windows_pins_mxc_with_the_secrets_denied"
+    ]
+  },
+  "codex-mxc-pins-through-the-profile": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        return _WindowsSandbox(overrides, {}, profile=True)\n",
+    "after": "        return _WindowsSandbox(overrides, {})\n",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_on_windows_pins_mxc_with_the_secrets_denied"
+    ]
+  },
+  "codex-legacy-sandbox-gets-no-profile": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if not sandbox.profile:\n        return [\"--sandbox\", \"workspace-write\" if write else \"read-only\"]\n",
+    "after": "",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[default]"
+    ]
+  },
+  "codex-mxc-write-extends-workspace": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "f'permissions.{name}.extends=\"{\":workspace\" if write else \":read-only\"}\"'",
+    "after": "f'permissions.{name}.extends=\":read-only\"'",
+    "tests": [
+      "tests/test_adapters.py::test_mxc_write_pins_the_workspace_profile"
+    ]
+  },
+  "codex-deny-covers-the-store-journal": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "for suffix in (\"\", \"-wal\", \"-shm\")",
+    "after": "for suffix in (\"\",)",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_on_windows_pins_mxc_with_the_secrets_denied"
+    ]
+  },
+  "codex-deny-follows-claude-config-dir": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "[home / \".claude\", Path(os.environ.get(\"CLAUDE_CONFIG_DIR\") or home / \".claude\")]",
+    "after": "[home / \".claude\"]",
+    "tests": [
+      "tests/test_adapters.py::test_both_claude_homes_are_denied"
+    ]
+  },
+  "codex-deny-covers-the-advisory-home": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "for source in (os.environ, env)",
+    "after": "for source in (os.environ,)",
+    "tests": [
+      "tests/test_adapters.py::test_advisory_denies_its_copy_of_the_codex_login_too"
+    ]
+  },
+  "codex-workdir-inside-denial-kept": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if cwd is not None and any(path in Path(cwd).parents for path in access):\n        access[Path(cwd)] = \"write\" if write else \"read\"\n",
+    "after": "",
+    "tests": [
+      "tests/test_adapters.py::test_a_workdir_inside_a_denied_directory_stays_usable[False-read]",
+      "tests/test_adapters.py::test_a_workdir_inside_a_denied_directory_stays_usable[True-write]"
+    ]
+  },
+  "codex-denied-workdir-not-excepted": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "any(path in Path(cwd).parents for path in access)",
+    "after": "any(Path(cwd).is_relative_to(path) for path in access)",
+    "tests": [
+      "tests/test_adapters.py::test_a_denied_directory_as_the_workdir_stays_denied"
+    ]
+  },
+  "codex-unexpressible-denial-refuses": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if key is None or \"[\" in str(path) or \"]\" in str(path):\n",
+    "after": "        if \"[\" in str(path) or \"]\" in str(path):\n",
+    "tests": [
+      "tests/test_adapters.py::test_a_denial_codex_cannot_be_given_exactly_refuses_the_call[not-toml]"
+    ]
+  },
+  "codex-deny-keeps-the-default-claude-home": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "[home / \".claude\", Path(os.environ.get(\"CLAUDE_CONFIG_DIR\") or home / \".claude\")]",
+    "after": "[Path(os.environ.get(\"CLAUDE_CONFIG_DIR\") or home / \".claude\")]",
+    "tests": [
+      "tests/test_adapters.py::test_both_claude_homes_are_denied"
+    ]
+  },
+  "codex-deny-refuses-glob-paths": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if key is None or \"[\" in str(path) or \"]\" in str(path):\n",
+    "after": "        if key is None:\n",
+    "tests": [
+      "tests/test_adapters.py::test_a_denial_codex_cannot_be_given_exactly_refuses_the_call[glob]"
+    ]
+  },
+  "codex-profile-name-is-fresh": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    name = f\"hardline-{secrets.token_hex(8)}\"\n",
+    "after": "    name = \"hardline\"\n",
+    "tests": [
+      "tests/test_adapters.py::test_every_call_names_a_profile_no_configuration_layer_can_reach"
+    ]
+  },
+  "codex-deny-paths-are-absolute": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "for spelling in (Path(os.path.abspath(path)), path.resolve())",
+    "after": "for spelling in (path, path.resolve())",
+    "tests": [
+      "tests/test_adapters.py::test_a_relocated_store_is_denied_where_it_resolves"
+    ]
+  },
+  "codex-deny-covers-the-resolved-spelling": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "for spelling in (Path(os.path.abspath(path)), path.resolve())",
+    "after": "for spelling in (Path(os.path.abspath(path)),)",
+    "tests": [
+      "tests/test_adapters.py::test_a_denied_directory_reached_through_a_link_is_denied_by_both_names"
+    ]
+  },
+  "codex-deny-covers-codex-env-and-config": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "for name in (\".env\", \"auth.json\", \"config.toml\", \"sessions\",",
+    "after": "for name in (\"auth.json\", \"sessions\",",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_on_windows_pins_mxc_with_the_secrets_denied"
+    ]
+  },
+  "codex-deny-covers-gh": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        Path(gh_home),\n",
+    "after": "",
+    "tests": [
+      "tests/test_adapters.py::test_ask_codex_on_windows_pins_mxc_with_the_secrets_denied"
+    ]
+  },
+  "codex-mxc-preflight-refusal-honoured": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            if not started.get(\"ok\"):\n",
+    "after": "            if False:\n",
+    "tests": [
+      "tests/test_adapters.py::test_an_mxc_that_starts_nothing_refuses_the_call"
+    ]
+  },
+  "codex-mxc-preflight-cancel-honoured": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            if started.get(\"cancelled\"):\n                return started\n",
+    "after": "",
+    "tests": [
+      "tests/test_adapters.py::test_a_cancel_during_the_mxc_preflight_stops_the_call"
+    ]
+  },
+  "codex-mxc-preflight-only-for-mxc": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        if sandbox.profile:\n            started = _codex_sandbox_started(\n",
+    "after": "        if True:\n            started = _codex_sandbox_started(\n",
+    "tests": [
+      "tests/test_adapters.py::test_only_mxc_is_preflighted[elevated]"
+    ]
+  },
+  "codex-mxc-preflight-uses-the-pin": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "                exe, sandbox.overrides + pin, child_env, run_cwd, on_spawn\n",
+    "after": "                exe, sandbox.overrides, child_env, run_cwd, on_spawn\n",
+    "tests": [
+      "tests/test_adapters.py::test_mxc_is_proven_with_the_calls_own_sandbox_and_pin_first"
+    ]
+  },
+  "codex-write-approval-is-a-config-override": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        argv += [\"-c\", 'approval_policy=\"never\"']\n",
+    "after": "        argv += [\"-a\", \"never\"]\n",
+    "tests": [
+      "tests/test_adapters.py::test_mxc_write_pins_the_workspace_profile",
+      "tests/test_adapters.py::test_ask_codex_write_still_gets_workspace_write"
     ]
   }
 }

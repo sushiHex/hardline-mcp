@@ -116,7 +116,8 @@ def _real_probes_for(module_name: str) -> bool:
 
 @pytest.fixture(autouse=True)
 def _no_codex_isolation_probes(monkeypatch, request):
-    """Default every test to a Codex with the required features and no servers.
+    """Default every test to a Codex with the required features, no servers,
+    and an MXC sandbox that starts commands.
 
     Every ask_codex asks the real CLI what to disable (#42). Left in place,
     that would run `codex features list` / `codex mcp list` from the test
@@ -139,6 +140,11 @@ def _no_codex_isolation_probes(monkeypatch, request):
         adapters,
         "_codex_mcp_servers",
         lambda exe, env, cwd, on_spawn=None: ([], {"ok": True}),
+    )
+    monkeypatch.setattr(
+        adapters,
+        "_codex_sandbox_started",
+        lambda exe, overrides, env, cwd, on_spawn=None: {"ok": True},
     )
 
 
