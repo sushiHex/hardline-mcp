@@ -16,7 +16,7 @@ and watcher command. Check `code_revision` when confirming an update is loaded.
 | `HARDLINE_CLAUDE_CMD` | Override the Claude executable path. |
 | `HARDLINE_CODEX_CMD` | Override the Codex executable path. |
 | `HARDLINE_HERMES_CMD` | Override the Hermes executable path. |
-| `HARDLINE_CODEX_WINDOWS_SANDBOX` | Windows only. `elevated` (default), `unelevated`, or `inherit` (pass nothing; Codex's own configuration decides, which in advisory mode excludes the host's `config.toml`). See [the Windows sandbox](#codex-windows-sandbox). |
+| `HARDLINE_CODEX_WINDOWS_SANDBOX` | Windows only. `mxc` (default), `elevated`, `unelevated`, or `inherit` (pass nothing; Codex's own configuration decides, which in advisory mode excludes the host's `config.toml`). See [the Windows sandbox](#codex-windows-sandbox). |
 | `HARDLINE_AGENT` | Declare `claude`, `codex`, or `hermes` when needed. |
 | `HARDLINE_AGENT_LABEL` | Select a fixed session role; see [ownership and reconnects](messaging.md#name-a-session). |
 | `CODEX_HOME` | Not a hardline variable, but read by the `codex queue` it runs to wake a Codex session. Codex does not pass it to MCP servers, so if Codex uses a custom home, set the same value in hardline's MCP registration env. See [queue-wake](inbox-signals.md#codex-queue-wake-preferred). |
@@ -33,11 +33,20 @@ When pinning Codex, prefer its maintained launcher over a versioned release path
 
 ### Codex Windows sandbox
 
-On Windows a spawned Codex runs with `-c windows.sandbox="elevated"` unless
-`HARDLINE_CODEX_WINDOWS_SANDBOX` says otherwise. `unelevated` is upstream's
-fallback, whose isolation is weaker, especially for the network. Hardline's
-`--sandbox read-only` pin applies under either. Reconnect the MCP server after
-changing the variable.
+On Windows a spawned Codex runs in Codex's native MXC sandbox
+(`-c windows.sandbox="mxc"`) unless `HARDLINE_CODEX_WINDOWS_SANDBOX` says
+otherwise. MXC enforces a permission profile inside the one process it starts,
+so hardline pins read-only (workspace-write for `write=True`) through a
+profile that also keeps the reviewer out of your secrets
+([below](#what-a-codex-reviewer-can-read)). Where Windows cannot provide MXC,
+`codex exec` starts none of the reviewer's commands and records no failed
+command either, so each call first runs one empty command through
+`codex sandbox` with the call's own sandbox and pin (about half a second) and
+refuses the call if it does not start. Choose `elevated` on such a machine.
+
+`elevated`, and `unelevated` (upstream's fallback, whose isolation is weaker,
+especially for the network), are pinned with `--sandbox` and deny nothing.
+Reconnect the MCP server after changing the variable.
 
 The elevated sandbox needs one workaround for Codex 0.161.0 (#47,
 openai/codex#51590). Before each command its setup refresh opens every file
@@ -64,39 +73,47 @@ sandbox's users read access across it. A reviewer can therefore read Claude
 Code's credentials and transcripts, Codex's own sessions, SSH keys and
 hardline's mailbox, and whatever a command reads can reach the model.
 
-Codex's machine-wide requirements file denies chosen paths to every Codex
-sandbox, hardline's reviewers included, and works with hardline's
-`--sandbox read-only` pin. **It also forbids full access,** since an
-unsandboxed session could not honour the denials. Once it denies anything, a
-session asking for `danger-full-access` falls back to read-only with a startup
+Under the MXC default, no command of a hardline-spawned Codex can read:
+- Claude Code's homes (`~/.claude`, and `CLAUDE_CONFIG_DIR` when set) and
+  `~/.claude.json`: credentials, transcripts, settings;
+- Codex's `.env`, `auth.json`, `config.toml`, `sessions`, `archived_sessions`
+  and `history.jsonl`, in your Codex home and in advisory mode's temporary one;
+- gh's configuration (`GH_CONFIG_DIR`, else `%APPDATA%\GitHub CLI`), where its
+  token may live;
+- hardline's store: `~/.cache/hardline-mcp`, and `HARDLINE_DB` with its
+  journal files wherever it points;
+- `~/.ssh`, so no git-over-SSH inside a reviewer.
+
+Each path is denied under its own spelling and its resolved one, so a
+junction does not open a second way in.
+
+The denial is per call. MXC holds it inside the reviewer's process and changes
+no file's permissions, so your own Codex sessions, full-access ones included,
+are untouched. A workdir inside a denied directory stays readable (writable
+with `write=True`): Codex's most specific entry wins, so a reviewer of
+`~/.claude/skills` reads its workdir and nothing else under `~/.claude`. A
+denied directory itself stays denied as a workdir. Measured on Codex 0.162.0:
+a denied directory refused while its sibling read, a workdir inside one read,
+a write refused, and a missing denied path not created.
+
+The profile gets a new random name on every call. Codex deep-merges its
+configuration layers, so a `[permissions.<name>]` table in any of them - a
+trusted project's `.codex/config.toml` included - would merge into a profile
+of a known name and could grant back what it denies.
+
+**The elevated and unelevated sandboxes deny nothing.** They deny through ACEs
+on a sandbox identity that every Codex session shares, and the next session to
+start, your own included, reconciles those ACEs to its own list. A per-call
+denial there would last only until then.
+
+Codex's machine-wide requirements file (`[permissions.filesystem] deny_read`
+in `%ProgramData%\OpenAI\Codex\requirements.toml`) denies a list to every
+Codex sandbox, but **it also forbids full access**, since an unsandboxed
+session could not honour the denials. Once it denies anything, a session
+asking for `danger-full-access` falls back to read-only with a startup
 warning, and with approvals off (`--dangerously-bypass-approvals-and-sandbox`)
-Codex refuses to start. Use it only on a machine where no Codex session runs
-with full access. On Windows it is
-`%ProgramData%\OpenAI\Codex\requirements.toml`:
-
-```toml
-[permissions.filesystem]
-deny_read = [
-  'C:\Users\you\.claude',              # Claude Code credentials, transcripts
-  'C:\Users\you\.cache\hardline-mcp',  # hardline mailbox, GitHub snapshots
-  'C:\Users\you\.codex\sessions',      # Codex transcripts
-  'C:\Users\you\.ssh',                 # SSH keys: no git-over-SSH in a sandbox
-]
-```
-
-- **Directories, not files.** A listed path that does not exist is created as
-  a directory when a sandbox starts. A file such as `~/.codex/auth.json`,
-  which `codex logout` deletes, would come back as a directory and break its
-  owner.
-- **Every Codex session is bound by it,** your own included; Codex's own
-  process (login, API, sessions) runs outside the sandbox and is not. Delete
-  the file to undo.
-- **Lock the file down:** let only you, SYSTEM and Administrators change it,
-  since the sandbox's users are ordinary local users.
-
-A per-call permission profile would keep this to hardline's reviewers, but it
-does not compose with `--sandbox read-only`, and its deny entries are tracked
-per sandbox user, so other Codex sessions revoke them.
+Codex refuses to start. Under the elevated sandbox it also creates any missing
+listed path as a directory, so it can only hold directories.
 
 ### Codex compatibility errors
 
@@ -205,7 +222,7 @@ available execution metadata:
 
 | Mode | Codex | Claude |
 | --- | --- | --- |
-| Default (`write=False`) | Explicit `--sandbox read-only`; ephemeral session. | Denies Edit/Write/NotebookEdit and discards user settings; Bash remains available. |
+| Default (`write=False`) | Explicit read-only sandbox (on Windows, an MXC profile that also denies secrets); ephemeral session. | Denies Edit/Write/NotebookEdit and discards user settings; Bash remains available. |
 | `mode="advisory"` | Fresh neutral workspace and temporary config/auth home; read-only sandbox and fixed developer instructions. | Fresh neutral workspace; tools, slash commands, project customizations, and persistence disabled. |
 | `write=True` | `workspace-write` sandbox with approvals disabled. | Full tool access with `bypassPermissions`. |
 

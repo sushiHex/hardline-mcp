@@ -132,7 +132,7 @@ def test_codex_is_probed_exactly_where_and_how_the_child_will_run(
     # On Windows the elevated sandbox's decoy LOCALAPPDATA is part of the
     # child's environment, so the probes must see it too - on every platform.
     monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
-    monkeypatch.delenv("HARDLINE_CODEX_WINDOWS_SANDBOX", raising=False)
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "elevated")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "real"))
     monkeypatch.setenv("HARDLINE_ALLOW_WRITE", "1")
     adapters.ask_codex("review", **({} if plain else {"workdir": str(tmp_path)}))

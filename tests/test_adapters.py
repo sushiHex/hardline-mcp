@@ -1,6 +1,8 @@
 """Tests for hardline_mcp.adapters — subprocess is monkeypatched (no real spawns)."""
 
 import json
+import os
+import re
 import subprocess
 import tempfile
 
@@ -414,7 +416,7 @@ def test_ask_codex_advisory_isolates_context_and_api_overrides(monkeypatch, tmp_
     assert "--ignore-user-config" in argv
     assert "--ignore-rules" in argv
     assert "--skip-git-repo-check" in argv
-    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert _pin(argv) == "read-only"
     isolated_cwd = neutral_root / "workspace"
     isolated_home = neutral_root / "codex-home"
     assert argv[argv.index("-C") + 1] == str(isolated_cwd)
@@ -554,8 +556,9 @@ def test_ask_codex_write_adds_workspace_write_sandbox(
 
     assert out["ok"] is True
     argv = calls[0]["cmd"]
-    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
-    assert argv[argv.index("-a") + 1] == "never"
+    assert _pin(argv) == "workspace-write"
+    assert 'approval_policy="never"' in _overrides(argv)
+    assert "-a" not in argv  # codex exec rejects it
     assert argv[argv.index("-C") + 1] == str(tmp_path)
 
 
@@ -580,15 +583,15 @@ def test_ask_codex_default_pins_the_read_only_sandbox(monkeypatch):
 
     assert out["ok"] is True
     argv = calls[0]["cmd"]
-    assert argv[argv.index("--sandbox") + 1] == "read-only"
-    assert "-a" not in argv  # approvals untouched on the read path
+    assert _pin(argv) == "read-only"
+    assert not [o for o in _overrides(argv) if o.startswith("approval_policy")]  # untouched on the read path
 
 
 def test_ask_codex_optioned_read_also_pins_read_only(monkeypatch):
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
     adapters.ask_codex("summarize", effort="high")
     argv = calls[0]["cmd"]
-    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert _pin(argv) == "read-only"
 
 
 def test_ask_codex_write_still_gets_workspace_write(monkeypatch, tmp_path, allow_write):
@@ -596,13 +599,39 @@ def test_ask_codex_write_still_gets_workspace_write(monkeypatch, tmp_path, allow
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
     adapters.ask_codex("fix it", workdir=str(tmp_path), write=True)
     argv = calls[0]["cmd"]
-    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert _pin(argv) == "workspace-write"
     assert "read-only" not in argv
-    assert argv[argv.index("-a") + 1] == "never"
+    assert 'approval_policy="never"' in _overrides(argv)
 
 
 def _windows_sandbox(argv: list[str]) -> list[str]:
     return [a for a in argv if a.startswith("windows.sandbox=")]
+
+
+def _overrides(argv: list[str]) -> list[str]:
+    """What argv passes Codex as `-c` overrides: anywhere else it is no override."""
+    return [b for a, b in zip(argv, argv[1:]) if a == "-c"]
+
+
+def _profile(argv: list[str]) -> str | None:
+    """The permission profile argv selects, if any."""
+    selected = [o for o in _overrides(argv) if o.startswith("default_permissions=")]
+    return json.loads(selected[0].split("=", 1)[1]) if selected else None
+
+
+_BUILT_INS = {'":read-only"': "read-only", '":workspace"': "workspace-write"}
+
+
+def _pin(argv: list[str]) -> str:
+    """The one sandbox a spawned Codex was held to, in either form: --sandbox,
+    or the permission profile an MXC sandbox is pinned through."""
+    pins = [argv[i + 1] for i, a in enumerate(argv) if a == "--sandbox"]
+    name = _profile(argv)
+    if name is not None:
+        extends = f"permissions.{name}.extends="
+        pins += [_BUILT_INS[o[len(extends):]] for o in _overrides(argv) if o.startswith(extends)]
+    assert len(pins) == 1, argv
+    return pins[0]
 
 
 REAL_LOCALAPPDATA = r"C:\Users\you\AppData\Local"
@@ -619,13 +648,19 @@ def windows(monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", REAL_LOCALAPPDATA)
 
 
+@pytest.fixture
+def elevated(windows, monkeypatch):
+    """Windows with the elevated sandbox chosen over the MXC default."""
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "elevated")
+
+
 def _restored(argv: list[str]) -> list[str]:
     return [a for a in argv if a.startswith("shell_environment_policy.set.")]
 
 
 @pytest.mark.parametrize("effort", ["default", "high"])  # plain and structured paths
 def test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes(
-    monkeypatch, windows, effort
+    monkeypatch, elevated, effort
 ):
     """#47: Codex 0.161.0's elevated sandbox refused every command while the
     desktop app ran its computer-use runtime, because its refresh walks
@@ -635,6 +670,7 @@ def test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes(
     adapters.ask_codex("summarize", effort=effort)
     argv, env = calls[0]["cmd"], calls[0]["kwargs"]["env"]
     assert _windows_sandbox(argv) == ['windows.sandbox="elevated"']
+    assert not [a for a in argv if a.startswith("permissions.")]  # it would not hold
     assert argv[argv.index("--sandbox") + 1] == "read-only"
     assert env["LOCALAPPDATA"] == DECOY
     assert _restored(argv) == [
@@ -643,9 +679,9 @@ def test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes(
     assert argv[argv.index(_restored(argv)[0]) - 1] == "-c"
 
 
-@pytest.mark.parametrize("value", ["unelevated", "inherit"])
+@pytest.mark.parametrize("value", ["mxc", "unelevated", "inherit"])
 def test_only_the_elevated_sandbox_is_redirected(monkeypatch, windows, value):
-    """The other two do not run the refresh hardline steers around."""
+    """The others do not run the refresh hardline steers around."""
     monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", value)
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     adapters.ask_codex("summarize")
@@ -653,7 +689,7 @@ def test_only_the_elevated_sandbox_is_redirected(monkeypatch, windows, value):
     assert calls[0]["kwargs"]["env"]["LOCALAPPDATA"] == REAL_LOCALAPPDATA
 
 
-def test_no_redirect_without_a_real_localappdata_to_give_back(monkeypatch, windows):
+def test_no_redirect_without_a_real_localappdata_to_give_back(monkeypatch, elevated):
     """Redirected, the commands would keep the decoy."""
     monkeypatch.delenv("LOCALAPPDATA")
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
@@ -675,7 +711,7 @@ def test_windows_detection_is_the_real_platform():
     "kwargs", [{"write": True}, {"mode": "advisory"}], ids=["write", "advisory"]
 )
 def test_the_windows_sandbox_reaches_write_and_advisory(
-    monkeypatch, tmp_path, windows, allow_write, kwargs
+    monkeypatch, tmp_path, elevated, allow_write, kwargs
 ):
     """Advisory builds an environment of its own; the decoy lands in it."""
     advisory_env = {"CODEX_HOME": str(tmp_path / "home"), "LOCALAPPDATA": REAL_LOCALAPPDATA}
@@ -692,9 +728,253 @@ def test_the_windows_sandbox_reaches_write_and_advisory(
         assert spawn["kwargs"]["env"]["CODEX_HOME"] == advisory_env["CODEX_HOME"]
 
 
+def _access(argv: list[str]) -> dict[str, str]:
+    """The filesystem table of the profile an MXC sandbox is pinned through."""
+    prefix = f"permissions.{_profile(argv)}.filesystem="
+    (table,) = [o[len(prefix):] for o in _overrides(argv) if o.startswith(prefix)]
+    # Each key is a TOML basic string, which JSON reads the same for paths.
+    return {json.loads(k): v for k, v in re.findall(r'("(?:[^"\\]|\\.)*")="(\w+)"', table)}
+
+
+@pytest.fixture
+def secret_home(monkeypatch, tmp_path):
+    """A home, Codex home, gh home and store of known paths."""
+    home = tmp_path / "user"
+    monkeypatch.setattr(adapters.Path, "home", classmethod(lambda cls: home))
+    for name in ("CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("APPDATA", str(home / "roaming"))
+    monkeypatch.setenv("CODEX_HOME", str(home / "codex"))
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "store" / "mb.db"))
+    return home
+
+
+def _denies(access: dict[str, str], paths) -> bool:
+    return all(access.get(str(path)) == "deny" for path in paths)
+
+
+def test_ask_codex_on_windows_pins_mxc_with_the_secrets_denied(monkeypatch, windows, secret_home):
+    """The default: MXC enforces a profile in the one process it starts, so the
+    read-only pin denies the secrets per call without touching a DACL every
+    Codex session shares - and needs no decoy, since it runs no refresh."""
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    argv, env = calls[0]["cmd"], calls[0]["kwargs"]["env"]
+    assert _windows_sandbox(argv) == ['windows.sandbox="mxc"']
+    assert "--sandbox" not in argv
+    assert _pin(argv) == "read-only"
+    assert env["LOCALAPPDATA"] == REAL_LOCALAPPDATA
+    store, codex = secret_home.parent / "store", secret_home / "codex"
+    access = _access(argv)
+    assert _denies(access, [
+        secret_home / ".claude", secret_home / ".claude.json",
+        codex / ".env", codex / "auth.json", codex / "config.toml", codex / "sessions",
+        codex / "archived_sessions", codex / "history.jsonl",
+        secret_home / "roaming" / "GitHub CLI",
+        secret_home / ".cache" / "hardline-mcp",
+        store / "mb.db", store / "mb.db-wal", store / "mb.db-shm",
+        secret_home / ".ssh",
+    ])
+    assert set(access.values()) == {"deny"}
+
+
+def test_every_call_names_a_profile_no_configuration_layer_can_reach(
+    monkeypatch, windows, secret_home
+):
+    """Codex deep-merges its layers: a [permissions.<name>] table in a trusted
+    project's .codex/config.toml would merge into a profile of a known name
+    and could re-grant what it denies."""
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    adapters.ask_codex("summarize")
+    first, second = (_profile(call["cmd"]) for call in calls)
+    assert first != second
+    assert re.fullmatch(r"hardline-[0-9a-f]{16}", first)
+
+
+def test_a_relocated_store_is_denied_where_it_resolves(monkeypatch, windows, secret_home, tmp_path):
+    """HARDLINE_DB may be relative; Codex is given the path it names."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HARDLINE_DB", "rel/mb.db")
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    access = _access(calls[0]["cmd"])
+    assert all(os.path.isabs(path) for path in access)
+    assert _denies(access, [tmp_path / "rel" / "mb.db"])
+
+
+def test_both_claude_homes_are_denied(monkeypatch, windows, secret_home, tmp_path):
+    """A relocated Claude home does not prove the default one empty."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    assert _denies(_access(calls[0]["cmd"]), [tmp_path / "claude-home", secret_home / ".claude"])
+
+
+def _link(target, link):
+    """A second name for ``target``: a junction on Windows, a symlink elsewhere."""
+    if os.name == "nt":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_a_denied_directory_reached_through_a_link_is_denied_by_both_names(
+    monkeypatch, windows, secret_home, tmp_path
+):
+    """Under its link spelling the denial may never match the directory the
+    reviewer reads, so its resolved spelling is denied too."""
+    real = tmp_path / "elsewhere" / "ssh"
+    real.mkdir(parents=True)
+    secret_home.mkdir(parents=True, exist_ok=True)
+    _link(real, secret_home / ".ssh")
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    assert _denies(_access(calls[0]["cmd"]), [secret_home / ".ssh", real])
+
+
+def test_advisory_denies_its_copy_of_the_codex_login_too(
+    monkeypatch, tmp_path, windows, secret_home
+):
+    """Advisory copies auth.json into a temporary Codex home of its own."""
+    copy = tmp_path / "advisory" / "codex-home"
+    monkeypatch.setattr(
+        adapters, "_prepare_codex_advisory",
+        lambda: (None, {**os.environ, "CODEX_HOME": str(copy)}, str(tmp_path / "advisory")),
+    )
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    adapters.ask_codex("go", mode="advisory")
+    argv = calls[0]["cmd"]
+    assert _pin(argv) == "read-only"
+    access = _access(argv)
+    assert _denies(access, [copy / "auth.json", secret_home / "codex" / "auth.json"])
+
+
+def test_mxc_write_pins_the_workspace_profile(monkeypatch, tmp_path, windows, secret_home, allow_write):
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    adapters.ask_codex("fix it", workdir=str(tmp_path), write=True)
+    argv = calls[0]["cmd"]
+    assert _pin(argv) == "workspace-write"
+    assert 'approval_policy="never"' in _overrides(argv)
+    assert set(_access(argv).values()) == {"deny"}  # the workdir is no secret's
+
+
+@pytest.mark.parametrize(("write", "kept"), [(False, "read"), (True, "write")])
+def test_a_workdir_inside_a_denied_directory_stays_usable(
+    monkeypatch, windows, secret_home, allow_write, write, kept
+):
+    """Reviewing ~/.claude/skills must not mean reading nothing: the workdir's
+    own entry is more specific than the denial, and Codex's most specific
+    entry wins (measured under MXC)."""
+    skills = secret_home / ".claude" / "skills"
+    skills.mkdir(parents=True)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    adapters.ask_codex("review", workdir=str(skills), write=write)
+    access = _access(calls[0]["cmd"])
+    assert access.get(str(skills)) == kept
+    assert _denies(access, [secret_home / ".claude"])
+
+
+def test_a_denied_directory_as_the_workdir_stays_denied(monkeypatch, windows, secret_home):
+    """Equally specific, so not an exception: reviewing ~/.claude itself would
+    hand the reviewer the credentials inside it."""
+    (secret_home / ".ssh").mkdir(parents=True)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout='{"type":"item.completed"}'))
+    adapters.ask_codex("review", workdir=str(secret_home / ".ssh"))
+    assert _access(calls[0]["cmd"]).get(str(secret_home / ".ssh")) == "deny"
+
+
+@pytest.mark.parametrize("name", ["x\udcff", "a[1]"], ids=["not-toml", "glob"])
+def test_a_denial_codex_cannot_be_given_exactly_refuses_the_call(
+    monkeypatch, windows, secret_home, tmp_path, name
+):
+    """Dropped, or read by Codex as a glob matching something else, the entry
+    would hand over what the caller believes is denied."""
+    monkeypatch.setattr(adapters, "_codex_unreadable", lambda env: [tmp_path / name])
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    out = adapters.ask_codex("summarize")
+    assert out["ok"] is False
+    assert "cannot give Codex" in out["error"]
+    assert calls == []
+
+
+@pytest.fixture
+def sandbox_probe(monkeypatch):
+    """Records each `codex sandbox` preflight; set ``result`` to vary it."""
+
+    class Probe:
+        calls = []
+        result = {"ok": True}
+
+    def started(exe, overrides, env, cwd, on_spawn=None):
+        Probe.calls.append({"exe": exe, "overrides": overrides, "env": env, "cwd": cwd})
+        return Probe.result
+
+    monkeypatch.setattr(adapters, "_codex_sandbox_started", started)
+    return Probe
+
+
+def test_mxc_is_proven_with_the_calls_own_sandbox_and_pin_first(
+    monkeypatch, tmp_path, windows, secret_home, sandbox_probe
+):
+    """Where Windows cannot provide MXC, `codex exec` starts no command and
+    reports no failed one, so the call would read as a finished review."""
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("review", workdir=str(tmp_path))
+    (probe,), argv = sandbox_probe.calls, calls[0]["cmd"]
+    assert probe["exe"] == argv[0]
+    assert probe["cwd"] == calls[0]["kwargs"]["cwd"]
+    assert probe["env"] == calls[0]["kwargs"]["env"]
+    sandbox, pin = probe["overrides"][:2], probe["overrides"][2:]
+    assert sandbox == ["-c", 'windows.sandbox="mxc"']
+    assert _profile(pin) == _profile(argv)
+    assert any(argv[i : i + len(pin)] == pin for i in range(len(argv)))
+
+
+def test_an_mxc_that_starts_nothing_refuses_the_call(
+    monkeypatch, windows, secret_home, sandbox_probe
+):
+    sandbox_probe.result = {"ok": False, "error": "MXC launcher: native MXC is unavailable"}
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    out = adapters.ask_codex("summarize")
+    assert out["ok"] is False
+    assert "native MXC is unavailable" in out["error"]
+    assert "HARDLINE_CODEX_WINDOWS_SANDBOX=elevated" in out["error"]
+    assert calls == []
+
+
+def test_a_cancel_during_the_mxc_preflight_stops_the_call(
+    monkeypatch, windows, secret_home, sandbox_probe
+):
+    sandbox_probe.result = {"ok": False, "cancelled": True, "error": "cancelled"}
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    out = adapters.ask_codex("summarize")
+    assert out.get("cancelled") is True
+    assert calls == []
+
+
+@pytest.mark.parametrize("value", ["elevated", "unelevated", "inherit"])
+def test_only_mxc_is_preflighted(monkeypatch, windows, sandbox_probe, value):
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", value)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    assert sandbox_probe.calls == []
+    assert len(calls) == 1
+    argv = calls[0]["cmd"]
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert _profile(argv) is None
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [("elevated", ['windows.sandbox="elevated"']), ("inherit", []), (" Unelevated ", ['windows.sandbox="unelevated"'])],
+    [
+        ("", ['windows.sandbox="mxc"']),
+        ("elevated", ['windows.sandbox="elevated"']),
+        ("inherit", []),
+        (" Unelevated ", ['windows.sandbox="unelevated"']),
+    ],
 )
 def test_ask_codex_windows_sandbox_is_configurable(monkeypatch, value, expected):
     monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
