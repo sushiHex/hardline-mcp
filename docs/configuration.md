@@ -57,6 +57,41 @@ hardline-spawned Codex has no connectors to use. That `set` also wins over a
 workaround applies only to the elevated sandbox chosen here: under `inherit`,
 an elevated sandbox from Codex's own configuration still fails this way.
 
+### What a Codex reviewer can read
+
+Codex's read-only sandbox reads the whole user profile: its setup grants the
+sandbox's users read access across it. A reviewer can therefore read Claude
+Code's credentials and transcripts, Codex's own sessions, SSH keys and
+hardline's mailbox, and whatever a command reads can reach the model.
+
+Codex's machine-wide requirements file denies chosen paths to every Codex
+sandbox, hardline's reviewers included, and works with hardline's
+`--sandbox read-only` pin. On Windows it is
+`%ProgramData%\OpenAI\Codex\requirements.toml`:
+
+```toml
+[permissions.filesystem]
+deny_read = [
+  'C:\Users\you\.claude',              # Claude Code credentials, transcripts
+  'C:\Users\you\.cache\hardline-mcp',  # hardline mailbox, GitHub snapshots
+  'C:\Users\you\.codex\sessions',      # Codex transcripts
+  'C:\Users\you\.ssh',                 # SSH keys: no git-over-SSH in a sandbox
+]
+```
+
+- **Directories, not files.** A listed path that does not exist is created as
+  a directory when a sandbox starts. A file such as `~/.codex/auth.json`,
+  which `codex logout` deletes, would come back as a directory and break its
+  owner.
+- **Every Codex session is affected,** your own included; Codex's own process
+  (login, API, sessions) runs outside the sandbox and is not.
+- **Lock the file down:** let only you, SYSTEM and Administrators change it,
+  since the sandbox's users are ordinary local users.
+
+A per-call permission profile would keep this to hardline's reviewers, but it
+does not compose with `--sandbox read-only`, and its deny entries are tracked
+per sandbox user, so other Codex sessions revoke them.
+
 ### Codex compatibility errors
 
 If Codex says a model needs a newer client, check the executable selected by

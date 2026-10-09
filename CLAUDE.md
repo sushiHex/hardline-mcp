@@ -225,9 +225,11 @@ label, so a name is never transferred. That was not adopted. Instead absence was
 made insufficient — a claim now requires evidence. The argument still stands and
 is worth revisiting before the model is built on further.
 
-## Not yet verified end to end
+## Not yet verified live
 
-Session-to-session addressing is proven by tests and mutations, and by a smoke
-run against the real store. Two live agent sessions have not actually exchanged
-a message through a claimed lane. The code says it works; nobody has watched it
-work.
+Session-to-session mail has been watched working on the real store: Claude to
+Codex through a claimed lane with queue-wake, and Claude to Claude through
+inbox wake in a session launched with no flag (it woke idle, read, acked and
+receipted). Still unobserved: inbox wake in a busy session, in the old host
+after a conversation moves to the background, under a `crossSessionInbound`
+setting, and on Linux or macOS. See `docs/claude-inbox-wake.md`.
