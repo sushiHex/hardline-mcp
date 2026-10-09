@@ -1871,5 +1871,21 @@
     "tests": [
       "tests/test_adapters.py::test_a_bare_call_detects_a_turn_whose_commands_never_started"
     ]
+  },
+  "codex-failed-turn-keeps-process-telemetry": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "                return _carry_process_telemetry(parsed, run)\n",
+    "after": "                return parsed\n",
+    "tests": [
+      "tests/test_adapters.py::test_a_bare_call_reports_how_a_failed_turn_exited"
+    ]
+  },
+  "codex-exit-code-is-process-telemetry": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "_PROCESS_TELEMETRY = (\"elapsed_s\", \"timeout_s\", \"exit_code\")",
+    "after": "_PROCESS_TELEMETRY = (\"elapsed_s\", \"timeout_s\")",
+    "tests": [
+      "tests/test_adapters.py::test_a_bare_call_reports_how_a_failed_turn_exited"
+    ]
   }
 }

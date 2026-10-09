@@ -97,7 +97,9 @@ for admission and recovery behavior.
 `write`; their async forms use the same options. A bare `ask_claude(prompt=...)`
 returns the compact `ok`/`reply` shape, and options select structured execution
 and telemetry. Every `ask_codex` call is structured, a bare one included: only
-Codex's JSONL events show a turn whose commands never started. `ask_hermes`
+Codex's JSONL events show a turn whose commands never started. So a bare call
+that ends without a reply, or whose output has a line that is not JSON, is
+reported `ok: false` rather than returning whatever it printed. `ask_hermes`
 accepts only `prompt` and uses Hermes's own defaults.
 
 Omitting `model` passes no model flag. Hardline passes identifiers through

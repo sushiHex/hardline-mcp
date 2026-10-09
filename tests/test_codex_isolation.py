@@ -97,7 +97,7 @@ def advisory_home(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {},  # the plain fast path
+        {},  # no options at all
         {"model": "gpt-5.6-sol"},  # telemetry path
         {"workdir": "."},
         {"write": True, "workdir": "."},

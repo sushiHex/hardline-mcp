@@ -647,7 +647,7 @@ def test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes(
 def test_only_the_elevated_sandbox_is_redirected(monkeypatch, windows, value):
     """The other two do not run the refresh hardline steers around."""
     monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", value)
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     adapters.ask_codex("summarize")
     assert _restored(calls[0]["cmd"]) == []
     assert calls[0]["kwargs"]["env"]["LOCALAPPDATA"] == REAL_LOCALAPPDATA
@@ -656,7 +656,7 @@ def test_only_the_elevated_sandbox_is_redirected(monkeypatch, windows, value):
 def test_no_redirect_without_a_real_localappdata_to_give_back(monkeypatch, windows):
     """Redirected, the commands would keep the decoy."""
     monkeypatch.delenv("LOCALAPPDATA")
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     adapters.ask_codex("summarize")
     assert _windows_sandbox(calls[0]["cmd"]) == ['windows.sandbox="elevated"']
     assert _restored(calls[0]["cmd"]) == []
@@ -699,7 +699,7 @@ def test_the_windows_sandbox_reaches_write_and_advisory(
 def test_ask_codex_windows_sandbox_is_configurable(monkeypatch, value, expected):
     monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
     monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", value)
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     adapters.ask_codex("summarize")
     assert _windows_sandbox(calls[0]["cmd"]) == expected
 
@@ -707,7 +707,7 @@ def test_ask_codex_windows_sandbox_is_configurable(monkeypatch, value, expected)
 def test_ask_codex_rejects_an_unknown_windows_sandbox_before_spawning(monkeypatch):
     monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
     monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "unelevate")
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     out = adapters.ask_codex("summarize")
     assert out["ok"] is False
     assert "HARDLINE_CODEX_WINDOWS_SANDBOX" in out["error"]
@@ -724,7 +724,7 @@ def test_an_unknown_windows_sandbox_refuses_before_model_resolution(monkeypatch)
         raise AssertionError("resolved a model despite an invalid configuration")
 
     monkeypatch.setattr(adapters, "resolve_codex_model", no_resolution)
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     error, _ = adapters.validate_request(
         "codex", model="sol", effort="default", mode="default", workdir=None, write=False
     )
@@ -737,7 +737,7 @@ def test_an_unknown_windows_sandbox_refuses_before_model_resolution(monkeypatch)
 def test_ask_codex_passes_no_windows_sandbox_elsewhere(monkeypatch):
     monkeypatch.setattr(adapters, "_ON_WINDOWS", False)
     monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "elevated")
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout="codex reply"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     adapters.ask_codex("summarize")
     assert _windows_sandbox(calls[0]["cmd"]) == []
 
@@ -1660,6 +1660,32 @@ def test_a_bare_call_detects_a_turn_whose_commands_never_started(monkeypatch):
 
     assert out["ok"] is False
     assert out.get("commands_not_started") == 1
+
+
+def test_a_bare_call_reports_how_a_failed_turn_exited(monkeypatch):
+    """A structured failure used to come back without the exit code and
+    timing the process reported - on the commonest call, once it read JSONL."""
+    stdout = _codex_stream(
+        {"type": "thread.started", "thread_id": "t-9"},
+        {"type": "turn.failed", "error": {"message": "usage limit reached"}},
+    )
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout, returncode=1))
+
+    out = adapters.ask_codex("review")
+
+    assert out["ok"] is False and "usage limit reached" in out["error"]
+    assert out.get("exit_code") == 1
+    assert "elapsed_s" in out and "timeout_s" in out
+
+
+def test_a_stray_line_on_stdout_is_not_certified(monkeypatch):
+    """Chosen behaviour, pinned: a line that is not JSON may have been a lost
+    event, so the answer comes back as partial_reply, not ok."""
+    _capture_run(monkeypatch, _FakeCompleted(stdout="a banner\n" + _codex_reply("answer")))
+
+    out = adapters.ask_codex("review")
+
+    assert out["ok"] is False and out["partial_reply"] == "answer"
 
 
 def test_a_turn_none_of_whose_commands_started_is_not_a_success(monkeypatch):

@@ -1430,8 +1430,8 @@ async def ask_codex(
     letters-only family name (``"astra"``, ``"sol"``) resolves to the newest
     current model Codex's catalog lists as ``<prefix>-<generation>-<family>``,
     reported under ``model_resolution``. An unknown or ambiguous family is
-    passed to Codex literally, and ``model_resolution`` says why. Optional
-    model/effort selection enables JSONL usage/thread telemetry.
+    passed to Codex literally, and ``model_resolution`` says why. Every call
+    reads Codex's JSONL events and reports usage and its thread.
     Advisory mode uses ChatGPT auth preflight, a temporary auth-only CODEX_HOME,
     a neutral read-only directory, ignored user/project configuration, and
     stripped API-provider overrides.
