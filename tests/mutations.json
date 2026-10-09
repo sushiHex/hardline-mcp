@@ -610,8 +610,8 @@
   },
   "push-drives-pending-claims": {
     "file": "hardline_mcp/channel.py",
-    "before": "            and adapters.pending_claims()\n",
-    "after": "            and False\n",
+    "before": "        if self.fulfil and (\n            self._last_fulfil is None or now - self._last_fulfil >= timedelta(seconds=FULFIL_S)\n",
+    "after": "        if False and (\n            self._last_fulfil is None or now - self._last_fulfil >= timedelta(seconds=FULFIL_S)\n",
     "tests": [
       "tests/test_channel.py::test_the_pusher_completes_a_waiting_claim_and_says_so"
     ]
@@ -2056,6 +2056,38 @@
     "tests": [
       "tests/test_adapters.py::test_mxc_write_pins_the_workspace_profile",
       "tests/test_adapters.py::test_ask_codex_write_still_gets_workspace_write"
+    ]
+  },
+  "push-regains-lanes-without-a-claim": {
+    "file": "hardline_mcp/channel.py",
+    "before": "        if self.fulfil and (\n            self._last_fulfil is None or now - self._last_fulfil >= timedelta(seconds=FULFIL_S)\n",
+    "after": "        if self.fulfil and adapters.pending_claims() and (\n            self._last_fulfil is None or now - self._last_fulfil >= timedelta(seconds=FULFIL_S)\n",
+    "tests": [
+      "tests/test_channel.py::test_an_idle_session_refused_its_own_lane_takes_it_when_the_holder_exits"
+    ]
+  },
+  "inbox-wake-regains-lanes-without-a-claim": {
+    "file": "hardline_mcp/announce.py",
+    "before": "        if self.fulfil and (\n            self._last_fulfil is None or now - self._last_fulfil >= timedelta(seconds=channel.FULFIL_S)\n",
+    "after": "        if self.fulfil and adapters.pending_claims() and (\n            self._last_fulfil is None or now - self._last_fulfil >= timedelta(seconds=channel.FULFIL_S)\n",
+    "tests": [
+      "tests/test_claude_inbox.py::test_the_wake_regains_lanes_with_no_claim_waiting"
+    ]
+  },
+  "regain-retries-the-own-registration": {
+    "file": "hardline_mcp/server.py",
+    "before": "    if _registration_failure:\n        _announce_self()\n    return _fulfil_pending()\n",
+    "after": "    return _fulfil_pending()\n",
+    "tests": [
+      "tests/test_channel.py::test_an_idle_session_refused_its_own_lane_takes_it_when_the_holder_exits"
+    ]
+  },
+  "served-wake-regains-lanes": {
+    "file": "hardline_mcp/server.py",
+    "before": "            channel.Pusher(fulfil=_regain_lanes),\n",
+    "after": "            channel.Pusher(fulfil=_fulfil_pending),\n",
+    "tests": [
+      "tests/test_channel.py::test_the_served_wake_regains_lanes"
     ]
   }
 }
