@@ -39,7 +39,7 @@ CLIENT = "claude-code"
 PREVIEW_CHARS = 200
 BATCH = 20
 POLL_S = 2.0
-FULFIL_S = 15.0
+FULFIL_S = 15.0  # how often a wake loop runs its ``fulfil``: lanes this session expects
 MAX_BACKOFF_S = 60.0
 SEND_TIMEOUT_S = 5.0
 # Between reminders for a pushed message that is still unread, per message, so
@@ -221,10 +221,8 @@ class Pusher:
         however long the send and the thread hop took.
         """
         now = self.clock()
-        if (
-            self.fulfil
-            and adapters.pending_claims()
-            and (self._last_fulfil is None or now - self._last_fulfil >= timedelta(seconds=FULFIL_S))
+        if self.fulfil and (
+            self._last_fulfil is None or now - self._last_fulfil >= timedelta(seconds=FULFIL_S)
         ):
             self._last_fulfil = now
             self.notices += [

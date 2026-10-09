@@ -363,6 +363,69 @@ async def test_the_pusher_completes_a_waiting_claim_and_says_so(store, monkeypat
 
 
 @pytest.mark.anyio
+async def test_an_idle_session_refused_its_own_lane_takes_it_when_the_holder_exits(
+    monkeypatch, tmp_path, in_session
+):
+    """A reconnect can start before the old server exits, and its own lane is
+    refused then. With no claim waiting, nothing retried it until a tool call,
+    so an idle session never woke for its own mail."""
+    import subprocess
+    import sys
+
+    from hardline_mcp import server, sessions
+
+    db = tmp_path / "mb.db"
+    monkeypatch.setenv("HARDLINE_DB", str(db))
+    monkeypatch.setattr(channel, "FULFIL_S", 0.0)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"], stdin=subprocess.DEVNULL
+    )
+    try:
+        sessions.register(agent="claude", lane=LANE, pid=holder.pid, db_path=db)
+        assert server._announce_self() is None, "the old server still holds the lane"
+        mailbox.send("codex", LANE, "for the new server", db_path=db)
+        async with anyio.create_task_group() as tg:
+            wire = await serving(tg, channel.Pusher(poll_s=0.02, fulfil=server._regain_lanes))
+            await wire.handshake()
+            await wire.none(is_push)
+            holder.kill()
+            holder.wait()
+            push = await wire.next(is_push)
+            assert "for the new server" in push["params"]["content"]
+            assert server._last_registration_failure() is None
+            tg.cancel_scope.cancel()
+    finally:
+        holder.kill()
+        holder.wait()
+        server._registration_failure.clear()
+        channel._pusher = None
+        server.announce.install()
+
+
+@pytest.mark.anyio
+async def test_the_served_wake_regains_lanes(monkeypatch):
+    """The real server wires the pusher to what regains the session's own lane,
+    not only to waiting claims."""
+    from contextlib import asynccontextmanager
+
+    from hardline_mcp import server
+
+    served = {}
+
+    @asynccontextmanager
+    async def streams():
+        yield "read", "write"
+
+    async def serve(read, write, pusher, **kwargs):
+        served["pusher"] = pusher
+
+    monkeypatch.setattr(server, "stdio_server", streams)
+    monkeypatch.setattr(server, "serve_streams", serve)
+    await server._serve_stdio()
+    assert served["pusher"].fulfil is server._regain_lanes
+
+
+@pytest.mark.anyio
 async def test_a_sender_sees_whether_the_recipient_is_receiving_pushes(store):
     from hardline_mcp import server
 

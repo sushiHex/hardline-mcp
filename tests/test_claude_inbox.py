@@ -217,6 +217,19 @@ def test_a_notice_taken_back_is_no_push_and_its_mail_is_due_again(armed):
     assert again is not None and again[2] == ids, "its mail is announced again"
 
 
+def test_the_wake_regains_lanes_with_no_claim_waiting(armed, monkeypatch):
+    """A session refused its own lane at startup has no claim waiting, and
+    this loop is what retries it while the session is idle."""
+    wake, _ = armed
+    monkeypatch.setattr(adapters, "pending_claims", lambda: {})
+    monkeypatch.setattr(channel, "FULFIL_S", 0.0)
+    calls = []
+    wake.fulfil = lambda: calls.append(1) or []
+    wake.poll()
+    wake.poll()
+    assert len(calls) == 2
+
+
 def test_a_receipted_notice_is_not_taken_back(armed):
     """The receipt proves it was delivered after all."""
     wake, _ = armed

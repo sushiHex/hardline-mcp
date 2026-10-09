@@ -448,6 +448,22 @@ def _fulfil_pending() -> list[str]:
     return granted
 
 
+def _regain_lanes() -> list[str]:
+    """What the wake loops run every ``channel.FULFIL_S``: this session's own
+    registration again while it is failing, then each waiting claim. Returns
+    the claimed lanes granted.
+
+    The session's own lane needs the retry as much as a claim does. Refused
+    at startup because its previous holder had not exited yet, it was retried
+    only by a tool call, so an idle session never woke for its own mail. Both
+    checks are memory until there is something to retry: an idle poll stays a
+    reader.
+    """
+    if _registration_failure:
+        _announce_self()
+    return _fulfil_pending()
+
+
 def _register_session_impl(
     label: str, agent: str | None, wait: bool = False
 ) -> dict:
@@ -2351,14 +2367,14 @@ def main() -> None:
 async def _serve_stdio() -> None:
     """Drop-in for ``FastMCP.run_stdio_async``, with channel push spliced in.
 
-    The pusher also drives pending claims, so a moved conversation regains its
-    name within seconds of the old holder exiting.
+    Whichever wake runs also regains lanes, so a moved or reconnected
+    conversation holds its names within seconds of the old holder exiting.
     """
     async with stdio_server() as (read, write):
         await serve_streams(
             read,
             write,
-            channel.Pusher(fulfil=_fulfil_pending),
+            channel.Pusher(fulfil=_regain_lanes),
             resolve_inbox=claude_inbox.address,
         )
 

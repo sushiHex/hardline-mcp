@@ -139,10 +139,8 @@ class Announcer:
         transport says it delivered nothing (``take_back``).
         """
         now = self.clock()
-        if (
-            self.fulfil
-            and adapters.pending_claims()
-            and (self._last_fulfil is None or now - self._last_fulfil >= timedelta(seconds=channel.FULFIL_S))
+        if self.fulfil and (
+            self._last_fulfil is None or now - self._last_fulfil >= timedelta(seconds=channel.FULFIL_S)
         ):
             self._last_fulfil = now
             self.fulfil()
