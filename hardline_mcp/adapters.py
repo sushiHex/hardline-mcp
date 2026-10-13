@@ -350,20 +350,29 @@ _CODEX_NO_SECRET_ENV = ["-c", "shell_environment_policy.ignore_default_excludes=
 _CREDENTIAL_NAME = re.compile("KEY|SECRET|TOKEN", re.IGNORECASE)  # Codex's default excludes
 
 
+_CODEX_OWN_PREFIXES = ("CODEX_", "OPENAI_", "AZURE_OPENAI_")
+
+
 def _codex_own_env(env: dict) -> dict:
-    """What a spawned Codex itself is started with: ``env`` without
-    credential-named variables, but those its own login reads
-    (``_CODEX_AUTH_OVERRIDE_ENV``) and any ``HARDLINE_CODEX_KEEP_ENV`` names,
-    such as a custom model provider's ``env_key``.
+    """What a spawned Codex itself is started with: ``env`` without other
+    tools' credential-named variables. It keeps its own namespace - its login
+    reads CODEX_ACCESS_TOKEN, CODEX_API_KEY, OPENAI_API_KEY,
+    OPENAI_IDENTITY_TOKEN_FILE and token-URL overrides - and any
+    ``HARDLINE_CODEX_KEEP_ENV`` names, such as a custom model provider's
+    ``env_key``.
 
     Filtering its commands' environment is not enough on its own: on macOS a
     command reads Codex's own environment back through
-    sysctl(KERN_PROCARGS2), which Seatbelt allows (measured in CI). A
-    credential Codex merely holds is one its commands can reach.
+    sysctl(KERN_PROCARGS2) (measured in CI). A credential Codex merely holds
+    is one its commands can reach.
     """
     extra = os.environ.get("HARDLINE_CODEX_KEEP_ENV", "").split(",")
-    keep = _CODEX_AUTH_OVERRIDE_ENV | {name.strip().upper() for name in extra if name.strip()}
-    return {k: v for k, v in env.items() if k.upper() in keep or not _CREDENTIAL_NAME.search(k)}
+    keep = {name.strip().upper() for name in extra if name.strip()}
+    return {
+        k: v for k, v in env.items()
+        if not _CREDENTIAL_NAME.search(k) or k.upper().startswith(_CODEX_OWN_PREFIXES)
+        or k.upper() in keep
+    }
 
 
 def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) -> list[str]:
@@ -479,7 +488,8 @@ def _codex_sandbox_started(exe: str, overrides: list[str], env: dict, cwd: str |
     except (OSError, ValueError) as exc:
         return {"ok": False, "error": f"cannot prepare the sandbox check: {exc}"}
     probe_env = _agent_env({**env, _CODEX_ENV_CANARY: "1"})
-    withheld = sorted(name for name in probe_env if _CREDENTIAL_NAME.search(name))
+    # Hardline's own too: a `set` could put back a name Codex was started without.
+    withheld = sorted(name for name in {*os.environ, *probe_env} if _CREDENTIAL_NAME.search(name))
     return _run_cmd(
         [exe, "sandbox", *managed, *overrides, "--",
          sys.executable, "-I", "-c", _CODEX_POLICY_PROBE, cwd or ".", *withheld, "--", *denied],
@@ -2012,6 +2022,7 @@ def _codex_catalog(mode: str, workdir: str | None) -> tuple[list | None, str | N
         cwd = str(Path(neutral_root) / "workspace")
     else:
         env, cwd = dict(os.environ), workdir
+    env = _codex_own_env(env)  # as the call will authenticate
     for name in _AGENT_CHILD_STRIPPED_ENV:
         env.pop(name, None)
     try:

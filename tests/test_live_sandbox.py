@@ -7,6 +7,7 @@ login: `codex sandbox` runs one command under exactly the overrides
 temporary home, so nothing real is ever read.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -128,42 +129,65 @@ def test_the_pin_keeps_credentials_out_of_commands(home, monkeypatch):
     assert "DUMMY-OPENAI-KEY" not in out and "PLAIN-TEXT" in out, out
 
 
+# Run inside the sandbox: whose environments can a command read, and where
+# does a dummy credential turn up? Linux through /proc/<pid>/environ, macOS
+# through sysctl(KERN_PROCARGS2), what `ps -E` uses, asked of itself, its
+# parent (Codex) and a decoy of the user's started outside the sandbox. No
+# expected value is in this text, which KERN_PROCARGS2 also returns: the token
+# is spelled backwards, the plain value read at run time.
+_ENV_READS = """\
+import ctypes, ctypes.util, glob, json, os, sys
+token, plain = 'NEKOT-HG-YMMUD'[::-1], os.environ['HARDLINE_LIVE_PLAIN']
+decoy = int(sys.argv[1])
+named = {os.getpid(): 'self', os.getppid(): 'parent', decoy: 'decoy'}
+seen = {}
+for path in glob.glob('/proc/[0-9]*/environ'):
+    try:
+        seen[int(path.split('/')[2])] = open(path, 'rb').read().decode('latin-1')
+    except OSError:
+        pass
+if sys.platform == 'darwin':
+    libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
+    for pid in named:
+        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
+        size = ctypes.c_size_t(1 << 20)
+        buf = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0:
+            seen[pid] = buf.raw[:size.value].decode('latin-1')
+print(json.dumps({
+    'readable': sorted(named.get(pid, 'other') for pid in seen),
+    'plain_in': sorted(named.get(pid, 'other') for pid, text in seen.items() if plain in text),
+    'token_in': sorted(named.get(pid, 'other') for pid, text in seen.items() if token in text),
+}))
+"""
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="no /proc or KERN_PROCARGS2; measured on a "
                     "Windows 11 host: a command sees only its own job's processes")
-def test_a_command_cannot_read_another_tool_s_credential_from_codex(home, monkeypatch):
-    """A command that reads Codex's own environment back - on Linux through
-    /proc/<pid>/environ, on macOS through sysctl(KERN_PROCARGS2), what `ps -E`
-    uses, which Seatbelt allows - finds no other tool's credential there,
-    because Codex is started without them. The same route must find the
-    command's own variable, or "sealed" means "looked nowhere". Neither value
-    is in the command line, which KERN_PROCARGS2 also returns: the token is
-    spelled backwards, and the plain value is read at run time."""
+def test_a_command_cannot_read_a_credential_out_of_another_process(home, monkeypatch):
+    """Codex is started without other tools' credentials because a macOS
+    command can read its environment back; that is only a boundary if the
+    user's other processes, which hold them, are out of reach too. The route
+    must find the command's own variable, or "sealed" means "looked nowhere"."""
     monkeypatch.setenv("GH_TOKEN", "DUMMY-GH-TOKEN")
     monkeypatch.setenv("HARDLINE_LIVE_PLAIN", "PLAIN-ROUTE")
-    out = _command(home / "project", (
-        "import ctypes, ctypes.util, glob, os, sys\n"
-        "token, plain = 'NEKOT-HG-YMMUD'[::-1], os.environ['HARDLINE_LIVE_PLAIN']\n"
-        "seen = {}\n"
-        "for path in glob.glob('/proc/[0-9]*/environ'):\n"
-        "    try:\n"
-        "        seen[path] = open(path, 'rb').read().decode('latin-1')\n"
-        "    except OSError:\n"
-        "        pass\n"
-        "if sys.platform == 'darwin':\n"
-        "    libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n"
-        "    for pid in {os.getpid(), os.getppid()}:\n"
-        "        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2\n"
-        "        size = ctypes.c_size_t(1 << 20)\n"
-        "        buf = ctypes.create_string_buffer(size.value)\n"
-        "        if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0:\n"
-        "            raw = buf.raw[:size.value]\n"
-        "            exe = raw[4:].split(b'\\0')[0].decode('latin-1')\n"
-        "            seen[f'pid {pid} ({exe})'] = raw.decode('latin-1')\n"
-        "leaks = [where for where, text in seen.items() if token in text]\n"
-        "print('LEAKED from ' + ', '.join(leaks) if leaks else 'SEALED',\n"
-        "      'route' if any(plain in text for text in seen.values()) else 'no-route')\n"
-    ))
-    assert "SEALED route" in out, out
+    decoy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
+                             env=dict(os.environ), stdin=subprocess.DEVNULL)
+    try:
+        exe, overrides = _pinned(home / "project")
+        out = subprocess.run(
+            [exe, "sandbox", *overrides, "--", sys.executable, "-I", "-c", _ENV_READS,
+             str(decoy.pid)],
+            cwd=home / "project", env=_codex_env(), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60,
+        )
+    finally:
+        decoy.kill()
+        decoy.wait()
+    print(out.stdout, out.stderr)
+    report = json.loads(out.stdout.strip().splitlines()[-1])
+    assert "self" in report["plain_in"], report  # the route works
+    assert report["token_in"] == [], report
 
 
 def test_the_preflight_catches_a_policy_that_passes_credentials(home):

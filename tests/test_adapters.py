@@ -1017,6 +1017,7 @@ def test_codex_itself_keeps_only_its_own_login_credentials(monkeypatch, secret_h
     monkeypatch.setenv("GH_TOKEN", "dummy-gh")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "dummy-aws")
     monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai")
+    monkeypatch.setenv("CODEX_ACCESS_TOKEN", "dummy-codex")
     monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-router")
     monkeypatch.setenv("HARDLINE_CODEX_KEEP_ENV", " openrouter_api_key ")
     monkeypatch.setenv("HARDLINE_PLAIN_SETTING", "plain")
@@ -1024,8 +1025,9 @@ def test_codex_itself_keeps_only_its_own_login_credentials(monkeypatch, secret_h
     adapters.ask_codex("summarize")
     for env in [calls[0]["kwargs"]["env"], *(probe["env"] for probe in sandbox_probe.calls)]:
         assert "GH_TOKEN" not in env and "AWS_SECRET_ACCESS_KEY" not in env
-        assert env.get("OPENAI_API_KEY") == "dummy-openai"
-        assert env.get("OPENROUTER_API_KEY") == "dummy-router"
+        assert env.get("OPENAI_API_KEY") == "dummy-openai"  # its own namespace
+        assert env.get("CODEX_ACCESS_TOKEN") == "dummy-codex"
+        assert env.get("OPENROUTER_API_KEY") == "dummy-router"  # named to keep
         assert env.get("HARDLINE_PLAIN_SETTING") == "plain"
 
 
@@ -1135,7 +1137,9 @@ def test_the_preflight_probes_the_workdir_and_every_existing_denial(
         adapters, "_run_cmd",
         lambda argv, env, **kwargs: seen.append(argv) or envs.append(env) or {"ok": True},
     )
-    _real_sandbox_started("codex", ["-c", "x=1"], dict(os.environ), str(tmp_path))
+    # As the call runs it: Codex without the token, which a `set` could restore.
+    _real_sandbox_started("codex", ["-c", "x=1"], adapters._codex_own_env(dict(os.environ)),
+                          str(tmp_path))
     (argv,) = seen
     assert argv[:9] == [
         "codex", "sandbox", "-c", "x=1", "--",
@@ -1146,7 +1150,7 @@ def test_the_preflight_probes_the_workdir_and_every_existing_denial(
     withheld, denied = argv[10:cut], argv[cut + 1:]
     # Every credential-named variable Codex holds, a canary always among them.
     assert {"HARDLINE_TEST_GH_TOKEN", adapters._CODEX_ENV_CANARY} <= set(withheld)
-    assert all(name in envs[0] for name in withheld)
+    assert "HARDLINE_TEST_GH_TOKEN" not in envs[0] and envs[0].get(adapters._CODEX_ENV_CANARY)
     canary = secret_home / ".cache" / "hardline-mcp" / "sandbox-canary"
     assert denied[0] == str(canary) and canary.is_file()  # never a policy denying nothing
     assert str(secret_home / ".ssh") in denied
