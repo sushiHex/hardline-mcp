@@ -232,8 +232,11 @@ files with the Write tool rather than `echo >` or `python -c`.
 The design review argued that absence-based ownership is the wrong foundation:
 that a stable *instance* address should be separate from a human *display*
 label, so a name is never transferred. That was not adopted. Instead absence was
-made insufficient — a claim now requires evidence. The argument still stands and
-is worth revisiting before the model is built on further.
+made insufficient — a claim now requires evidence. A 2026-10-13 design pass
+deferred it against stated criteria: what only a stable address fixes, why not
+yet, two mitigations short of a migration, and when to revisit. Read
+"Stable instance addresses" in `docs/architecture.md` before building on names
+further; none of today's names is an immutable recipient.
 
 ## Not yet verified live
 

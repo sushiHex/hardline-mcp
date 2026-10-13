@@ -72,7 +72,7 @@ Both reviewers chose hints instead. Astra's corrections are adopted:
 - **Automatic grants clear the hint for their name**, looking before taking the writer.
 - **Hints are limited to the agent this process serves**, since `register_session` could ask only for that agent's name.
 
-**Longer term:** both reviews point at the root cause, one name serving as process, conversation and role. That's the stable-address question in CLAUDE.md, a routing migration rather than a continuity fix.
+**Longer term:** both reviews point at the root cause, one name serving as process, conversation and role. That's a routing migration rather than a continuity fix, deferred against stated criteria in [stable instance addresses](architecture.md#decisions-and-what-was-rejected).
 
 Also corrected in passing: the docs claimed acquisition needs positive evidence that nobody holds a lane. `sessions._refusal` grants when no registered holder and no live owed work exist, so an unregistered consumer with no jobs is invisible to it.
 

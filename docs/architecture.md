@@ -150,6 +150,57 @@ at acceptance before any message exists. Reusable roles remain a deliberate
 tradeoff: a distinct instance address could provide stronger recipient identity,
 but would need a separate policy for messages sent to an unattended role.
 
+**Stable instance addresses: deferred, against stated criteria (2026-10-13).**
+One name still serves as process, conversation and role, and no current name
+is an immutable recipient: the derived lane is reproducible (project basename
+plus eight characters of the session id, or a pin) and reclaimable once its
+holder is gone. Roles deliberately let a new holder inherit backlog.
+
+What a stable address would fix that nothing else does:
+- A job's completion is addressed to the requester's latest role at dispatch
+  (`lane_for`). If that role is released and claimed by someone else, the new
+  holder inherits the result while the requester lives on under another name.
+- A claim re-acquires every retained name together, so one contested old name
+  blocks an unrelated new one. Legacy writers can create that contest.
+- A reply sent to a role reaches whoever holds it next.
+
+What it would not fix: a move to the background is a fork with a new
+conversation id. A parent id, if Claude Code ever exposed one, would prove
+ancestry, not permission to hand over consumption.
+
+Why not now:
+- **Older processes can't read new addresses.** They consume by the recipient
+  names they hold, so mail written to a new address form is invisible to them
+  until they exit.
+- **A conversation id is not one reader.** Two windows can share a transcript.
+- **Mail that never transfers needs a rule for abandoned conversations.**
+  Today 19 lanes hold unread mail with no holder.
+- **Resolution must serialize with rebinding.** Alias resolution and insertion
+  would have to serialize against rebinding, assigning unbound backlog exactly
+  once.
+
+Mitigations short of a migration, proposed and not built:
+- **Report inherited backlog on a grant.** `sessions.claim` already returns
+  `inherited_unread`, and `register_session` drops it.
+- **Address new completions to the derived lane rather than the latest role.**
+  Every current reader holds that lane, and since #56 it outlives a relaunch.
+
+Revisit when any of these holds:
+- a role must be handed over while jobs are outstanding;
+- contested names or the claim cap block real claims;
+- recorded provenance shows misdelivery. This needs provenance first: messages
+  store neither whom they were resolved for nor who consumed them;
+- every writer that predates `agent_sessions` has been retired, the
+  precondition for any change of recipient format.
+
+Review record (gpt-6-astra), adopted:
+- **"The instance address already exists" was rejected.** A reproducible,
+  reclaimable name is not one.
+- **"Only the background move remains" was rejected.** It defined unresolved
+  recipient identity away.
+- **Two proposed triggers were dropped.** "Codex exposes its thread id" has
+  already happened, through `_meta`. A fork parent id proves only ancestry.
+
 ## Why read controls are explicit
 
 Earlier Codex calls inherited the host sandbox unless an option selected one.
