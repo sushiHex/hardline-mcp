@@ -115,7 +115,9 @@ def mail(target, recipient="codex:test"):
 @pytest.fixture
 def wake(app, target):
     with contextlib.closing(
-        wake_codex.CodexWake(app.endpoint, THREAD, target, timeout=1)
+        # Generous: no test waits it out, and a loaded CI worker can take more
+        # than a second to answer on loopback (1 s flaked under xdist).
+        wake_codex.CodexWake(app.endpoint, THREAD, target, timeout=10)
     ) as adapter:
         yield adapter
 

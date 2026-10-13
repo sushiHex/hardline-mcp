@@ -218,11 +218,9 @@ def test_auto_ack_does_not_touch_another_recipients_mail(tmp_path):
     assert len(lane_left) == 1
 
 
-def test_limit_is_clamped_so_the_bound_cannot_be_opted_out_of(tmp_path):
+def test_limit_is_clamped_so_the_bound_cannot_be_opted_out_of(tmp_path, flood):
     db = tmp_path / "mb.db"
-    now_fn = _clock(_T0)
-    for i in range(mailbox.MAX_INBOX_LIMIT + 25):
-        mailbox.send("codex", "hermes", f"m{i}", db_path=db, now_fn=now_fn)
+    flood(db, [f"m{i}" for i in range(mailbox.MAX_INBOX_LIMIT + 25)], now_fn=_clock(_T0))
 
     msgs, remaining = mailbox.inbox("hermes", limit=10_000, auto_ack=False, db_path=db)
     assert len(msgs) == mailbox.MAX_INBOX_LIMIT
@@ -230,10 +228,9 @@ def test_limit_is_clamped_so_the_bound_cannot_be_opted_out_of(tmp_path):
 
 
 @pytest.mark.parametrize("bad", [0, -5, "nonsense", None])
-def test_nonsense_limit_falls_back_to_a_bounded_read(tmp_path, bad):
+def test_nonsense_limit_falls_back_to_a_bounded_read(tmp_path, flood, bad):
     db = tmp_path / "mb.db"
-    for i in range(40):
-        mailbox.send("codex", "hermes", f"m{i}", db_path=db)
+    flood(db, [f"m{i}" for i in range(40)])
     msgs, _ = mailbox.inbox("hermes", limit=bad, auto_ack=False, db_path=db)
     assert 1 <= len(msgs) <= mailbox.MAX_INBOX_LIMIT
 
@@ -308,12 +305,11 @@ def test_a_laneless_process_cannot_consume_lane_qualified_mail(tmp_path):
     assert len(left) == 1
 
 
-def test_history_limit_is_clamped_and_negative_is_not_unlimited(tmp_path):
+def test_history_limit_is_clamped_and_negative_is_not_unlimited(tmp_path, flood):
     """SQLite reads a negative LIMIT as 'no limit', so history(limit=-1) was
     an unbounded read of whole bodies."""
     db = tmp_path / "mb.db"
-    for i in range(mailbox.MAX_HISTORY_LIMIT + 40):
-        mailbox.send("codex", "hermes", f"m{i}", db_path=db)
+    flood(db, [f"m{i}" for i in range(mailbox.MAX_HISTORY_LIMIT + 40)])
 
     assert len(mailbox.history(limit=10_000, db_path=db)) == mailbox.MAX_HISTORY_LIMIT
     assert len(mailbox.history(limit=-1, db_path=db)) == 1
@@ -366,15 +362,14 @@ def test_non_consuming_reads_do_not_take_the_writer_lock(tmp_path):
         blocker.close()
 
 
-def test_history_pages_backward_to_reach_a_consumed_message(tmp_path):
+def test_history_pages_backward_to_reach_a_consumed_message(tmp_path, flood):
     """``inbox`` consumes what it returns, so history is the recovery route -
     but newest-first plus a cap left anything older than one page
     unreachable, and you do not know the id to ``peek`` when the response
     itself was lost. Paging is what makes recovery possible."""
     db = tmp_path / "mb.db"
     total = mailbox.MAX_HISTORY_LIMIT + 60
-    for i in range(total):
-        mailbox.send("codex", "hermes", f"m{i}", db_path=db)
+    flood(db, [f"m{i}" for i in range(total)])
 
     # Consume everything, as the default read now does.
     while mailbox.inbox("hermes", limit=mailbox.MAX_INBOX_LIMIT, db_path=db)[1]:

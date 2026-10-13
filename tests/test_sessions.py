@@ -197,6 +197,7 @@ def test_only_no_such_process_reads_as_death():
     assert procid.open_failure_state(0) == procid.UNKNOWN, "unrecognised is not dead"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="the WAIT branch is the Windows probe")
 def test_only_a_signalled_handle_reads_as_an_exit(monkeypatch):
     """The other half of the same judgement, on the WAIT rather than the open.
 
@@ -206,8 +207,6 @@ def test_only_a_signalled_handle_reads_as_an_exit(monkeypatch):
     probe indistinguishable from a real answer, which is the whole reason
     UNKNOWN exists — and the open-failure test above cannot reach this branch.
     """
-    if os.name != "nt":
-        pytest.skip("the WAIT branch is the Windows probe")
 
     class _FakeKernel:
         def __init__(self, waited):
@@ -1625,12 +1624,15 @@ async def test_register_session_does_not_hold_a_shared_worker_slot(
     original = default.total_tokens
     default.total_tokens = 1
 
-    inside = threading.Event()
+    inside, release = threading.Event(), threading.Event()
     real_claim = sessions.claim
 
     def slow_claim(**kwargs):
+        # Held until list_agents has answered: a list_agents queued behind
+        # this claim never does, and the deadline below says so, however
+        # loaded the machine.
         inside.set()
-        time.sleep(1.0)
+        release.wait(30)
         return real_claim(**kwargs)
 
     monkeypatch.setattr(sessions, "claim", slow_claim)
@@ -1644,8 +1646,12 @@ async def test_register_session_does_not_hold_a_shared_worker_slot(
             while not inside.is_set():
                 await anyio.sleep(0.01)
 
-            with anyio.fail_after(0.8):
-                await server.list_agents()
+            try:
+                with anyio.move_on_after(10) as waited:
+                    await server.list_agents()
+            finally:
+                release.set()
+            assert not waited.cancelled_caught, "list_agents queued behind a claim"
     finally:
         default.total_tokens = original
 

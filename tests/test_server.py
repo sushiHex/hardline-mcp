@@ -1396,15 +1396,14 @@ async def test_whole_inbox_response_is_bounded_not_just_each_body(
 
 @pytest.mark.anyio
 async def test_a_maximal_batch_stays_within_the_advertised_worst_case(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, flood
 ):
     """A consuming read may not drop what it consumed, so at the per-body
     floor a maximal batch necessarily exceeds the target budget. That ceiling
     is real and advertised rather than hidden behind the target."""
     db = tmp_path / "mb.db"
     monkeypatch.setenv("HARDLINE_DB", str(db))
-    for i in range(server.mailbox.MAX_INBOX_LIMIT):
-        server.mailbox.send("codex", "hermes", f"{i}:" + "z" * 5_000, db_path=db)
+    flood(db, [f"{i}:" + "z" * 5_000 for i in range(server.mailbox.MAX_INBOX_LIMIT)])
 
     got = await server.inbox(agent="hermes", limit=server.mailbox.MAX_INBOX_LIMIT)
     total = sum(len(m["body"]) for m in got["messages"])
@@ -1441,12 +1440,11 @@ async def test_consuming_read_returns_a_recovery_cursor(monkeypatch, tmp_path):
 
 @pytest.mark.anyio
 async def test_history_caps_the_whole_page_and_hands_back_a_cursor(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, flood
 ):
     db = tmp_path / "mb.db"
     monkeypatch.setenv("HARDLINE_DB", str(db))
-    for i in range(60):
-        server.mailbox.send("codex", "hermes", f"{i}:" + "y" * 8_000, db_path=db)
+    flood(db, [f"{i}:" + "y" * 8_000 for i in range(60)])
 
     page = await server.history(agent="hermes", limit=50)
     total = sum(len(m["body"]) for m in page["messages"])

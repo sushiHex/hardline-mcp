@@ -43,6 +43,55 @@ _LANE_ENV = (
 )
 
 
+# CI sets HARDLINE_STRICT_SKIPS=1. There a skip must be declared - a skip or
+# skipif mark, as the opt-in live suites and platform-only tests have. A skip
+# decided at run time (a missing extra, a probe that stopped answering) fails
+# instead, since it would read exactly like a pass.
+_STRICT_SKIPS = os.environ.get("HARDLINE_STRICT_SKIPS") == "1"
+
+
+def _declared_skip(item) -> bool:
+    return any(
+        mark.name == "skip" or (mark.args and not isinstance(mark.args[0], str) and mark.args[0])
+        for mark in item.iter_markers()
+        if mark.name in ("skip", "skipif")
+    )
+
+
+_failed_skips: list[str] = []
+
+
+def _fail_skip(report, what: str) -> None:
+    reason = report.longrepr[2] if isinstance(report.longrepr, tuple) else report.longrepr
+    report.outcome = "failed"
+    report.longrepr = f"{what} under HARDLINE_STRICT_SKIPS: {str(reason).removeprefix('Skipped: ')}"
+    _failed_skips.append(report.nodeid)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """A report failed after the session counted it still fails the run."""
+    if _failed_skips and exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    report = (yield).get_result()
+    if (
+        _STRICT_SKIPS
+        and report.skipped
+        and not hasattr(report, "wasxfail")
+        and not _declared_skip(item)
+    ):
+        _fail_skip(report, "skipped at run time")
+
+
+@pytest.hookimpl(tryfirst=True)  # before the terminal reporter files it as a skip
+def pytest_collectreport(report):
+    if _STRICT_SKIPS and report.skipped:
+        _fail_skip(report, "module skipped")
+
+
 def pytest_unconfigure(config):
     """Retain isolation until workers stop, including on collection errors."""
     server = sys.modules.get("hardline_mcp.server")
@@ -59,6 +108,26 @@ def pytest_unconfigure(config):
         else:
             os.environ[name] = previous
     _store.cleanup()
+
+
+@pytest.fixture
+def flood():
+    """Store messages as ``mailbox.send`` does, in one transaction.
+
+    For the tests about volume - limits, clamps, paging - which need hundreds
+    of messages, not hundreds of commits: a commit each cost about 17 ms on
+    Windows, seconds per test.
+    """
+    import contextlib
+
+    def store(db, bodies, *, sender="codex", recipient="hermes", now_fn=mailbox._default_now):
+        with contextlib.closing(mailbox._connect(Path(db))) as conn, conn:
+            conn.executemany(
+                "INSERT INTO messages (sender, recipient, body, created_at) VALUES (?, ?, ?, ?)",
+                [(sender, recipient, body, mailbox._iso(now_fn())) for body in bodies],
+            )
+
+    return store
 
 
 @pytest.fixture(autouse=True)

@@ -2550,5 +2550,13 @@
     "tests": [
       "tests/test_adapters.py::test_the_preflight_probes_the_workdir_and_every_existing_denial"
     ]
+  },
+  "register-claims-wait-outside-the-worker-pool": {
+    "file": "hardline_mcp/server.py",
+    "before": "        _register_session_impl, label, agent, wait, limiter=_REGISTER_LIMITER\n",
+    "after": "        _register_session_impl, label, agent, wait\n",
+    "tests": [
+      "tests/test_sessions.py::test_register_session_does_not_hold_a_shared_worker_slot"
+    ]
   }
 }

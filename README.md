@@ -207,7 +207,7 @@ The client's MCP tool schema supplies arguments and defaults.
 
 ```sh
 python -m pip install -e ".[dev,codex-watch]"
-python -m pytest -q -rs
+python -m pytest -q -rs -n auto
 ```
 
 See [Repository Guidelines](AGENTS.md) for contributor conventions and

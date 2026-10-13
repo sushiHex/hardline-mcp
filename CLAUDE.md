@@ -14,14 +14,15 @@ follows so new code follows them too.
 python -m pip install -e ".[dev,codex-watch]"   # codex-watch un-skips the Codex wake tests
 python -m pytest tests/test_sessions.py -q      # one module
 python -m pytest "tests/test_identity.py::test_verified_owner_token_survives_later_probe_failure" -q
-python -m pytest -q -rs                         # full suite, as CI runs it
-python scripts/mutate.py [case ...]             # regression mutations (tests/mutations.json)
+python -m pytest -q -rs -n auto                 # full suite, as CI runs it
+python scripts/mutate.py [case ...] [--jobs N]  # regression mutations (tests/mutations.json)
 ```
 
-No linter or formatter is configured. CI (`.github/workflows/ci.yml`) runs
-Ubuntu + Windows on Python 3.10 and 3.13, then runs the mutation catalog on
-Ubuntu/3.13 only, then imports `hardline_mcp.server` to check that the tools
-register. Don't run `hardline-mcp` by hand to test it. It is a stdio server and
+No linter or formatter is configured. CI (`.github/workflows/ci.yml`) runs three
+jobs side by side: the suite on Ubuntu + Windows, Python 3.10 and 3.14, in
+xdist workers, then an import of `hardline_mcp.server` to check that the tools
+register; the mutation catalog once; and the live sandbox tests on Linux and
+macOS. Don't run `hardline-mcp` by hand to test it. It is a stdio server and
 blocks waiting for input.
 
 ## Module map
@@ -196,7 +197,16 @@ with a `NameError`, is reported as not caught.
 ### Watch the skip count
 
 Skips are silent under `-q`. CI runs with `-rs` for exactly this reason: a test
-that quietly stops running looks identical to a test that passes.
+that quietly stops running looks identical to a test that passes. CI also sets
+`HARDLINE_STRICT_SKIPS=1` (`tests/conftest.py`): a skip must be declared with a
+`skip` or `skipif` mark, as the opt-in live suites and platform-only tests are,
+and one decided at run time (`pytest.skip()` in a test, a module's
+`importorskip`) fails the run. So a new environment-dependent skip is a mark
+with its condition, not a `pytest.skip()` call.
+
+Real-time bounds in tests must be generous or replaced by an event: CI runs
+the suite in xdist workers on loaded runners, where a 1 s loopback exchange or
+a 0.2 s margin flakes.
 
 ## Gotchas that cost real time
 

@@ -10,10 +10,10 @@ without launching the agents themselves.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import sys
-import sysconfig
 from pathlib import Path
 
 import anyio
@@ -36,6 +36,17 @@ def _params(db_path) -> StdioServerParameters:
     )
 
 
+def _console_script() -> Path:
+    """The installed `hardline-mcp` console script, read from the
+    distribution's own record: a user install's scripts live outside
+    sysconfig's default scheme, so guessing the directory missed it."""
+    dist = importlib.metadata.distribution("hardline-mcp")
+    for file in dist.files or ():
+        if file.name in ("hardline-mcp", "hardline-mcp.exe"):
+            return Path(dist.locate_file(file)).resolve()
+    raise AssertionError("hardline-mcp is installed without its console script")
+
+
 def _tool_dict(result) -> dict:
     """Extract the dict a tool returned from a CallToolResult."""
     if result.structuredContent is not None:
@@ -53,8 +64,7 @@ async def test_headless_cross_instance_round_trip(tmp_path, entry):
     db = tmp_path / "shared.db"
     params = _params(db)
     if entry == "console":
-        executable = "hardline-mcp.exe" if os.name == "nt" else "hardline-mcp"
-        params.command = str(Path(sysconfig.get_path("scripts")) / executable)
+        params.command = str(_console_script())
         params.args = []
 
     with anyio.fail_after(60):

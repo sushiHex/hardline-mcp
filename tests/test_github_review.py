@@ -456,7 +456,7 @@ def test_a_child_that_never_reads_still_times_out():
     """The deadline must hold however much evidence is waiting to be written."""
     started = time.monotonic()
     out = adapters._run_cmd(
-        [sys.executable, "-c", "import time; time.sleep(120)"], stdin_text=BIG, timeout_s=3
+        [sys.executable, "-c", "import time; time.sleep(120)"], stdin_text=BIG, timeout_s=1
     )
     assert out.get("timed_out") is True, out
     assert time.monotonic() - started < 60

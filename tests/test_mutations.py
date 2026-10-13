@@ -2,7 +2,32 @@
 
 import pytest
 
-from scripts.mutate import check
+from scripts.mutate import _baseline, _selects, check
+
+
+def test_a_selector_names_a_test_or_one_of_its_parameters():
+    """The one baseline is read back per case through these matches: a near
+    name or another file must not count as the case's test having run."""
+    key = ("tests.test_a", "test_x[1]")
+    assert _selects("tests/test_a.py::test_x", key)
+    assert _selects("tests/test_a.py::test_x[1]", key)
+    assert not _selects("tests/test_a.py::test_x[2]", key)
+    assert not _selects("tests/test_a.py::test_x", ("tests.test_a", "test_xy"))
+    assert not _selects("tests/test_b.py::test_x", key)
+    assert not _selects("tests/test_a.py", key)
+
+
+def test_one_case_s_broken_baseline_does_not_sink_another(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_sample.py").write_text(
+        "def test_ok():\n    pass\ndef test_bad():\n    assert False\n", encoding="utf-8"
+    )
+    keys, errors = _baseline(tmp_path, {
+        "fine": {"tests": ["tests/test_sample.py::test_ok"]},
+        "broken": {"tests": ["tests/test_sample.py::test_bad"]},
+    })
+    assert keys == {"fine": {("tests.test_sample", "test_ok")}}
+    assert "did not pass" in errors["broken"]
 
 
 @pytest.mark.parametrize(
