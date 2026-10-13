@@ -16,7 +16,6 @@ and watcher command. Check `code_revision` when confirming an update is loaded.
 | `HARDLINE_CLAUDE_CMD` | Override the Claude executable path. |
 | `HARDLINE_CODEX_CMD` | Override the Codex executable path. |
 | `HARDLINE_HERMES_CMD` | Override the Hermes executable path. |
-| `HARDLINE_CODEX_KEEP_ENV` | Comma-separated names of credential variables a spawned Codex keeps for its own login beyond the built-in `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY` and `CODEX_API_KEY`, such as a custom model provider's `env_key`. See [what a Codex reviewer can read](#what-a-codex-reviewer-can-read). |
 | `HARDLINE_CODEX_WINDOWS_SANDBOX` | Windows only. `mxc` (default), `elevated`, `unelevated`, or `inherit` (pass nothing; Codex's own configuration decides, which in advisory mode excludes the host's `config.toml`). See [the Windows sandbox](#codex-windows-sandbox). |
 | `HARDLINE_AGENT` | Declare `claude`, `codex`, or `hermes` when needed. |
 | `HARDLINE_AGENT_LABEL` | Select a fixed session role; see [ownership and reconnects](messaging.md#name-a-session). |
@@ -110,30 +109,29 @@ of `~/.claude/skills` reads its workdir and nothing else under `~/.claude`.
 On Linux, bubblewrap leaves a read-only workdir there unreadable, so such a
 call is refused. A denied directory itself stays denied as a workdir.
 
-**Nor does a command get the usual credentials.** A credential-named variable
-is one whose name contains `KEY`, `SECRET` or `TOKEN`, in any case:
-`GH_TOKEN`, `GITHUB_TOKEN`, `OPENAI_API_KEY`, `AWS_SECRET_ACCESS_KEY`. Two
-layers keep them away, under every sandbox choice:
-- **Codex itself is started without them**, except those its own login reads:
-  `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `CODEX_API_KEY`, and any you name
-  in `HARDLINE_CODEX_KEEP_ENV`, such as a custom model provider's `env_key`.
-  This layer is needed because on macOS a command can read Codex's own
-  environment back through `sysctl(KERN_PROCARGS2)`, what `ps -E` uses, which
-  Seatbelt allows (measured in CI). There, the login key Codex keeps stays
-  readable. On Linux, `/proc/*/environ` returned nothing of Codex's (measured,
-  with bubblewrap's fresh `/proc`, which it skips where the mount fails).
-  Under MXC a command sees only its own job's processes (measured).
-- **Its commands get none at all.** Every spawned Codex runs with
-  `-c shell_environment_policy.ignore_default_excludes=false`, which turns on
-  Codex's own default excludes (Codex leaves them off). They drop every
-  credential-named variable from each command's environment, and from the
-  exports Codex captures from your shell's rc files.
-
-Both go by name. `TOKENIZERS_PARALLELISM` goes too, and a command that needs
-a token, such as an `npm install` with `NPM_TOKEN` under `write=True`, runs
-without it. The second is one scalar on purpose: keyed `filters` would discard
-a legacy `exclude` or `include_only` of yours, and legacy arrays replace
-wholesale.
+**Nor does a command inherit the usual credentials.** Every spawned Codex,
+under every sandbox choice, runs with
+`-c shell_environment_policy.ignore_default_excludes=false`. That turns on
+Codex's own default excludes, which Codex leaves off: every variable whose
+name contains `KEY`, `SECRET` or `TOKEN`, in any case, is dropped from each
+command's environment, and from the exports Codex captures from your shell's
+rc files. That covers `GH_TOKEN`, `GITHUB_TOKEN`, `OPENAI_API_KEY` and
+`AWS_SECRET_ACCESS_KEY`. The Codex process keeps them, so its own login works.
+- **Other processes' environments are out of reach on Linux and Windows, not
+  macOS** (all measured). On Linux, bubblewrap gives commands their own pid
+  namespace and `/proc`, so `/proc/*/environ` shows nothing of Codex's or of
+  your other processes'. It skips the fresh `/proc` where the mount fails.
+  Under MXC a command sees only its own job's processes. On macOS a command
+  can read the starting environment of any process you own through
+  `sysctl(KERN_PROCARGS2)`, what `ps -E` uses: Codex's, hardline's, your
+  shell's. So there a credential in your environment is not kept from a
+  reviewer. Starting Codex without them would not help, since your other
+  processes hold the same ones.
+- **It goes by name.** `TOKENIZERS_PARALLELISM` goes too, and a command that
+  needs a token, such as an `npm install` with `NPM_TOKEN` under `write=True`,
+  runs without it.
+- **It's one scalar on purpose.** Keyed `filters` would discard a legacy
+  `exclude` or `include_only` of yours, and legacy arrays replace wholesale.
 
 **The preflight checks the policy that holds, not the one passed.** Before
 every call, hardline's own Python runs once through `codex sandbox` under the
@@ -170,8 +168,9 @@ What the denial does not cover:
   `PGPASSWORD` or a `DATABASE_URL` with a password in it. So does anything a
   `shell_environment_policy.set` of yours or your administrator's adds, since
   it is applied after the excludes. A shell's startup script can set one
-  again, such as a PowerShell profile, which Codex's login shells run. On
-  macOS, the login key Codex keeps can be read from Codex's own process.
+  again, such as a PowerShell profile, which Codex's login shells run. Hooks
+  in your Codex configuration run with Codex's whole environment. On macOS,
+  any process's starting environment is readable (above).
 - **Credentials in files outside the list.** `~/.npmrc`, `~/.netrc`,
   `~/.aws` and rc files that export a token stay readable.
 - **Paths that appear mid-call.** A secret created after the call starts may

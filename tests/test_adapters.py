@@ -1009,28 +1009,6 @@ def test_only_mxc_is_preflighted(monkeypatch, windows, sandbox_probe, value):
     assert _profile(argv) is None
 
 
-def test_codex_itself_keeps_only_its_own_login_credentials(monkeypatch, secret_home, sandbox_probe):
-    """On macOS a command reads Codex's own environment back through
-    sysctl(KERN_PROCARGS2), so a credential Codex holds is one its commands can
-    reach: it is started with its login's alone, and the preflight with the
-    same environment."""
-    monkeypatch.setenv("GH_TOKEN", "dummy-gh")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "dummy-aws")
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai")
-    monkeypatch.setenv("CODEX_ACCESS_TOKEN", "dummy-codex")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-router")
-    monkeypatch.setenv("HARDLINE_CODEX_KEEP_ENV", " openrouter_api_key ")
-    monkeypatch.setenv("HARDLINE_PLAIN_SETTING", "plain")
-    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
-    adapters.ask_codex("summarize")
-    for env in [calls[0]["kwargs"]["env"], *(probe["env"] for probe in sandbox_probe.calls)]:
-        assert "GH_TOKEN" not in env and "AWS_SECRET_ACCESS_KEY" not in env
-        assert env.get("OPENAI_API_KEY") == "dummy-openai"  # its own namespace
-        assert env.get("CODEX_ACCESS_TOKEN") == "dummy-codex"
-        assert env.get("OPENROUTER_API_KEY") == "dummy-router"  # named to keep
-        assert env.get("HARDLINE_PLAIN_SETTING") == "plain"
-
-
 @pytest.mark.parametrize("value", ["mxc", "elevated", "unelevated", "inherit", "posix"])
 def test_every_sandbox_keeps_credentials_out_of_commands(
     monkeypatch, windows, secret_home, sandbox_probe, value
@@ -1137,9 +1115,10 @@ def test_the_preflight_probes_the_workdir_and_every_existing_denial(
         adapters, "_run_cmd",
         lambda argv, env, **kwargs: seen.append(argv) or envs.append(env) or {"ok": True},
     )
-    # As the call runs it: Codex without the token, which a `set` could restore.
-    _real_sandbox_started("codex", ["-c", "x=1"], adapters._codex_own_env(dict(os.environ)),
-                          str(tmp_path))
+    # Codex given an environment without one of hardline's credentials, which
+    # a `set` could still put back: it is withheld too.
+    codex_env = {k: v for k, v in os.environ.items() if k != "HARDLINE_TEST_GH_TOKEN"}
+    _real_sandbox_started("codex", ["-c", "x=1"], codex_env, str(tmp_path))
     (argv,) = seen
     assert argv[:9] == [
         "codex", "sandbox", "-c", "x=1", "--",

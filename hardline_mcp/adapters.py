@@ -339,40 +339,19 @@ def _codex_unreadable(env: dict[str, str]) -> list[Path]:
 # Credentials in hardline's environment - GH_TOKEN, API keys - stay out of a
 # reviewer's commands through Codex's own default excludes: names matching
 # *KEY*, *SECRET* or *TOKEN*, ignoring case, which Codex leaves off unless
-# asked (ignore_default_excludes defaults to true). Codex itself keeps only its
-# login's (`_codex_own_env`); this keeps those out of its commands too, and
-# credential-named exports in its shell snapshot. The filter goes by name, and
+# asked (ignore_default_excludes defaults to true). The Codex process keeps its
+# environment, so its own auth works; what its commands inherit is filtered,
+# credential-named exports in its shell snapshot included. Codex itself is not
+# started without them: on macOS a command reads the starting environment of
+# any of the user's processes through sysctl(KERN_PROCARGS2) (measured in CI),
+# so a credential in the user's environment is out of reach only where that
+# is sealed (Linux's pid namespace, MXC's job). The filter goes by name, and
 # a `set` entry is added after it. A scalar on purpose: keyed `filters` would
 # discard a legacy `exclude` or `include_only` of the user's, and legacy
 # arrays replace wholesale. A legacy managed config outranks `-c`; the
 # preflight's canary catches one that turns the excludes back off.
 _CODEX_NO_SECRET_ENV = ["-c", "shell_environment_policy.ignore_default_excludes=false"]
 _CREDENTIAL_NAME = re.compile("KEY|SECRET|TOKEN", re.IGNORECASE)  # Codex's default excludes
-
-
-_CODEX_OWN_PREFIXES = ("CODEX_", "OPENAI_", "AZURE_OPENAI_")
-
-
-def _codex_own_env(env: dict) -> dict:
-    """What a spawned Codex itself is started with: ``env`` without other
-    tools' credential-named variables. It keeps its own namespace - its login
-    reads CODEX_ACCESS_TOKEN, CODEX_API_KEY, OPENAI_API_KEY,
-    OPENAI_IDENTITY_TOKEN_FILE and token-URL overrides - and any
-    ``HARDLINE_CODEX_KEEP_ENV`` names, such as a custom model provider's
-    ``env_key``.
-
-    Filtering its commands' environment is not enough on its own: on macOS a
-    command reads Codex's own environment back through
-    sysctl(KERN_PROCARGS2) (measured in CI). A credential Codex merely holds
-    is one its commands can reach.
-    """
-    extra = os.environ.get("HARDLINE_CODEX_KEEP_ENV", "").split(",")
-    keep = {name.strip().upper() for name in extra if name.strip()}
-    return {
-        k: v for k, v in env.items()
-        if not _CREDENTIAL_NAME.search(k) or k.upper().startswith(_CODEX_OWN_PREFIXES)
-        or k.upper() in keep
-    }
 
 
 def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) -> list[str]:
@@ -2022,7 +2001,6 @@ def _codex_catalog(mode: str, workdir: str | None) -> tuple[list | None, str | N
         cwd = str(Path(neutral_root) / "workspace")
     else:
         env, cwd = dict(os.environ), workdir
-    env = _codex_own_env(env)  # as the call will authenticate
     for name in _AGENT_CHILD_STRIPPED_ENV:
         env.pop(name, None)
     try:
@@ -2610,7 +2588,7 @@ def _ask_codex_structured(
             "-c",
             "developer_instructions=" + _toml_basic_string("\n\n".join(instructions)),
         ]
-    child_env = _codex_own_env({**(os.environ if child_env is None else child_env), **sandbox.env})
+    child_env = {**(os.environ if child_env is None else child_env), **sandbox.env}
     try:
         try:
             pin = _codex_pin(sandbox, write, child_env, run_cwd)

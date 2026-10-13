@@ -63,8 +63,8 @@ def home(monkeypatch, tmp_path):
 
 
 def _codex_env():
-    """The environment `ask_codex` starts Codex itself with."""
-    return adapters._codex_own_env(dict(os.environ))
+    """The environment `ask_codex` starts Codex itself with: hardline's own."""
+    return dict(os.environ)
 
 
 def _pinned(cwd, write=False):
@@ -121,12 +121,11 @@ def _command(cwd, code):
 
 
 def test_the_pin_keeps_credentials_out_of_commands(home, monkeypatch):
-    """A login key Codex keeps for itself still never reaches its commands."""
-    monkeypatch.setenv("OPENAI_API_KEY", "DUMMY-OPENAI-KEY")
+    monkeypatch.setenv("GH_TOKEN", "DUMMY-GH-TOKEN")
     monkeypatch.setenv("HARDLINE_LIVE_PLAIN", "PLAIN-TEXT")
-    out = _command(home / "project", "import os; print(os.environ.get('OPENAI_API_KEY'), "
+    out = _command(home / "project", "import os; print(os.environ.get('GH_TOKEN'), "
                                      "os.environ.get('HARDLINE_LIVE_PLAIN'))")
-    assert "DUMMY-OPENAI-KEY" not in out and "PLAIN-TEXT" in out, out
+    assert "DUMMY-GH-TOKEN" not in out and "PLAIN-TEXT" in out, out
 
 
 # Run inside the sandbox: whose environments can a command read, and where
@@ -164,11 +163,14 @@ print(json.dumps({
 
 @pytest.mark.skipif(sys.platform == "win32", reason="no /proc or KERN_PROCARGS2; measured on a "
                     "Windows 11 host: a command sees only its own job's processes")
+@pytest.mark.xfail(sys.platform == "darwin", strict=True, reason=(
+    "measured: under Codex's Seatbelt profile a command reads the starting environment of any "
+    "of the user's processes through KERN_PROCARGS2; strict, so a fix upstream shows up here"))
 def test_a_command_cannot_read_a_credential_out_of_another_process(home, monkeypatch):
-    """Codex is started without other tools' credentials because a macOS
-    command can read its environment back; that is only a boundary if the
-    user's other processes, which hold them, are out of reach too. The route
-    must find the command's own variable, or "sealed" means "looked nowhere"."""
+    """Filtering commands' environments keeps credentials from them only if no
+    other process's environment is in reach: Codex's own, which keeps them,
+    or a decoy of the user's. The route must find the command's own
+    variable, or "sealed" means "looked nowhere"."""
     monkeypatch.setenv("GH_TOKEN", "DUMMY-GH-TOKEN")
     monkeypatch.setenv("HARDLINE_LIVE_PLAIN", "PLAIN-ROUTE")
     decoy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
