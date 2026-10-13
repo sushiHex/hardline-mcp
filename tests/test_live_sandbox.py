@@ -61,22 +61,27 @@ def home(monkeypatch, tmp_path):
     return home
 
 
+def _codex_env():
+    """The environment `ask_codex` starts Codex itself with."""
+    return adapters._codex_own_env(dict(os.environ))
+
+
 def _pinned(cwd, write=False):
     """The overrides `ask_codex` would pass for a call in ``cwd``."""
     sandbox = adapters._codex_sandbox()
     assert sandbox.profile, "no permission profile on this platform"
     exe = adapters._prefix_for("codex")[0]
-    overrides = sandbox.overrides + adapters._codex_pin(sandbox, write, dict(os.environ), str(cwd))
+    overrides = sandbox.overrides + adapters._codex_pin(sandbox, write, _codex_env(), str(cwd))
     return exe, overrides
 
 
 def _run(cwd, *paths, write=False):
     exe, overrides = _pinned(cwd, write)
-    started = _started(exe, overrides, dict(os.environ), str(cwd))
+    started = _started(exe, overrides, _codex_env(), str(cwd))
     assert started.get("ok"), started
     out = subprocess.run(
         [exe, "sandbox", *overrides, "--", sys.executable, "-I", "-c", _READ, *map(str, paths)],
-        cwd=cwd, env=dict(os.environ), capture_output=True, text=True,
+        cwd=cwd, env=_codex_env(), capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=60,
     )
     return out.stdout + out.stderr
@@ -100,7 +105,7 @@ def test_the_preflight_catches_a_policy_without_the_denials(home):
     leave: the sandbox, but none of the denials."""
     sandbox = adapters._codex_sandbox()
     exe = adapters._prefix_for("codex")[0]
-    started = _started(exe, sandbox.overrides, dict(os.environ), str(home / "project"))
+    started = _started(exe, sandbox.overrides, _codex_env(), str(home / "project"))
     assert not started.get("ok") and "denied paths still open" in started["error"], started
 
 
@@ -108,27 +113,28 @@ def _command(cwd, code):
     exe, overrides = _pinned(cwd)
     out = subprocess.run(
         [exe, "sandbox", *overrides, "--", sys.executable, "-I", "-c", code],
-        cwd=cwd, env=dict(os.environ), capture_output=True, text=True,
+        cwd=cwd, env=_codex_env(), capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=60,
     )
     return out.stdout + out.stderr
 
 
 def test_the_pin_keeps_credentials_out_of_commands(home, monkeypatch):
-    monkeypatch.setenv("GH_TOKEN", "DUMMY-GH-TOKEN")
+    """A login key Codex keeps for itself still never reaches its commands."""
+    monkeypatch.setenv("OPENAI_API_KEY", "DUMMY-OPENAI-KEY")
     monkeypatch.setenv("HARDLINE_LIVE_PLAIN", "PLAIN-TEXT")
-    out = _command(home / "project", "import os; print(os.environ.get('GH_TOKEN'), "
+    out = _command(home / "project", "import os; print(os.environ.get('OPENAI_API_KEY'), "
                                      "os.environ.get('HARDLINE_LIVE_PLAIN'))")
-    assert "DUMMY-GH-TOKEN" not in out and "PLAIN-TEXT" in out, out
+    assert "DUMMY-OPENAI-KEY" not in out and "PLAIN-TEXT" in out, out
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="no /proc or KERN_PROCARGS2; measured on a "
                     "Windows 11 host: a command sees only its own job's processes")
-def test_a_command_cannot_read_codex_s_own_environment(home, monkeypatch):
-    """Codex keeps the credentials its commands lose; that is only a boundary
-    if no command can read them back out of Codex's process: on Linux through
+def test_a_command_cannot_read_another_tool_s_credential_from_codex(home, monkeypatch):
+    """A command that reads Codex's own environment back - on Linux through
     /proc/<pid>/environ, on macOS through sysctl(KERN_PROCARGS2), what `ps -E`
-    uses, asked of this process and its parent. The same route must find the
+    uses, which Seatbelt allows - finds no other tool's credential there,
+    because Codex is started without them. The same route must find the
     command's own variable, or "sealed" means "looked nowhere". Neither value
     is in the command line, which KERN_PROCARGS2 also returns: the token is
     spelled backwards, and the plain value is read at run time."""
@@ -164,7 +170,7 @@ def test_the_preflight_catches_a_policy_that_passes_credentials(home):
     """What a layer turning Codex's default excludes back off would leave."""
     exe, overrides = _pinned(home / "project")
     at = overrides.index("shell_environment_policy.ignore_default_excludes=false")
-    started = _started(exe, overrides[:at - 1] + overrides[at + 1:], dict(os.environ),
+    started = _started(exe, overrides[:at - 1] + overrides[at + 1:], _codex_env(),
                        str(home / "project"))
     assert not started.get("ok") and "still reach its commands" in started["error"], started
 
@@ -176,7 +182,7 @@ def test_the_read_only_pin_refuses_a_write(home):
         [exe, "sandbox", *overrides, "--", sys.executable, "-I", "-c",
          "try:\n    open('written.txt', 'w').write('x')\n    print('WROTE')\n"
          "except OSError:\n    print('REFUSED')\n"],
-        cwd=project, env=dict(os.environ), capture_output=True, text=True,
+        cwd=project, env=_codex_env(), capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=60,
     )
     assert "REFUSED" in out.stdout, out.stdout + out.stderr  # it ran, and was refused
@@ -190,7 +196,7 @@ def test_a_workdir_inside_a_denied_directory(home):
     skills = home / ".claude" / "skills"
     if sys.platform.startswith("linux"):
         exe, overrides = _pinned(skills)
-        started = _started(exe, overrides, dict(os.environ), str(skills))
+        started = _started(exe, overrides, _codex_env(), str(skills))
         assert not started.get("ok") and "cannot read the workdir" in started["error"], started
         return
     out = _run(skills, skills / "SKILL.md", home / ".claude" / ".credentials.json")

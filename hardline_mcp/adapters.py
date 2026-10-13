@@ -339,14 +339,31 @@ def _codex_unreadable(env: dict[str, str]) -> list[Path]:
 # Credentials in hardline's environment - GH_TOKEN, API keys - stay out of a
 # reviewer's commands through Codex's own default excludes: names matching
 # *KEY*, *SECRET* or *TOKEN*, ignoring case, which Codex leaves off unless
-# asked (ignore_default_excludes defaults to true). The Codex process keeps its
-# environment, so its own auth works; what its commands inherit is filtered,
-# rc-file exports in its shell snapshot included. The filter goes by name, and
+# asked (ignore_default_excludes defaults to true). Codex itself keeps only its
+# login's (`_codex_own_env`); this keeps those out of its commands too, and
+# credential-named exports in its shell snapshot. The filter goes by name, and
 # a `set` entry is added after it. A scalar on purpose: keyed `filters` would
 # discard a legacy `exclude` or `include_only` of the user's, and legacy
 # arrays replace wholesale. A legacy managed config outranks `-c`; the
 # preflight's canary catches one that turns the excludes back off.
 _CODEX_NO_SECRET_ENV = ["-c", "shell_environment_policy.ignore_default_excludes=false"]
+_CREDENTIAL_NAME = re.compile("KEY|SECRET|TOKEN", re.IGNORECASE)  # Codex's default excludes
+
+
+def _codex_own_env(env: dict) -> dict:
+    """What a spawned Codex itself is started with: ``env`` without
+    credential-named variables, but those its own login reads
+    (``_CODEX_AUTH_OVERRIDE_ENV``) and any ``HARDLINE_CODEX_KEEP_ENV`` names,
+    such as a custom model provider's ``env_key``.
+
+    Filtering its commands' environment is not enough on its own: on macOS a
+    command reads Codex's own environment back through
+    sysctl(KERN_PROCARGS2), which Seatbelt allows (measured in CI). A
+    credential Codex merely holds is one its commands can reach.
+    """
+    extra = os.environ.get("HARDLINE_CODEX_KEEP_ENV", "").split(",")
+    keep = _CODEX_AUTH_OVERRIDE_ENV | {name.strip().upper() for name in extra if name.strip()}
+    return {k: v for k, v in env.items() if k.upper() in keep or not _CREDENTIAL_NAME.search(k)}
 
 
 def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) -> list[str]:
@@ -405,7 +422,6 @@ def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) 
 # among them, so there is always one. Named in its arguments, not its
 # environment, which the policy under test filters. Opening reads nothing.
 _CODEX_ENV_CANARY = "HARDLINE_SANDBOX_CANARY_TOKEN"
-_CREDENTIAL_NAME = re.compile("KEY|SECRET|TOKEN", re.IGNORECASE)  # Codex's default excludes
 _CODEX_POLICY_PROBE = """\
 import os, sys
 def opens(path):
@@ -2583,7 +2599,7 @@ def _ask_codex_structured(
             "-c",
             "developer_instructions=" + _toml_basic_string("\n\n".join(instructions)),
         ]
-    child_env = {**(os.environ if child_env is None else child_env), **sandbox.env}
+    child_env = _codex_own_env({**(os.environ if child_env is None else child_env), **sandbox.env})
     try:
         try:
             pin = _codex_pin(sandbox, write, child_env, run_cwd)

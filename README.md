@@ -137,10 +137,10 @@ A spawned Codex is read-only unless `write=True`, and gets no MCP servers or app
 connectors. Its sandbox (bubblewrap on Linux, Seatbelt on macOS, MXC on
 Windows) is pinned through a permission profile that also keeps its commands
 out of your secrets: Claude Code's and Codex's credentials and transcripts,
-gh's token, Hardline's mailbox, and `~/.ssh`. Its commands also don't inherit
-variables named like credentials (`GH_TOKEN`, `OPENAI_API_KEY`). The denial
-holds for that one reviewer and leaves your own Codex sessions, full access
-included, untouched; see
+gh's token, Hardline's mailbox, and `~/.ssh`. Variables named like
+credentials (`GH_TOKEN`, `AWS_SECRET_ACCESS_KEY`) reach neither Codex, beyond
+its own login key, nor its commands. The denial holds for that one reviewer
+and leaves your own Codex sessions, full access included, untouched; see
 [what a Codex reviewer can read](docs/configuration.md#what-a-codex-reviewer-can-read).
 
 Writes require both `write=True` and `HARDLINE_ALLOW_WRITE=1` in the MCP server's
