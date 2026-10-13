@@ -118,9 +118,10 @@ command's environment, and from the exports Codex captures from your shell's
 rc files. That covers `GH_TOKEN`,
 `GITHUB_TOKEN`, `OPENAI_API_KEY` and `AWS_SECRET_ACCESS_KEY`.
 - **The Codex process keeps them**, so its own API-key login still works. A
-  command can't read them back out of it, measured: on Linux and macOS,
-  `/proc/*/environ` and `ps -E` find a command's own variables but nothing of
-  Codex's, and under MXC a command sees only its own job's processes. The
+  command can't read them back out of it, measured: Linux's
+  `/proc/*/environ` and macOS's `sysctl(KERN_PROCARGS2)` (what `ps -E` uses)
+  return a command's own variables but nothing of Codex's, and under MXC a
+  command sees only its own job's processes. The
   Linux result relies on bubblewrap mounting a fresh `/proc`, which it skips
   where the mount fails.
 - **It goes by name.** `TOKENIZERS_PARALLELISM` goes too, and a command that

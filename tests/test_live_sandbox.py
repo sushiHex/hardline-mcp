@@ -122,18 +122,20 @@ def test_the_pin_keeps_credentials_out_of_commands(home, monkeypatch):
     assert "DUMMY-GH-TOKEN" not in out and "PLAIN-TEXT" in out, out
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="no /proc or ps -E; measured on a Windows 11 "
-                    "host: a command sees only its own job's processes")
+@pytest.mark.skipif(sys.platform == "win32", reason="no /proc or KERN_PROCARGS2; measured on a "
+                    "Windows 11 host: a command sees only its own job's processes")
 def test_a_command_cannot_read_codex_s_own_environment(home, monkeypatch):
     """Codex keeps the credentials its commands lose; that is only a boundary
-    if no command can read them back out of Codex's process. The same routes
-    must find the command's own variable, or "sealed" means "looked nowhere".
-    Neither value appears in the command line, which `ps` also shows: the
-    token is spelled backwards, and the plain value is read at run time."""
+    if no command can read them back out of Codex's process: on Linux through
+    /proc/<pid>/environ, on macOS through sysctl(KERN_PROCARGS2), what `ps -E`
+    uses, asked of this process and its parent. The same route must find the
+    command's own variable, or "sealed" means "looked nowhere". Neither value
+    is in the command line, which KERN_PROCARGS2 also returns: the token is
+    spelled backwards, and the plain value is read at run time."""
     monkeypatch.setenv("GH_TOKEN", "DUMMY-GH-TOKEN")
     monkeypatch.setenv("HARDLINE_LIVE_PLAIN", "PLAIN-ROUTE")
     out = _command(home / "project", (
-        "import glob, os, subprocess\n"
+        "import ctypes, ctypes.util, glob, os, sys\n"
         "token, plain = 'NEKOT-HG-YMMUD'[::-1], os.environ['HARDLINE_LIVE_PLAIN']\n"
         "seen = []\n"
         "for path in glob.glob('/proc/[0-9]*/environ'):\n"
@@ -141,11 +143,14 @@ def test_a_command_cannot_read_codex_s_own_environment(home, monkeypatch):
         "        seen.append(open(path, 'rb').read().decode('latin-1'))\n"
         "    except OSError:\n"
         "        pass\n"
-        "try:\n"
-        "    seen.append(subprocess.run(['ps', '-E', '-ww', '-A', '-o', 'command='],\n"
-        "                               capture_output=True, text=True).stdout)\n"
-        "except OSError:\n"
-        "    pass\n"
+        "if sys.platform == 'darwin':\n"
+        "    libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n"
+        "    for pid in {os.getpid(), os.getppid()}:\n"
+        "        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2\n"
+        "        size = ctypes.c_size_t(1 << 20)\n"
+        "        buf = ctypes.create_string_buffer(size.value)\n"
+        "        if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0:\n"
+        "            seen.append(buf.raw[:size.value].decode('latin-1'))\n"
         "print('LEAKED' if any(token in s for s in seen) else 'SEALED',\n"
         "      'route' if any(plain in s for s in seen) else 'no-route')\n"
     ))
