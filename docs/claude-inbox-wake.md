@@ -22,6 +22,8 @@ the implementation. Both records are at the end.
 | Wire format | `{"type":"auth","token":...}` then `{"type":"user","from":...,"message":{"role":"user","content":...}}`, one JSON object per line. The auth line is documented; the user line comes from the binary's own debug recipe and handler. |
 | What the inbox answers | A wrong token: the connection is closed, nothing delivered. The right token: nothing at all; the message is taken as soon as its line arrives, the pipe left open for more. A pending synchronous read on a Windows pipe blocks `close`, so the writer never reads. `priority: "later"` waited for the turn to end; the default `next` is used. |
 | How the model sees it | "Another Claude session sent a message: ...", with guidance to treat it as a teammate's request within the session's own permissions. |
+| A busy session (2026-10-13) | 2.1.295, interactive: mail sent 5 s into a 60 s tool call; the notice arrived when that call returned, before the next one, and its receipt came back `accepted`. The running call was not interrupted. 2.1.296, a `claude -p` worker mid-command: the same. `-p` binds an inbox and writes a session record too, so hardline proves it the worker's own (`transport: "inbox"`). |
+| `crossSessionInbound` (2026-10-13, 2.1.296, `-p` workers, `--settings`) | Unset: delivered and receipted. `hold` and `refuse`: hardline's post succeeded (`last_push_at` recorded), the worker saw nothing, no receipt came back, so delivery turns `unreceipted` after the grace. In an interactive session the docs say `hold` shows the user a notice and releases it once `accept` applies; that was not observed. |
 | Host limits (docs) | Per-sender rate limit, identical repeats dropped, at most 50 queued. One notice at a time, each with its own nonce, stays inside all three. |
 
 ## Design
@@ -125,17 +127,19 @@ post real notices into it.
   constant notice; the session reads the mail and tells the user, as asked.
 - **Claim prose is dropped.** A lane granted with no unread mail wakes nothing;
   `register_session(wait=true)` already returns on the grant.
-- **`crossSessionInbound` `hold` or `refuse`** blocks delivery silently: the
+- **`crossSessionInbound` `hold` or `refuse`** blocks delivery (measured): the
   write succeeds, the notice stays outstanding, delivery reads `unreceipted`.
-  The Monitor is the fallback.
+  `refuse` is silent; `hold` shows the user a notice and delivers it if
+  `accept` later applies (docs). The Monitor is the fallback.
 - **A conversation moved to the background.** Its old host keeps the old inbox
   and, by session id, the lane, so its notices go to whatever the old host
   serves next. To be checked live.
 - **A wake stalls at a permission prompt** unless `inbox` and `ack` are
   allowlisted; the notice has then spent its turn.
-- **A busy session.** Claude Code's docs say it reads the message between tool
-  calls. If instead it waited for the turn to end, a long autonomous turn
-  would read `unreceipted` after the 10-minute grace with nothing broken.
+- **A busy session** reads the notice between tool calls (measured), so a
+  long autonomous turn is told at its next call boundary. A single call
+  longer than the 10-minute grace reads `unreceipted` meanwhile, with
+  nothing broken.
 - **The host's per-sender rate limit.** A session reading promptly turns each
   receipt into the next notice within seconds; a flood of mail could trip the
   limit, which drops silently and reads as `unreceipted`.
@@ -159,9 +163,9 @@ post real notices into it.
 - Spawned agents never inherit either variable.
 - The Codex suite runs unchanged against the extracted core.
 
-Live, still to do: an idle session woken through hardline itself; a busy
-session; the old host after a move to the background; a session with
-`crossSessionInbound` set; Linux.
+Live, still to do: the old host after a move to the background; Linux and
+macOS. Done: an idle session woken through hardline itself (2026-10-08), a
+busy one and `crossSessionInbound` (2026-10-13, Evidence above).
 
 ## Alternatives considered (2026-10-07/08)
 

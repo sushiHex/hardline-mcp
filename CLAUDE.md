@@ -240,6 +240,7 @@ is worth revisiting before the model is built on further.
 Session-to-session mail has been watched working on the real store: Claude to
 Codex through a claimed lane with queue-wake, and Claude to Claude through
 inbox wake in a session launched with no flag (it woke idle, read, acked and
-receipted). Still unobserved: inbox wake in a busy session, in the old host
-after a conversation moves to the background, under a `crossSessionInbound`
-setting, and on Linux or macOS. See `docs/claude-inbox-wake.md`.
+receipted), in a busy one (read between tool calls), and in a `claude -p`
+worker; `crossSessionInbound` `hold` and `refuse` block it, as documented.
+Still unobserved: inbox wake in the old host after a conversation moves to
+the background, and on Linux or macOS. See `docs/claude-inbox-wake.md`.

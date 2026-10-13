@@ -1,6 +1,6 @@
 # Push delivery — mail into a running Claude Code session (#38)
 
-Operator setup is in [inbox signals](inbox-signals.md#claude-code-push-preferred). This page records the design and the evidence behind it.
+Operator setup is in [inbox signals](inbox-signals.md#claude-code-channel-push). This page records the design and the evidence behind it.
 
 ## Evidence (verified live 2026-10-01, Claude Code 2.1.287, Windows; #38)
 

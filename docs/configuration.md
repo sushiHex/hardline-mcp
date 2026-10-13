@@ -19,7 +19,7 @@ and watcher command. Check `code_revision` when confirming an update is loaded.
 | `HARDLINE_CODEX_WINDOWS_SANDBOX` | Windows only. `mxc` (default), `elevated`, `unelevated`, or `inherit` (pass nothing; Codex's own configuration decides, which in advisory mode excludes the host's `config.toml`). See [the Windows sandbox](#codex-windows-sandbox). |
 | `HARDLINE_AGENT` | Declare `claude`, `codex`, or `hermes` when needed. |
 | `HARDLINE_AGENT_LABEL` | Select a fixed session role; see [ownership and reconnects](messaging.md#name-a-session). |
-| `CODEX_HOME` | Not a hardline variable, but read by the `codex queue` it runs to wake a Codex session. Codex does not pass it to MCP servers, so if Codex uses a custom home, set the same value in hardline's MCP registration env. See [queue-wake](inbox-signals.md#codex-queue-wake-preferred). |
+| `CODEX_HOME` | Not a hardline variable, but read by the `codex queue` it runs to wake a Codex session. Codex does not pass it to MCP servers, so if Codex uses a custom home, set the same value in hardline's MCP registration env. See [queue-wake](inbox-signals.md#codex-queue-wake). |
 
 Executable overrides are paths, without arguments: Hardline appends `-p` for
 Claude, `exec` for Codex, or `chat -Q -q` for Hermes. For example,
