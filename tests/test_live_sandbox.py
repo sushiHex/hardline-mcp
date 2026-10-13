@@ -105,16 +105,9 @@ def test_the_read_only_pin_refuses_a_write(home):
     assert not (project / "written.txt").exists()
 
 
-def test_a_workdir_inside_a_denied_directory(home):
-    """Its own read entry is more specific than the denial. MXC and Seatbelt
-    honour it; bubblewrap hides it (only writable paths are remounted inside a
-    denied directory), so on Linux the preflight cannot start there and
-    `ask_codex` refuses the call instead of reviewing nothing."""
+def test_a_workdir_inside_a_denied_directory_reads_alone(home):
+    """Its own read entry is more specific than the denial, so a reviewer of
+    ~/.claude/skills reads its workdir and nothing else under ~/.claude."""
     skills = home / ".claude" / "skills"
-    exe, overrides = _pinned(skills)
-    started = _started(exe, overrides, dict(os.environ), str(skills))
-    if sys.platform.startswith("linux"):
-        assert not started.get("ok"), started
-        return
     out = _run(skills, skills / "SKILL.md", home / ".claude" / ".credentials.json")
     assert "SKILL-TEXT" in out and "DUMMY-" not in out, out

@@ -37,14 +37,16 @@ jobs:
         # pip install above proves the console-script entry point resolves.
         run: python -c "import hardline_mcp.server as s; assert s.mcp.name == 'hardline-mcp'; print('OK')"
 
-  # Live: hardline's read-only pin under Codex's own sandbox on each platform -
-  # bubblewrap, Seatbelt, MXC. `codex sandbox` needs no model and no login, and
-  # every secret it is pointed at is a dummy (tests/test_live_sandbox.py).
+  # Live: hardline's read-only pin under Codex's own sandbox - bubblewrap and
+  # Seatbelt. `codex sandbox` needs no model and no login, and every secret it
+  # is pointed at is a dummy (tests/test_live_sandbox.py). GitHub's Windows
+  # runners have no native MXC ("unavailable on this executor"), so the same
+  # test is run on a Windows 11 host instead.
   codex-sandbox:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:

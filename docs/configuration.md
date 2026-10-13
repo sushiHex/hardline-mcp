@@ -99,16 +99,20 @@ and changes no file's permissions, so your own Codex sessions, full-access ones
 included, are untouched. A workdir inside a denied directory stays readable
 (writable with `write=True`): Codex's most specific entry wins, so a reviewer
 of `~/.claude/skills` reads its workdir and nothing else under `~/.claude`.
-On Linux, bubblewrap hides a read-only workdir there instead. The call's
-preflight then cannot start, and hardline refuses the call rather than
-reviewing nothing. A denied directory itself stays denied as a workdir.
+A denied directory itself stays denied as a workdir.
 
 Every call first runs one empty command through `codex sandbox` with the
 call's own sandbox and pin (about half a second) and refuses the call if it
-does not start. `tests/test_live_sandbox.py` runs on all three platforms in
-CI against Codex 0.162.1, with only dummy secrets. It checks that every
-denied path is unreadable while the project reads, that a write is refused,
-and how a workdir inside a denied directory behaves.
+does not start. `tests/test_live_sandbox.py` checks the pin against Codex
+0.162.1 with only dummy secrets: every denied path unreadable while the
+project reads, a write refused, and a workdir inside a denied directory read
+alone. It runs in CI on Linux and macOS, and on a Windows 11 host, since
+GitHub's Windows runners have no native MXC.
+
+A deny profile routes Codex's own file operations (AGENTS.md, apply_patch)
+through a sandboxed helper process whose answer Codex awaits with no timeout
+(openai/codex#53537). One run in ten hung that way once, on 0.162.0. Until
+upstream bounds it, `HARDLINE_CODEX_TIMEOUT_S` is what ends such a call.
 
 The profile gets a new random name on every call. Codex deep-merges its
 configuration layers, so a `[permissions.<name>]` table in any of them - a

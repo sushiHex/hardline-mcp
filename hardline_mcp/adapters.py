@@ -194,9 +194,8 @@ _CODEX_NO_CONNECTORS = ["-c", "features.apps=false", "-c", "features.plugins=fal
 # enforces a profile through bubblewrap on Linux (a denied directory under an
 # empty tmpfs, a denied file under /dev/null) and Seatbelt on macOS (denials
 # carved out of every allow rule), per process. tests/test_live_sandbox.py
-# measures it on each platform in CI. On Linux a read-only workdir inside a
-# denied directory stays hidden - bubblewrap remounts only writable paths
-# there - so the preflight cannot start in it and the call is refused.
+# measures it on Linux and macOS in CI; GitHub's Windows runners have no
+# native MXC, so Windows is measured locally.
 #
 # Codex 0.161.0's elevated sandbox refused to start any command while the Codex
 # desktop app ran its computer-use runtime (#47, openai/codex#51590). Before
