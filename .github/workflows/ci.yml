@@ -46,8 +46,8 @@ jobs:
         run: pip install -e ".[dev,codex-watch]"
       - name: Run tests
         # -rs names every skip: a test that quietly stops running looks
-        # identical to one that passes.
-        run: python -m pytest -q -rs -n auto
+        # identical to one that passes. --durations keeps the slowest in view.
+        run: python -m pytest -q -rs -n auto --durations=15
       - name: Import wires the FastMCP server
         # Don't launch the console script here: it's a stdio server that would
         # block on stdin. Importing proves the package + tool registration; the
