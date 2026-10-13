@@ -244,6 +244,8 @@ Session-to-session mail has been watched working on the real store: Claude to
 Codex through a claimed lane with queue-wake, and Claude to Claude through
 inbox wake in a session launched with no flag (it woke idle, read, acked and
 receipted), in a busy one (read between tool calls), and in a `claude -p`
-worker; `crossSessionInbound` `hold` and `refuse` block it, as documented.
-Still unobserved: inbox wake in the old host after a conversation moves to
-the background, and on Linux or macOS. See `docs/claude-inbox-wake.md`.
+worker; `crossSessionInbound` `hold` and `refuse` block it, as documented. A
+move to the background (`/bg`, 2.1.296) ends the old host; the background
+conversation reclaimed its old lane and read its mail, given a turn by a
+`SessionStart` fork hook. Still unobserved: inbox wake on Linux or macOS. See
+`docs/claude-inbox-wake.md`.

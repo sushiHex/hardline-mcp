@@ -24,6 +24,7 @@ the implementation. Both records are at the end.
 | How the model sees it | "Another Claude session sent a message: ...", with guidance to treat it as a teammate's request within the session's own permissions. |
 | A busy session (2026-10-13) | 2.1.295, interactive: mail sent 5 s into a 60 s tool call; the notice arrived when that call returned, before the next one, and its receipt came back `accepted`. The running call was not interrupted. 2.1.296, a `claude -p` worker mid-command: the same. `-p` binds an inbox and writes a session record too, so hardline proves it the worker's own (`transport: "inbox"`). |
 | `crossSessionInbound` (2026-10-13, 2.1.296, `-p` workers, `--settings`) | Unset: delivered and receipted. `hold` and `refuse`: hardline's post succeeded (`last_push_at` recorded), the worker saw nothing, no receipt came back, so delivery turns `unreceipted` after the grace. In an interactive session the docs say `hold` shows the user a notice and releases it once `accept` applies; that was not observed. |
+| A move to the background (2026-10-13, 2.1.296, `/bg`) | The old host exited at once with its hardline; no viewer stayed. The background session reclaimed the old lane, prompted by a `SessionStart` fork hook and the MCP instructions, then took the old lane's notice, read and acked, 7 s after the send. See [session continuity](session-continuity.md#the-move-live-2026-10-13-claude-code-21296-windows). |
 | Host limits (docs) | Per-sender rate limit, identical repeats dropped, at most 50 queued. One notice at a time, each with its own nonce, stays inside all three. |
 
 ## Design
@@ -131,9 +132,10 @@ post real notices into it.
   write succeeds, the notice stays outstanding, delivery reads `unreceipted`.
   `refuse` is silent; `hold` shows the user a notice and delivers it if
   `accept` later applies (docs). The Monitor is the fallback.
-- **A conversation moved to the background.** Its old host keeps the old inbox
-  and, by session id, the lane, so its notices go to whatever the old host
-  serves next. To be checked live.
+- **A conversation moved to the background** (`/bg`, 2.1.296, one measured
+  run). The old host exited with its hardline, so no notice went astray. The old lane's
+  mail waits until the background conversation reclaims the lane, which takes
+  a turn; a `SessionStart` fork hook supplies one.
 - **A wake stalls at a permission prompt** unless `inbox` and `ack` are
   allowlisted; the notice has then spent its turn.
 - **A busy session** reads the notice between tool calls (measured), so a
@@ -163,9 +165,9 @@ post real notices into it.
 - Spawned agents never inherit either variable.
 - The Codex suite runs unchanged against the extracted core.
 
-Live, still to do: the old host after a move to the background; Linux and
-macOS. Done: an idle session woken through hardline itself (2026-10-08), a
-busy one and `crossSessionInbound` (2026-10-13, Evidence above).
+Live, still to do: Linux and macOS. Done: an idle session woken through
+hardline itself (2026-10-08), a busy one, `crossSessionInbound` and a move to
+the background (2026-10-13, Evidence above).
 
 ## Alternatives considered (2026-10-07/08)
 

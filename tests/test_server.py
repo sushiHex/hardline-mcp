@@ -4,6 +4,7 @@ from concurrent.futures import Future
 
 import json
 import os
+import subprocess
 import sys
 import threading
 
@@ -73,6 +74,65 @@ async def test_async_result_goes_to_this_sessions_lane(
     # already makes - no new convention to learn.
     inb = await server.inbox(agent="claude")
     assert inb["count"] == 1
+
+
+@pytest.mark.anyio
+async def test_a_result_goes_to_the_lane_a_relaunch_gets_back(monkeypatch, tmp_path, in_session):
+    """A claim is a role: a relaunch loses it, and released, its unread
+    notices go to the next claimant. The conversation's derived lane comes
+    back with it, so that is where a result owed to the conversation goes."""
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+    assert (await server.register_session(label="construction"))["ok"] is True
+    dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
+    assert dispatched["lane"] == f"claude:{in_session}"
+
+
+@pytest.mark.anyio
+async def test_a_result_skips_a_derived_lane_another_process_took(
+    monkeypatch, tmp_path, in_session
+):
+    """After a store rebuild another process can take the derived lane first,
+    and the heartbeat restores only the claim: the result must go where this
+    session can still consume it."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setenv("HARDLINE_DB", str(db))
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+    assert (await server.register_session(label="construction"))["ok"] is True
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
+                             stdin=subprocess.DEVNULL)
+    try:
+        with server.mailbox._connect(db) as conn:
+            conn.execute("DELETE FROM agent_sessions")  # the rebuild
+        server.sessions.register(agent="claude", lane=f"claude:{in_session}", pid=other.pid,
+                                 db_path=db)
+        server.sessions.register(agent="claude", lanes=server.adapters.owned_recipients("claude"),
+                                 db_path=db)  # this session's heartbeat
+        dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
+        assert dispatched["lane"] == "claude:construction"
+    finally:
+        other.kill()
+        other.wait()
+
+
+@pytest.mark.anyio
+async def test_a_codex_result_goes_to_its_claim(monkeypatch, tmp_path, spawned_by_codex):
+    """A parent-derived lane ends with its launcher, while a claimed name can
+    be claimed again after a restart: the claim is the address that lasts."""
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+    assert (await server.register_session(label="review"))["ok"] is True
+    dispatched = await server.ask_codex_async(prompt="go", from_agent="codex")
+    assert dispatched["lane"] == "codex:review"
 
 
 @pytest.mark.anyio

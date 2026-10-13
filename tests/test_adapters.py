@@ -1009,6 +1009,23 @@ def test_only_mxc_is_preflighted(monkeypatch, windows, sandbox_probe, value):
     assert _profile(argv) is None
 
 
+@pytest.mark.parametrize("value", ["mxc", "elevated", "unelevated", "inherit", "posix"])
+def test_every_sandbox_keeps_credentials_out_of_commands(
+    monkeypatch, windows, secret_home, sandbox_probe, value
+):
+    """No file denial reaches an environment variable, and Codex leaves its
+    default excludes off unless asked; where there is a preflight, the probe
+    is asked the same."""
+    if value == "posix":
+        monkeypatch.setattr(adapters, "_ON_WINDOWS", False)
+    monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", value)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    for argv in [calls[0]["cmd"], *(probe["overrides"] for probe in sandbox_probe.calls)]:
+        assert ("-c", "shell_environment_policy.ignore_default_excludes=false") in zip(argv, argv[1:])
+    assert len(sandbox_probe.calls) == (value in ("mxc", "posix"))
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -1092,8 +1109,12 @@ def test_the_preflight_probes_the_workdir_and_every_existing_denial(
     """Inside the call's own sandbox, so it proves the policy that holds, not
     the one passed: a requirements file can swap the profile out."""
     (secret_home / ".ssh").mkdir()
-    seen = []
-    monkeypatch.setattr(adapters, "_run_cmd", lambda argv, **kwargs: seen.append(argv) or {"ok": True})
+    monkeypatch.setenv("HARDLINE_TEST_GH_TOKEN", "dummy")
+    seen, envs = [], []
+    monkeypatch.setattr(
+        adapters, "_run_cmd",
+        lambda argv, env, **kwargs: seen.append(argv) or envs.append(env) or {"ok": True},
+    )
     _real_sandbox_started("codex", ["-c", "x=1"], dict(os.environ), str(tmp_path))
     (argv,) = seen
     assert argv[:9] == [
@@ -1101,10 +1122,15 @@ def test_the_preflight_probes_the_workdir_and_every_existing_denial(
         sys.executable, "-I", "-c", adapters._CODEX_POLICY_PROBE,
     ]
     assert argv[9] == str(tmp_path)
+    cut = argv.index("--", 10)
+    withheld, denied = argv[10:cut], argv[cut + 1:]
+    # Every credential-named variable Codex holds, a canary always among them.
+    assert {"HARDLINE_TEST_GH_TOKEN", adapters._CODEX_ENV_CANARY} <= set(withheld)
+    assert all(name in envs[0] for name in withheld)
     canary = secret_home / ".cache" / "hardline-mcp" / "sandbox-canary"
-    assert argv[10] == str(canary) and canary.is_file()  # never a policy denying nothing
-    assert str(secret_home / ".ssh") in argv[11:]
-    assert all(os.path.exists(path) for path in argv[11:])  # a missing one proves nothing
+    assert denied[0] == str(canary) and canary.is_file()  # never a policy denying nothing
+    assert str(secret_home / ".ssh") in denied
+    assert all(os.path.exists(path) for path in denied)  # a missing one proves nothing
 
 
 def test_the_preflight_loads_managed_requirements_as_exec_does(monkeypatch, secret_home, tmp_path):
@@ -1121,24 +1147,30 @@ def test_the_preflight_loads_managed_requirements_as_exec_does(monkeypatch, secr
 
 
 @pytest.mark.parametrize(
-    ("workdir", "denied", "refusal"),
+    ("workdir", "denied", "inherited", "refusal"),
     [
-        ("project", [], None),
-        ("project", ["secret.txt"], "denied paths still open"),
-        ("project", ["secrets"], "denied paths still open"),
-        ("nowhere", [], "cannot read the workdir"),
+        ("project", [], [], None),
+        ("project", ["secret.txt"], [], "denied paths still open"),
+        ("project", ["secrets"], [], "denied paths still open"),
+        ("nowhere", [], [], "cannot read the workdir"),
+        ("project", [], ["HARDLINE_TEST_GH_TOKEN"],
+         "credentials in Codex's environment still reach its commands: HARDLINE_TEST_GH_TOKEN"),
     ],
-    ids=["holds", "file-open", "directory-open", "workdir-unreadable"],
+    ids=["holds", "file-open", "directory-open", "workdir-unreadable", "credential-inherited"],
 )
-def test_the_policy_probe(tmp_path, workdir, denied, refusal):
-    """Run unsandboxed here, where every existing path opens."""
+def test_the_policy_probe(tmp_path, workdir, denied, inherited, refusal):
+    """Run unsandboxed here, where every existing path opens. A withheld name
+    the canary's policy let through, as an `include_only` naming it would."""
     (tmp_path / "project").mkdir()
     (tmp_path / "secret.txt").write_text("x", encoding="utf-8")
     (tmp_path / "secrets").mkdir()
+    withheld = [adapters._CODEX_ENV_CANARY, "HARDLINE_TEST_GH_TOKEN"]
+    env = {k: v for k, v in os.environ.items() if k not in withheld}
     out = subprocess.run(
         [sys.executable, "-I", "-c", adapters._CODEX_POLICY_PROBE, str(tmp_path / workdir),
-         *(str(tmp_path / name) for name in denied)],
+         *withheld, "--", *(str(tmp_path / name) for name in denied)],
         capture_output=True, text=True, timeout=30,
+        env={**env, **dict.fromkeys(inherited, "dummy")},
     )
     assert (out.returncode == 0) is (refusal is None), out.stderr
     assert refusal is None or refusal in out.stderr

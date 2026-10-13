@@ -641,6 +641,20 @@ def test_a_claim_reports_the_backlog_it_inherits(tmp_path):
     assert claimed["inherited_unread"] == 3
 
 
+def test_reclaiming_an_earlier_name_reports_that_name(tmp_path):
+    """A claim re-acquires every retained lane with the role, the role among
+    them when it is retained too: the result names the role, whose backlog it
+    counts, not whichever retained lane came last."""
+    db = tmp_path / "mb.db"
+    mailbox.send("claude", "codex:red", "for red", db_path=db)
+    sessions.claim(agent="codex", label="red", db_path=db)
+    sessions.claim(agent="codex", label="blue", lanes=["codex:red"], db_path=db)
+    again = sessions.claim(
+        agent="codex", label="red", lanes=["codex:red", "codex:blue"], db_path=db
+    )
+    assert (again["lane"], again["inherited_unread"]) == ("codex:red", 1)
+
+
 def test_reclaiming_after_a_reconnect_still_works(tmp_path):
     """The guard must not break the documented recovery path.
 
@@ -1385,6 +1399,23 @@ async def test_register_session_makes_this_session_addressable(codex_session):
 
     got = await server.inbox(agent="codex")
     assert [m["body"] for m in got["messages"]] == ["ping", "ping again"]
+
+
+@pytest.mark.anyio
+async def test_a_claim_says_what_mail_it_came_with(codex_session):
+    """A name is a role: its backlog was written to whoever held it before,
+    and the claimant must be told, not left to read it as its own."""
+    from hardline_mcp import server
+
+    for body in ("for the old holder", "this too"):
+        await server.send(from_agent="claude", to_agent="codex:construction", message=body)
+    claimed = await server.register_session(label="construction")
+    assert claimed["inherited_unread"] == 2
+    assert "2 unread messages sent to the name before this claim" in claimed["note"]
+
+    fresh = await server.register_session(label="unused")
+    assert fresh["inherited_unread"] == 0
+    assert "unread" not in fresh["note"]
 
 
 @pytest.mark.anyio

@@ -63,7 +63,9 @@ themselves.
 is fixed when the job is *accepted*, so a session that renamed mid-flight
 would find its own result addressed to a lane it no longer held. A session is
 therefore *addressed* by its newest name and *consumes* mail for every name it
-still holds. Explicit release gives a name back.
+still holds. Explicit release gives a name back. Results go to the derived
+lane instead where a relaunch derives it again (see the mitigations under
+stable instance addresses below).
 
 **Where identity comes from**, in order: an explicit `HARDLINE_AGENT_LABEL`
 pin, then a session id the host supplied, then the process that spawned this
@@ -157,9 +159,11 @@ plus eight characters of the session id, or a pin) and reclaimable once its
 holder is gone. Roles deliberately let a new holder inherit backlog.
 
 What a stable address would fix that nothing else does:
-- A job's completion is addressed to the requester's latest role at dispatch
-  (`lane_for`). If that role is released and claimed by someone else, the new
+- A Codex or Hermes session's job completion is addressed to its latest role
+  at dispatch. If that role is released and claimed by someone else, the new
   holder inherits the result while the requester lives on under another name.
+  A Claude conversation's goes to its derived lane since the mitigation
+  below.
 - A claim re-acquires every retained name together, so one contested old name
   blocks an unrelated new one. Legacy writers can create that contest.
 - A reply sent to a role reaches whoever holds it next.
@@ -179,11 +183,27 @@ Why not now:
   would have to serialize against rebinding, assigning unbound backlog exactly
   once.
 
-Mitigations short of a migration, proposed and not built:
-- **Report inherited backlog on a grant.** `sessions.claim` already returns
-  `inherited_unread`, and `register_session` drops it.
-- **Address new completions to the derived lane rather than the latest role.**
-  Every current reader holds that lane, and since #56 it outlives a relaunch.
+Mitigations short of a migration, both built (2026-10-13):
+- **Report inherited backlog on a grant.** `register_session` returns
+  `inherited_unread`, and its note says how many unread messages were sent to
+  the name before the claim. Review found the count could name the wrong
+  lane: a claim re-acquires every retained name, and the result reported the
+  last one rather than the one asked for, so re-claiming `red` after `blue`
+  showed `red`'s count under `blue` (and gave `blue` to `drop_lane` on a
+  local refusal). `sessions._acquire` now reports the lane asked for. A
+  pending claim's grant has no caller to return to; its backlog arrives as
+  mail and wakes the session.
+- **Address new completions to the derived lane rather than the latest role,
+  where a relaunch derives it again:** a `HARDLINE_AGENT_LABEL` pin or a
+  Claude conversation id (`server._result_lane`). Every current reader holds
+  that lane. A parent-derived lane (Codex, Hermes) ends with its launcher,
+  while a claimed name can be claimed again after a restart, so there the
+  claim stays the address. The derived lane is preferred only while this
+  process holds it uncontested. I first argued that check was redundant,
+  since a claim is granted only atomically with the derived lane. Review
+  reproduced the counterexample: after a store rebuild another process can
+  take the derived lane first, and the heartbeat, which registers lanes one
+  by one, restores only the claim.
 
 Revisit when any of these holds:
 - a role must be handed over while jobs are outstanding;

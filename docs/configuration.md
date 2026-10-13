@@ -88,7 +88,7 @@ hardline-spawned Codex can read:
   change between releases, so entries are listed at each call, and a home
   that cannot be listed refuses the call. Codex's provisioning `.guard` file
   is also left out, since MXC cannot start over a denial of a file another
-  process holds open exclusively;
+  process holds open exclusively (reported on openai/codex#52042);
 - gh's configuration, where its token may live: `GH_CONFIG_DIR`,
   `$XDG_CONFIG_HOME/gh`, `%APPDATA%\GitHub CLI` and `~/.config/gh`, each that
   applies;
@@ -99,7 +99,7 @@ hardline-spawned Codex can read:
 Each path is denied under its own spelling and its resolved one, so a
 junction or symlink does not open a second way in. A path under a missing
 directory is denied as the topmost missing directory, since MXC refuses to
-start over a denial whose parent does not exist.
+start over a denial whose parent does not exist (openai/codex#53576).
 
 The denial is per call. The sandbox holds it inside the reviewer's process
 and changes no file's permissions, so your own Codex sessions, full-access ones
@@ -109,6 +109,26 @@ of `~/.claude/skills` reads its workdir and nothing else under `~/.claude`.
 On Linux, bubblewrap leaves a read-only workdir there unreadable, so such a
 call is refused. A denied directory itself stays denied as a workdir.
 
+**Nor does a command inherit the usual credentials.** Every spawned Codex,
+under every sandbox choice, runs with
+`-c shell_environment_policy.ignore_default_excludes=false`. That turns on
+Codex's own default excludes, which Codex leaves off: every variable whose
+name contains `KEY`, `SECRET` or `TOKEN`, in any case, is dropped from each
+command's environment, and from the exports Codex captures from your shell's
+rc files. That covers `GH_TOKEN`,
+`GITHUB_TOKEN`, `OPENAI_API_KEY` and `AWS_SECRET_ACCESS_KEY`.
+- **The Codex process keeps them**, so its own API-key login still works. A
+  command can't read them back out of it, measured: on Linux and macOS,
+  `/proc/*/environ` and `ps -E` find a command's own variables but nothing of
+  Codex's, and under MXC a command sees only its own job's processes. The
+  Linux result relies on bubblewrap mounting a fresh `/proc`, which it skips
+  where the mount fails.
+- **It goes by name.** `TOKENIZERS_PARALLELISM` goes too, and a command that
+  needs a token, such as an `npm install` with `NPM_TOKEN` under `write=True`,
+  runs without it.
+- **It's one scalar on purpose.** Keyed `filters` would discard a legacy
+  `exclude` or `include_only` of yours, and legacy arrays replace wholesale.
+
 **The preflight checks the policy that holds, not the one passed.** Before
 every call, hardline's own Python runs once through `codex sandbox` under the
 call's exact sandbox and pin, in its workdir (about half a second). Managed
@@ -116,25 +136,38 @@ requirements, local and cloud, are loaded as `codex exec` loads them. The
 probe must list the workdir, and no denied path may open; opening reads
 nothing. One of those paths is a canary that hardline has just written under
 its own denied cache, so a policy that denies nothing cannot pass for want of
-targets. Otherwise the call is refused. That catches each of these:
+targets. Nor may the probe inherit any credential-named variable in Codex's
+environment, named in its arguments since the policy under test filters its
+environment. A canary that hardline adds is always among them. Otherwise the
+call is refused. That catches each of these:
 - Windows without MXC, where `codex exec` would start no command and report
   none failed;
 - managed requirements that reject hardline's profile and swap in one
   without the denials;
+- a legacy managed configuration (`managed_config.toml` or MDM), which
+  outranks `-c`, turning the default excludes back off;
 - the Linux workdir above;
 
 each of which would otherwise read as a finished review. The preflight and
 the call are separate processes, so the check is of the configuration as it
-stood half a second earlier.
+stood half a second earlier. Under the elevated, unelevated and `inherit`
+choices there is no preflight, so nothing checks that the excludes hold.
 `tests/test_live_sandbox.py` checks all of this against Codex 0.162.1 with
 dummy secrets only. It runs in CI on Linux and macOS, and on a Windows 11
 host, since GitHub's Windows runners have no native MXC. Real `ask_codex`
-runs, read-only and `write=True`, were also checked on that host.
+runs, read-only and `write=True`, were also checked on that host, including
+one whose command saw an ordinary variable but not a dummy `*_TOKEN`.
 
 What the denial does not cover:
-- **Credentials in the environment.** `GH_TOKEN`, `GITHUB_TOKEN` and API keys
-  in hardline's environment reach the reviewer, since the denial covers files
-  only.
+- **Credentials under other names, or put back.** A variable without `KEY`,
+  `SECRET` or `TOKEN` in its name still reaches the reviewer, such as
+  `PGPASSWORD` or a `DATABASE_URL` with a password in it. So does anything a
+  `shell_environment_policy.set` of yours or your administrator's adds, since
+  it is applied after the excludes. A shell's startup script can set one
+  again, such as a PowerShell profile, which Codex's login shells run. Hooks
+  in your Codex configuration run with Codex's whole environment.
+- **Credentials in files outside the list.** `~/.npmrc`, `~/.netrc`,
+  `~/.aws` and rc files that export a token stay readable.
 - **Paths that appear mid-call.** A secret created after the call starts may
   be readable: bubblewrap masks a missing path only under a writable root.
 - **The workdir and writable roots inside a denied directory.** The workdir,

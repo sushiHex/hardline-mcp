@@ -556,15 +556,25 @@ def _register_locked(label: str, agent: str | None, wait: bool) -> dict:
     adapters.declare_agent(agent)
     _announce_self(agent)
     _remember(claimed["lane"])
+    # A name is a role, so a claim takes its backlog too: say so, rather than
+    # let a stranger's mail read as written to this session.
+    inherited = claimed["inherited_unread"]
     return {
         "ok": True,
         "lane": claimed["lane"],
         "agent": agent,
         "label": label,
         "held_lanes": list(adapters.held_lanes()),
+        "inherited_unread": inherited,
         "note": (
             f"Others can now reach this session as {claimed['lane']!r}. "
-            "inbox() continues to read every lane you have held."
+            + (
+                f"It came with {inherited} unread message{'s' * (inherited != 1)} "
+                "sent to the name before this claim. "
+                if inherited
+                else ""
+            )
+            + "inbox() continues to read every lane you have held."
         ),
     }
 
@@ -1133,7 +1143,8 @@ async def register_session(
 
     Earlier lanes remain held until explicitly released, so replies addressed
     before a rename remain reachable. Reclaim runtime names after reconnect;
-    a successful later claimant inherits the name's unread backlog.
+    a successful later claimant inherits the name's unread backlog, counted
+    in ``inherited_unread``.
     """
     return await _in_thread(
         _register_session_impl, label, agent, wait, limiter=_REGISTER_LIMITER
@@ -2014,6 +2025,26 @@ def _plan_claude_dispatch(
     }
 
 
+def _result_lane(agent: str) -> str:
+    """Where a job's completion notice goes: the derived lane, when a
+    relaunch derives it again and this process holds it uncontested; else
+    this process's current name.
+
+    Not the newest claim by preference. A claim is a role: a relaunch loses
+    it, and once released its unread notices go to whoever claims it next. A
+    conversation's derived lane comes back with the conversation. A
+    parent-derived one ends with its launcher, so a Codex or Hermes session
+    keeps addressing its claim. The grant is checked, not assumed from the
+    claim: after a store rebuild another process can take the derived lane
+    first, and the heartbeat then restores only the claim.
+    """
+    durable = adapters.reproducible_lane_suffix()
+    lane = f"{adapters.base_agent(agent)}:{durable}" if durable else None
+    if lane and sessions.granted([lane]):
+        return lane
+    return adapters.lane_for(agent)
+
+
 def _ask_async_impl(
     agent: str,
     ask_fn,
@@ -2067,7 +2098,7 @@ def _ask_async_impl(
     # Deliver back to THIS session's lane, not the shared name. A result is
     # owed to the session that asked for it; addressing it to bare "claude"
     # is what let another session ack it out of sight.
-    recipient = adapters.lane_for(from_agent)
+    recipient = _result_lane(from_agent)
     db_path = mailbox._resolve_db(None).resolve()
 
     slots = _async_slots

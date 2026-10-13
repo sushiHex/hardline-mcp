@@ -399,7 +399,9 @@ def _acquire(
         "agent": agent,
         "label": label,
         "pid": pid,
-        "lane": accepted[-1] if accepted else None,
+        # The lane asked for, whose backlog `inherited_unread` counts; a
+        # retained lane can come after it.
+        "lane": primary if primary in accepted else (accepted[-1] if accepted else None),
         "lanes": accepted,
         "contested": refused,
         "inherited_unread": inherited,

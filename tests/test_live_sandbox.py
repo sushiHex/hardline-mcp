@@ -104,6 +104,63 @@ def test_the_preflight_catches_a_policy_without_the_denials(home):
     assert not started.get("ok") and "denied paths still open" in started["error"], started
 
 
+def _command(cwd, code):
+    exe, overrides = _pinned(cwd)
+    out = subprocess.run(
+        [exe, "sandbox", *overrides, "--", sys.executable, "-I", "-c", code],
+        cwd=cwd, env=dict(os.environ), capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    return out.stdout + out.stderr
+
+
+def test_the_pin_keeps_credentials_out_of_commands(home, monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "DUMMY-GH-TOKEN")
+    monkeypatch.setenv("HARDLINE_LIVE_PLAIN", "PLAIN-TEXT")
+    out = _command(home / "project", "import os; print(os.environ.get('GH_TOKEN'), "
+                                     "os.environ.get('HARDLINE_LIVE_PLAIN'))")
+    assert "DUMMY-GH-TOKEN" not in out and "PLAIN-TEXT" in out, out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no /proc or ps -E; measured on a Windows 11 "
+                    "host: a command sees only its own job's processes")
+def test_a_command_cannot_read_codex_s_own_environment(home, monkeypatch):
+    """Codex keeps the credentials its commands lose; that is only a boundary
+    if no command can read them back out of Codex's process. The same routes
+    must find the command's own variable, or "sealed" means "looked nowhere".
+    Neither value appears in the command line, which `ps` also shows: the
+    token is spelled backwards, and the plain value is read at run time."""
+    monkeypatch.setenv("GH_TOKEN", "DUMMY-GH-TOKEN")
+    monkeypatch.setenv("HARDLINE_LIVE_PLAIN", "PLAIN-ROUTE")
+    out = _command(home / "project", (
+        "import glob, os, subprocess\n"
+        "token, plain = 'NEKOT-HG-YMMUD'[::-1], os.environ['HARDLINE_LIVE_PLAIN']\n"
+        "seen = []\n"
+        "for path in glob.glob('/proc/[0-9]*/environ'):\n"
+        "    try:\n"
+        "        seen.append(open(path, 'rb').read().decode('latin-1'))\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "try:\n"
+        "    seen.append(subprocess.run(['ps', '-E', '-ww', '-A', '-o', 'command='],\n"
+        "                               capture_output=True, text=True).stdout)\n"
+        "except OSError:\n"
+        "    pass\n"
+        "print('LEAKED' if any(token in s for s in seen) else 'SEALED',\n"
+        "      'route' if any(plain in s for s in seen) else 'no-route')\n"
+    ))
+    assert "SEALED route" in out, out
+
+
+def test_the_preflight_catches_a_policy_that_passes_credentials(home):
+    """What a layer turning Codex's default excludes back off would leave."""
+    exe, overrides = _pinned(home / "project")
+    at = overrides.index("shell_environment_policy.ignore_default_excludes=false")
+    started = _started(exe, overrides[:at - 1] + overrides[at + 1:], dict(os.environ),
+                       str(home / "project"))
+    assert not started.get("ok") and "still reach its commands" in started["error"], started
+
+
 def test_the_read_only_pin_refuses_a_write(home):
     project = home / "project"
     exe, overrides = _pinned(project)

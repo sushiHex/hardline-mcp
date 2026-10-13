@@ -2,7 +2,7 @@
 
 ## Problem
 
-A lane is held by a hardline **process**, but Claude Code can move a conversation to a new one. Moving a conversation to the background (the left arrow, `/bg`) forks it into a new host: `claude.exe --session-id <new> --fork-session --resume <old transcript>`. The new hardline process derives a **different** lane from the new session id. The original host stays alive as a viewer, and its hardline stays connected, so the old lane stays held, unread, until that window closes. Mail sent to the old lane waits there.
+A lane is held by a hardline **process**, but Claude Code can move a conversation to a new one. Moving a conversation to the background (the left arrow, `/bg`) forks it into a new host: `claude.exe --session-id <new> --fork-session --resume <old transcript>`. The new hardline process derives a **different** lane from the new session id. On 2.1.287 the original host stayed alive as a viewer, and its hardline stayed connected, so the old lane stayed held, unread, until that window closed. On 2.1.296, in the one run measured ([below](#the-move-live-2026-10-13-claude-code-21296-windows)), `/bg` freed the terminal and the old host exited at once, so the old lane was free immediately. Either way, mail sent to the old lane waits there until the conversation asks for it.
 
 ## Evidence (verified 2026-10-01, Claude Code 2.1.287, Windows)
 
@@ -24,6 +24,37 @@ Nothing can tell a conversation that moved away from a copy that is still being 
 - **The trigger.** The server's MCP `instructions`, which reach every connected model, say: *if an earlier hardline result shows a lane you no longer hold, call `register_session(label=<that lane>, wait=true)` once.* The name is public, so no secret is involved, and the conversation's own transcript carries it across the fork.
 
 A moved conversation therefore gets its old address back, with nothing lost and no overlap, the moment the old window closes.
+
+## The move, live (2026-10-13, Claude Code 2.1.296, Windows)
+
+An interactive session in a fresh directory, driven through a ConPTY:
+- `/bg` printed `backgrounded · <id>` and freed the terminal. The old host and its hardline exited at once. The background host ran the fork command line above, under a new supervisor process.
+- The background session took a turn from the `SessionStart` `fork` hook below. It called `list_agents`, then `register_session(label=<old lane>, wait=true)`, which was granted at once, since the holder was gone, with `inherited_unread: 1`.
+- Mail sent to the old lane a second earlier reached it through its inbox notice. It read with the receipt and acked, 7 s after the send.
+
+Nothing in hardline gives it that turn. No process holds the old lane, so no server wakes for its mail, and the MCP instructions reach a model only when it takes a turn.
+
+## A turn for a moved conversation: the fork hook
+
+A conversation sent to the background is idle. A `SessionStart` hook with matcher `fork` and `asyncRewake` gives it a turn: exit code 2 hands the hook's stderr to the model. In `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "fork",
+      "hooks": [{
+        "type": "command",
+        "command": "python",
+        "args": ["-I", "-c", "import sys; sys.stderr.write('[hardline] This conversation was just forked or moved to a new session, which starts with a new hardline address. If it uses hardline: call list_agents; if an earlier hardline result here shows a lane you no longer hold and you still answer to it (not one you released), call register_session(label=<that lane without the agent prefix>, wait=true) once.'); sys.exit(2)"],
+        "asyncRewake": true
+      }]
+    }]
+  }
+}
+```
+
+It carries the MCP instructions' own condition, "and you still answer to it", so a name the conversation released is not asked for again. `/fork` and `/branch` fire it too. A copy then waits for the original's lane, and once the original exits the lane goes to whichever waiting copy is granted it first, with its backlog; nothing designates a successor. A conversation that doesn't use hardline spends one short turn on it.
 
 ## Names held before: tell, don't restore
 

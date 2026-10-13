@@ -54,7 +54,8 @@ Renaming retains earlier lanes so outstanding replies remain reachable.
 when you no longer need its mail. Runtime names must be reclaimed after an MCP
 reconnect or a relaunch, though an automatic or configured lane registers again
 by itself (see [names held before](#names-held-before)). A label is reusable: a
-successful later claimant inherits its unread backlog.
+successful later claimant inherits its unread backlog, counted in the result's
+`inherited_unread`.
 
 ### Wait for a held name
 
@@ -148,7 +149,11 @@ sender or recipient. Inbox responses also include `first_message_id`,
 `ask_codex_async` and `ask_claude_async` accept the corresponding synchronous
 tool's options plus `from_agent` and an optional correlation `label`. Pass your
 bare agent name; the receipt's `lane` records the completion destination selected
-at acceptance. A `label` may be reused; the returned `job_id` identifies one run.
+at acceptance. That's the session's derived lane where a relaunch derives it
+again (a `HARDLINE_AGENT_LABEL` pin or a Claude conversation id), so a result
+outlives a relaunch and is never left at a released claim; otherwise it's the
+session's current name. A `label` may be reused; the returned `job_id`
+identifies one run.
 
 | State | Meaning |
 | --- | --- |

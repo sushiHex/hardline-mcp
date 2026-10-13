@@ -276,7 +276,8 @@ def _codex_home_entries(codex_home: Path) -> list[Path]:
 
     One more is left out: Codex's provisioning guard, a lock file, since MXC
     refuses to start over a denial of a file another process holds open
-    exclusively (0x80070020, measured on 0.162.1). A home that cannot be
+    exclusively (0x80070020, measured on 0.162.1; reported on
+    openai/codex#52042). A home that cannot be
     listed raises ValueError: denying only the known names would abandon the
     rest unannounced.
     """
@@ -335,8 +336,22 @@ def _codex_unreadable(env: dict[str, str]) -> list[Path]:
     ]
 
 
+# Credentials in hardline's environment - GH_TOKEN, API keys - stay out of a
+# reviewer's commands through Codex's own default excludes: names matching
+# *KEY*, *SECRET* or *TOKEN*, ignoring case, which Codex leaves off unless
+# asked (ignore_default_excludes defaults to true). The Codex process keeps its
+# environment, so its own auth works; what its commands inherit is filtered,
+# rc-file exports in its shell snapshot included. The filter goes by name, and
+# a `set` entry is added after it. A scalar on purpose: keyed `filters` would
+# discard a legacy `exclude` or `include_only` of the user's, and legacy
+# arrays replace wholesale. A legacy managed config outranks `-c`; the
+# preflight's canary catches one that turns the excludes back off.
+_CODEX_NO_SECRET_ENV = ["-c", "shell_environment_policy.ignore_default_excludes=false"]
+
+
 def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) -> list[str]:
-    """The sandbox a spawned Codex is held to: read-only unless ``write``.
+    """The sandbox a spawned Codex is held to: read-only unless ``write``,
+    and with no credential its commands could inherit (``_CODEX_NO_SECRET_ENV``).
 
     Passed on every call, never inherited: with nothing passed, a host whose
     config made a project trusted under the elevated sandbox let a default
@@ -347,7 +362,7 @@ def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) 
     ``write``) when it lies inside a denied directory: the most specific entry
     wins. A path under a missing directory is denied as that directory, the
     topmost one missing: MXC refuses to start over a denial whose parent does
-    not exist (measured on 0.162.1).
+    not exist (measured on 0.162.1; openai/codex#53576).
 
     The profile's name is new on every call. Codex deep-merges configuration
     layers, so a table any layer gave a known name - a trusted project's
@@ -358,7 +373,7 @@ def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) 
     express it, or Codex would read it as a glob), never dropping a denial.
     """
     if not sandbox.profile:
-        return ["--sandbox", "workspace-write" if write else "read-only"]
+        return _CODEX_NO_SECRET_ENV + ["--sandbox", "workspace-write" if write else "read-only"]
     spellings = dict.fromkeys(
         next((above for above in reversed(spelling.parents) if not above.exists()), spelling)
         for path in _codex_unreadable(env)
@@ -376,17 +391,21 @@ def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) 
             raise ValueError(f"cannot pin Codex's sandbox: cannot give Codex {str(path)!r} exactly")
         entries.append(f'{key}="{mode}"')
     name = f"hardline-{secrets.token_hex(8)}"
-    return [
+    return _CODEX_NO_SECRET_ENV + [
         "-c", f'default_permissions="{name}"',
         "-c", f'permissions.{name}.extends="{":workspace" if write else ":read-only"}"',
         "-c", f"permissions.{name}.filesystem={{{','.join(entries)}}}",
     ]
 
 
-# Run by the preflight inside the call's own sandbox: the workdir must list and
-# no denied path may open - the canary first, a file hardline has just opened,
-# so a policy that denies nothing cannot pass for want of targets. Opening
-# reads nothing.
+# Run by the preflight inside the call's own sandbox: the workdir must list; no
+# denied path may open - the canary first, a file hardline has just opened, so
+# a policy that denies nothing cannot pass for want of targets; and no
+# credential-named variable in Codex's environment may reach it - a canary
+# among them, so there is always one. Named in its arguments, not its
+# environment, which the policy under test filters. Opening reads nothing.
+_CODEX_ENV_CANARY = "HARDLINE_SANDBOX_CANARY_TOKEN"
+_CREDENTIAL_NAME = re.compile("KEY|SECRET|TOKEN", re.IGNORECASE)  # Codex's default excludes
 _CODEX_POLICY_PROBE = """\
 import os, sys
 def opens(path):
@@ -395,12 +414,17 @@ def opens(path):
         return True
     except OSError:
         return False
-workdir, *denied = sys.argv[1:]
+workdir, *rest = sys.argv[1:]
+cut = rest.index("--")
+withheld, denied = rest[:cut], rest[cut + 1:]
 if not opens(workdir):
     sys.exit(f"cannot read the workdir {workdir}")
 held = [path for path in denied if opens(path)]
 if held:
     sys.exit("denied paths still open: " + ", ".join(held))
+inherited = [name for name in withheld if name in os.environ]
+if inherited:
+    sys.exit("credentials in Codex's environment still reach its commands: " + ", ".join(inherited))
 """
 
 
@@ -427,7 +451,9 @@ def _codex_sandbox_started(exe: str, overrides: list[str], env: dict, cwd: str |
     ``--permission-profile`` and ``--include-managed-config`` so this loads
     what ``codex exec`` loads, cloud bundle included. On Linux, bubblewrap
     leaves a read-only workdir inside a denied directory unreadable. Each
-    would otherwise read as a finished review.
+    would otherwise read as a finished review. The same goes for a layer that
+    turns Codex's default excludes back off: no credential-named variable in
+    Codex's environment, a planted canary among them, may reach a command.
     """
     profile = [o.split("=", 1)[1].strip('"') for o in overrides if o.startswith("default_permissions=")]
     managed = ["--permission-profile", profile[0], "--include-managed-config"] if profile else []
@@ -436,10 +462,12 @@ def _codex_sandbox_started(exe: str, overrides: list[str], env: dict, cwd: str |
         denied += [str(path) for path in _codex_unreadable(env) if path.exists()]
     except (OSError, ValueError) as exc:
         return {"ok": False, "error": f"cannot prepare the sandbox check: {exc}"}
+    probe_env = _agent_env({**env, _CODEX_ENV_CANARY: "1"})
+    withheld = sorted(name for name in probe_env if _CREDENTIAL_NAME.search(name))
     return _run_cmd(
         [exe, "sandbox", *managed, *overrides, "--",
-         sys.executable, "-I", "-c", _CODEX_POLICY_PROBE, cwd or ".", *denied],
-        env=_agent_env(env),
+         sys.executable, "-I", "-c", _CODEX_POLICY_PROBE, cwd or ".", *withheld, "--", *denied],
+        env=probe_env,
         cwd=cwd,
         timeout_s=_CODEX_ISOLATION_TIMEOUT_S,
         on_spawn=on_spawn,
@@ -557,6 +585,14 @@ def derived_lane_suffix() -> str:
     parent-derived lane does not change either - the parent is the same process
     - but a full restart is a new session under both.
     """
+    return reproducible_lane_suffix() or parent_lane_suffix()
+
+
+def reproducible_lane_suffix() -> str:
+    """The derived lane a relaunch derives again: a ``HARDLINE_AGENT_LABEL``
+    pin, or one from the host's session id (a Claude conversation keeps its id
+    across ``--resume`` and reconnects). "" for a parent-derived lane, which
+    ends with its launcher."""
     label = os.environ.get("HARDLINE_AGENT_LABEL", "").strip()
     if label:
         return label
@@ -566,7 +602,7 @@ def derived_lane_suffix() -> str:
         name = Path(project).name if project else Path.cwd().name
         short = session_id[:8]
         return f"{name}.{short}" if name else short
-    return parent_lane_suffix()
+    return ""
 
 
 def conversation_id() -> Optional[str]:

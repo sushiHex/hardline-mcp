@@ -1898,7 +1898,7 @@
   },
   "codex-legacy-sandbox-gets-no-profile": {
     "file": "hardline_mcp/adapters.py",
-    "before": "    if not sandbox.profile:\n        return [\"--sandbox\", \"workspace-write\" if write else \"read-only\"]\n",
+    "before": "    if not sandbox.profile:\n        return _CODEX_NO_SECRET_ENV + [\"--sandbox\", \"workspace-write\" if write else \"read-only\"]\n",
     "after": "",
     "tests": [
       "tests/test_adapters.py::test_ask_codex_on_windows_runs_the_elevated_sandbox_past_the_runtimes[default]"
@@ -2458,6 +2458,89 @@
     "after": "    managed = []\n",
     "tests": [
       "tests/test_adapters.py::test_the_preflight_loads_managed_requirements_as_exec_does"
+    ]
+  },
+  "codex-profile-pin-keeps-credentials-out": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    return _CODEX_NO_SECRET_ENV + [\n        \"-c\", f'default_permissions=\"{name}\"',\n",
+    "after": "    return [\n        \"-c\", f'default_permissions=\"{name}\"',\n",
+    "tests": [
+      "tests/test_adapters.py::test_every_sandbox_keeps_credentials_out_of_commands[mxc]",
+      "tests/test_adapters.py::test_every_sandbox_keeps_credentials_out_of_commands[posix]"
+    ]
+  },
+  "codex-sandbox-pin-keeps-credentials-out": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        return _CODEX_NO_SECRET_ENV + [\"--sandbox\", \"workspace-write\" if write else \"read-only\"]\n",
+    "after": "        return [\"--sandbox\", \"workspace-write\" if write else \"read-only\"]\n",
+    "tests": [
+      "tests/test_adapters.py::test_every_sandbox_keeps_credentials_out_of_commands[elevated]",
+      "tests/test_adapters.py::test_every_sandbox_keeps_credentials_out_of_commands[unelevated]",
+      "tests/test_adapters.py::test_every_sandbox_keeps_credentials_out_of_commands[inherit]"
+    ]
+  },
+  "codex-preflight-plants-env-canary": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    probe_env = _agent_env({**env, _CODEX_ENV_CANARY: \"1\"})\n",
+    "after": "    probe_env = _agent_env(env)\n",
+    "tests": [
+      "tests/test_adapters.py::test_the_preflight_probes_the_workdir_and_every_existing_denial"
+    ]
+  },
+  "claim-reports-the-lane-asked-for": {
+    "file": "hardline_mcp/sessions.py",
+    "before": "        \"lane\": primary if primary in accepted else (accepted[-1] if accepted else None),\n",
+    "after": "        \"lane\": accepted[-1] if accepted else None,\n",
+    "tests": [
+      "tests/test_sessions.py::test_reclaiming_an_earlier_name_reports_that_name"
+    ]
+  },
+  "register-reports-inherited-mail": {
+    "file": "hardline_mcp/server.py",
+    "before": "    inherited = claimed[\"inherited_unread\"]\n",
+    "after": "    inherited = 0\n",
+    "tests": [
+      "tests/test_sessions.py::test_a_claim_says_what_mail_it_came_with"
+    ]
+  },
+  "async-result-goes-to-the-derived-lane": {
+    "file": "hardline_mcp/server.py",
+    "before": "    recipient = _result_lane(from_agent)\n",
+    "after": "    recipient = adapters.lane_for(from_agent)\n",
+    "tests": [
+      "tests/test_server.py::test_a_result_goes_to_the_lane_a_relaunch_gets_back"
+    ]
+  },
+  "async-result-skips-a-parent-derived-lane": {
+    "file": "hardline_mcp/server.py",
+    "before": "    durable = adapters.reproducible_lane_suffix()\n",
+    "after": "    durable = adapters.derived_lane_suffix()\n",
+    "tests": [
+      "tests/test_server.py::test_a_codex_result_goes_to_its_claim"
+    ]
+  },
+  "codex-probe-checks-withheld-names": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "inherited = [name for name in withheld if name in os.environ]\n",
+    "after": "inherited = []\n",
+    "tests": [
+      "tests/test_adapters.py::test_the_policy_probe[credential-inherited]"
+    ]
+  },
+  "codex-preflight-withholds-every-credential-name": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    withheld = sorted(name for name in probe_env if _CREDENTIAL_NAME.search(name))\n",
+    "after": "    withheld = [_CODEX_ENV_CANARY]\n",
+    "tests": [
+      "tests/test_adapters.py::test_the_preflight_probes_the_workdir_and_every_existing_denial"
+    ]
+  },
+  "async-result-checks-the-derived-grant": {
+    "file": "hardline_mcp/server.py",
+    "before": "    if lane and sessions.granted([lane]):\n",
+    "after": "    if lane:\n",
+    "tests": [
+      "tests/test_server.py::test_a_result_skips_a_derived_lane_another_process_took"
     ]
   }
 }
