@@ -81,12 +81,14 @@ hardline-spawned Codex can read:
   `~/.claude.json`: credentials, transcripts, settings;
 - Codex's home: `~/.codex`, `CODEX_HOME` when set, and advisory mode's
   temporary copy. Every entry is denied except `AGENTS.md`, `skills`, the
-  sandbox's own `.sandbox`, `.sandbox-bin` and scratch directories, and lock
-  files. Besides `auth.json` and transcripts it holds logs, dictation,
-  memories and state databases under names that change between releases, so
-  entries are listed at each call rather than named. Locks hold nothing, and
-  MXC cannot start over a denial of a file another process holds open
-  exclusively;
+  sandbox's helper binaries (`.sandbox-bin`) and scratch space (`tmp`, `.tmp`,
+  where the shell's `apply_patch` alias lives). Besides `auth.json` and
+  transcripts, the home holds logs, dictation, memories and state databases.
+  The elevated sandbox also logs command lines under `.sandbox`. These names
+  change between releases, so entries are listed at each call, and a home
+  that cannot be listed refuses the call. Codex's provisioning `.guard` file
+  is also left out, since MXC cannot start over a denial of a file another
+  process holds open exclusively;
 - gh's configuration, where its token may live: `GH_CONFIG_DIR`,
   `$XDG_CONFIG_HOME/gh`, `%APPDATA%\GitHub CLI` and `~/.config/gh`, each that
   applies;
@@ -107,18 +109,23 @@ of `~/.claude/skills` reads its workdir and nothing else under `~/.claude`.
 On Linux, bubblewrap leaves a read-only workdir there unreadable, so such a
 call is refused. A denied directory itself stays denied as a workdir.
 
-**The preflight proves the policy that holds, not the one passed.** Before
+**The preflight checks the policy that holds, not the one passed.** Before
 every call, hardline's own Python runs once through `codex sandbox` under the
-call's exact sandbox and pin, in its workdir (about half a second). It must
-list the workdir, and no existing denied path may open; opening reads
-nothing. Otherwise the call is refused. That catches each of these:
+call's exact sandbox and pin, in its workdir (about half a second). Managed
+requirements, local and cloud, are loaded as `codex exec` loads them. The
+probe must list the workdir, and no denied path may open; opening reads
+nothing. One of those paths is a canary that hardline has just written under
+its own denied cache, so a policy that denies nothing cannot pass for want of
+targets. Otherwise the call is refused. That catches each of these:
 - Windows without MXC, where `codex exec` would start no command and report
   none failed;
-- a managed requirements file that rejects hardline's profile and swaps in
-  one without the denials;
+- managed requirements that reject hardline's profile and swap in one
+  without the denials;
 - the Linux workdir above;
 
-each of which would otherwise read as a finished review.
+each of which would otherwise read as a finished review. The preflight and
+the call are separate processes, so the check is of the configuration as it
+stood half a second earlier.
 `tests/test_live_sandbox.py` checks all of this against Codex 0.162.1 with
 dummy secrets only. It runs in CI on Linux and macOS, and on a Windows 11
 host, since GitHub's Windows runners have no native MXC. Real `ask_codex`
@@ -130,9 +137,12 @@ What the denial does not cover:
   only.
 - **Paths that appear mid-call.** A secret created after the call starts may
   be readable: bubblewrap masks a missing path only under a writable root.
-- **Writable roots inside a denied directory.** A writable root of the
-  sandbox's own (the workdir, or `TMPDIR` under `write=True`) is opened again
-  there, because the most specific entry wins.
+- **The workdir and writable roots inside a denied directory.** The workdir,
+  and `TMPDIR` under `write=True`, are opened again there with everything
+  beneath them, because the most specific entry wins.
+- **Content Codex itself loads.** Codex reads its skills, rules and
+  instructions outside the sandbox. The denial binds the reviewer's commands,
+  not the Codex host.
 
 A deny profile routes Codex's own file operations (AGENTS.md, apply_patch)
 through a sandboxed helper process whose answer Codex awaits with no timeout

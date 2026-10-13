@@ -260,27 +260,40 @@ def _codex_sandbox() -> _CodexSandbox:
 
 
 # What a reviewer still uses from a Codex home: the instructions and skills it
-# reads, and the sandbox's own state, helper binaries and scratch space.
+# reads, the sandbox's helper binaries, and the scratch space its shell's
+# apply_patch alias lives in (tmp/arg0). `.sandbox` is not among them: the
+# elevated sandbox logs command lines there.
 _CODEX_HOME_READABLE = frozenset(
-    {"AGENTS.md", "AGENTS.override.md", "skills", ".sandbox", ".sandbox-bin", "tmp", ".tmp"}
+    {"AGENTS.md", "AGENTS.override.md", "skills", ".sandbox-bin", "tmp", ".tmp"}
 )
 
 
 def _codex_home_entries(codex_home: Path) -> list[Path]:
-    """A Codex home's entries but ``_CODEX_HOME_READABLE`` and its lock files.
-    It holds credentials, transcripts, logs, dictation, memories and state
-    databases under names that change between releases, so they are listed at
-    call time, not named; the known secrets are named too, in case they
-    appear. A lock holds nothing, and MXC refuses to start over a denial of a
-    file another process holds exclusively (a live provisioning `.guard`,
-    0x80070020, measured on 0.162.1)."""
+    """A Codex home's entries but ``_CODEX_HOME_READABLE``. It holds
+    credentials, transcripts, logs, dictation, memories and state databases
+    under names that change between releases, so they are listed at call
+    time, not named; the known secrets are named too, in case they appear.
+
+    One more is left out: Codex's provisioning guard, a lock file, since MXC
+    refuses to start over a denial of a file another process holds open
+    exclusively (0x80070020, measured on 0.162.1). A home that cannot be
+    listed raises ValueError: denying only the known names would abandon the
+    rest unannounced.
+    """
     try:
         present = sorted(os.listdir(codex_home))
-    except OSError:
+    except FileNotFoundError:
         present = []
+    except OSError as exc:
+        raise ValueError(f"cannot pin Codex's sandbox: cannot list {codex_home}: {exc}") from exc
     known = [".env", "auth.json", "config.toml", "sessions", "archived_sessions", "history.jsonl"]
-    return [codex_home / name for name in dict.fromkeys(known + present)
-            if name not in _CODEX_HOME_READABLE and not name.endswith((".lock", ".guard"))]
+    return [
+        codex_home / name
+        for name in dict.fromkeys(known + present)
+        if name not in _CODEX_HOME_READABLE
+        and not (name.startswith(".codex-provisioning-") and name.endswith(".guard")
+                 and (codex_home / name).is_file())
+    ]
 
 
 def _codex_unreadable(env: dict[str, str]) -> list[Path]:
@@ -334,8 +347,7 @@ def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) 
     ``write``) when it lies inside a denied directory: the most specific entry
     wins. A path under a missing directory is denied as that directory, the
     topmost one missing: MXC refuses to start over a denial whose parent does
-    not exist (measured on 0.162.1), and denying the missing directory whole
-    hides nothing that exists and everything created there later.
+    not exist (measured on 0.162.1).
 
     The profile's name is new on every call. Codex deep-merges configuration
     layers, so a table any layer gave a known name - a trusted project's
@@ -372,7 +384,9 @@ def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) 
 
 
 # Run by the preflight inside the call's own sandbox: the workdir must list and
-# no existing denied path may open. Opening reads nothing.
+# no denied path may open - the canary first, a file hardline has just opened,
+# so a policy that denies nothing cannot pass for want of targets. Opening
+# reads nothing.
 _CODEX_POLICY_PROBE = """\
 import os, sys
 def opens(path):
@@ -390,22 +404,40 @@ if held:
 """
 
 
+def _codex_canary() -> Path:
+    """A file under hardline's own cache, which every pin denies, that the
+    preflight must fail to open: positive evidence the denials hold, down to
+    a file inside a denied directory."""
+    canary = Path.home() / ".cache" / "hardline-mcp" / "sandbox-canary"
+    canary.parent.mkdir(parents=True, exist_ok=True)
+    canary.write_text("hardline sandbox canary\n", encoding="utf-8")
+    return canary
+
+
 def _codex_sandbox_started(exe: str, overrides: list[str], env: dict, cwd: str | None, on_spawn=None) -> dict:
     """The run of hardline's own Python under ``overrides`` - the very sandbox
     and pin the call will use - through ``codex sandbox``, in the child's own
     environment and directory, under ``on_spawn``: proof that the policy holds
     before a model turn is spent. Never cached (about 0.5 s).
 
-    It proves what was asked, not what was passed. Where Windows cannot
-    provide MXC, ``codex exec`` starts none of its commands and records no
-    failed command either. A managed requirements file can swap a profile it
-    does not allow for one without the denials. On Linux, bubblewrap hides a
-    read-only workdir inside a denied directory. Each would otherwise read as a
-    finished review.
+    It proves what holds, not what was passed. Where Windows cannot provide
+    MXC, ``codex exec`` starts none of its commands and records no failed
+    command either. Managed requirements, local or cloud, can swap a profile
+    they do not allow for one without the denials: the profile is named with
+    ``--permission-profile`` and ``--include-managed-config`` so this loads
+    what ``codex exec`` loads, cloud bundle included. On Linux, bubblewrap
+    leaves a read-only workdir inside a denied directory unreadable. Each
+    would otherwise read as a finished review.
     """
-    denied = [str(path) for path in _codex_unreadable(env) if path.exists()]
+    profile = [o.split("=", 1)[1].strip('"') for o in overrides if o.startswith("default_permissions=")]
+    managed = ["--permission-profile", profile[0], "--include-managed-config"] if profile else []
+    try:
+        denied = [str(_codex_canary())]
+        denied += [str(path) for path in _codex_unreadable(env) if path.exists()]
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": f"cannot prepare the sandbox check: {exc}"}
     return _run_cmd(
-        [exe, "sandbox", *overrides, "--",
+        [exe, "sandbox", *managed, *overrides, "--",
          sys.executable, "-I", "-c", _CODEX_POLICY_PROBE, cwd or ".", *denied],
         env=_agent_env(env),
         cwd=cwd,

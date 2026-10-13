@@ -1101,8 +1101,23 @@ def test_the_preflight_probes_the_workdir_and_every_existing_denial(
         sys.executable, "-I", "-c", adapters._CODEX_POLICY_PROBE,
     ]
     assert argv[9] == str(tmp_path)
-    assert str(secret_home / ".ssh") in argv[10:]
-    assert all(os.path.exists(path) for path in argv[10:])  # a missing one proves nothing
+    canary = secret_home / ".cache" / "hardline-mcp" / "sandbox-canary"
+    assert argv[10] == str(canary) and canary.is_file()  # never a policy denying nothing
+    assert str(secret_home / ".ssh") in argv[11:]
+    assert all(os.path.exists(path) for path in argv[11:])  # a missing one proves nothing
+
+
+def test_the_preflight_loads_managed_requirements_as_exec_does(monkeypatch, secret_home, tmp_path):
+    """`codex sandbox` fetches the cloud requirements bundle only for a profile
+    named with --permission-profile and --include-managed-config, while
+    `codex exec` always applies it, and a bundle can reject the profile."""
+    seen = []
+    monkeypatch.setattr(adapters, "_run_cmd", lambda argv, **kwargs: seen.append(argv) or {"ok": True})
+    pin = ["-c", 'default_permissions="hardline-0123"', "-c", "x=1"]
+    _real_sandbox_started("codex", pin, dict(os.environ), str(tmp_path))
+    (argv,) = seen
+    assert argv[:7] == ["codex", "sandbox", "--permission-profile", "hardline-0123",
+                        "--include-managed-config", *pin[:2]]
 
 
 @pytest.mark.parametrize(
@@ -1131,20 +1146,41 @@ def test_the_policy_probe(tmp_path, workdir, denied, refusal):
 
 def test_a_codex_home_is_denied_but_for_what_a_reviewer_uses(monkeypatch, windows, secret_home):
     """Its secrets change names between releases (state_5.sqlite holds each
-    thread's first message), so every entry is denied but the instructions,
-    skills and the sandbox's own files - and locks, which hold nothing and
-    which MXC cannot deny while another process holds them."""
+    thread's first message; the elevated sandbox logs command lines under
+    .sandbox), so every entry is denied but the instructions, skills, helper
+    binaries and scratch space - and the provisioning guard file, which MXC
+    cannot deny while Codex holds it, but no directory dressed as one."""
     codex = secret_home / "codex"
-    for name in ("state_5.sqlite", "logs_2.sqlite", "dictation-history", "AGENTS.md",
-                 "skills", ".sandbox-bin", ".sqlite-maintenance.lock", ".codex-provisioning-1.guard"):
+    for name in ("state_5.sqlite", "logs_2.sqlite", "dictation-history", ".sandbox",
+                 "fake.guard", ".codex-provisioning-2.guard", "skills", ".sandbox-bin", "tmp"):
         (codex / name).mkdir()
+    for name in ("AGENTS.md", ".sqlite-maintenance.lock", "other.guard", ".codex-provisioning-1.guard"):
+        (codex / name).write_text("", encoding="utf-8")
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     adapters.ask_codex("summarize")
     access = _access(calls[0]["cmd"])
-    assert _denies(access, [codex / "state_5.sqlite", codex / "logs_2.sqlite", codex / "dictation-history"])
-    for kept in ("AGENTS.md", "skills", ".sandbox-bin", ".sqlite-maintenance.lock",
-                 ".codex-provisioning-1.guard"):
+    assert _denies(access, [codex / name for name in (
+        "state_5.sqlite", "logs_2.sqlite", "dictation-history", ".sandbox",
+        "fake.guard", "other.guard", ".codex-provisioning-2.guard", ".sqlite-maintenance.lock",
+    )])
+    for kept in ("AGENTS.md", "skills", ".sandbox-bin", "tmp", ".codex-provisioning-1.guard"):
         assert str(codex / kept) not in access
+
+
+def test_a_codex_home_that_cannot_be_listed_refuses_the_call(monkeypatch, windows, secret_home):
+    """Denying only the names known today would leave the rest readable."""
+    real = os.listdir
+
+    def listdir(path):
+        if adapters.Path(path) == secret_home / "codex":
+            raise PermissionError("denied")
+        return real(path)
+
+    monkeypatch.setattr(adapters.os, "listdir", listdir)
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    out = adapters.ask_codex("summarize")
+    assert out["ok"] is False and "cannot list" in out["error"]
+    assert calls == []
 
 
 def test_the_default_codex_home_is_denied_beside_a_relocated_one(monkeypatch, windows, secret_home):

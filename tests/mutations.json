@@ -1930,8 +1930,8 @@
   },
   "codex-deny-covers-the-advisory-home": {
     "file": "hardline_mcp/adapters.py",
-    "before": "for source in (os.environ, env)",
-    "after": "for source in (os.environ,)",
+    "before": "for s in (os.environ, env) if s.get(\"CODEX_HOME\")",
+    "after": "for s in (os.environ,) if s.get(\"CODEX_HOME\")",
     "tests": [
       "tests/test_adapters.py::test_advisory_denies_its_copy_of_the_codex_login_too"
     ]
@@ -2003,8 +2003,8 @@
   },
   "codex-deny-covers-codex-env-and-config": {
     "file": "hardline_mcp/adapters.py",
-    "before": "for name in (\".env\", \"auth.json\", \"config.toml\", \"sessions\",",
-    "after": "for name in (\"auth.json\", \"sessions\",",
+    "before": "    known = [\".env\", \"auth.json\", \"config.toml\", \"sessions\", \"archived_sessions\", \"history.jsonl\"]\n",
+    "after": "    known = [\"auth.json\", \"sessions\"]\n",
     "tests": [
       "tests/test_adapters.py::test_ask_codex_on_windows_pins_mxc_with_the_secrets_denied"
     ]
@@ -2366,16 +2366,16 @@
   },
   "codex-preflight-passes-denials": {
     "file": "hardline_mcp/adapters.py",
-    "before": "    denied = [str(path) for path in _codex_unreadable(env) if path.exists()]\n",
-    "after": "    denied = []\n",
+    "before": "        denied += [str(path) for path in _codex_unreadable(env) if path.exists()]\n",
+    "after": "        denied += []\n",
     "tests": [
       "tests/test_adapters.py::test_the_preflight_probes_the_workdir_and_every_existing_denial"
     ]
   },
   "codex-preflight-skips-missing-denials": {
     "file": "hardline_mcp/adapters.py",
-    "before": "    denied = [str(path) for path in _codex_unreadable(env) if path.exists()]\n",
-    "after": "    denied = [str(path) for path in _codex_unreadable(env)]\n",
+    "before": "        denied += [str(path) for path in _codex_unreadable(env) if path.exists()]\n",
+    "after": "        denied += [str(path) for path in _codex_unreadable(env)]\n",
     "tests": [
       "tests/test_adapters.py::test_the_preflight_probes_the_workdir_and_every_existing_denial"
     ]
@@ -2390,16 +2390,8 @@
   },
   "codex-home-keeps-what-a-reviewer-uses": {
     "file": "hardline_mcp/adapters.py",
-    "before": "if name not in _CODEX_HOME_READABLE and not name.endswith((\".lock\", \".guard\"))]",
-    "after": "if not name.endswith((\".lock\", \".guard\"))]",
-    "tests": [
-      "tests/test_adapters.py::test_a_codex_home_is_denied_but_for_what_a_reviewer_uses"
-    ]
-  },
-  "codex-home-skips-locks": {
-    "file": "hardline_mcp/adapters.py",
-    "before": "if name not in _CODEX_HOME_READABLE and not name.endswith((\".lock\", \".guard\"))]",
-    "after": "if name not in _CODEX_HOME_READABLE]",
+    "before": "        if name not in _CODEX_HOME_READABLE\n",
+    "after": "        if True\n",
     "tests": [
       "tests/test_adapters.py::test_a_codex_home_is_denied_but_for_what_a_reviewer_uses"
     ]
@@ -2410,6 +2402,62 @@
     "after": "        [*(Path(s[\"CODEX_HOME\"]) for s in (os.environ, env) if s.get(\"CODEX_HOME\"))]\n",
     "tests": [
       "tests/test_adapters.py::test_the_default_codex_home_is_denied_beside_a_relocated_one"
+    ]
+  },
+  "codex-home-denies-sandbox-logs": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "{\"AGENTS.md\", \"AGENTS.override.md\", \"skills\", \".sandbox-bin\", \"tmp\", \".tmp\"}",
+    "after": "{\"AGENTS.md\", \"AGENTS.override.md\", \"skills\", \".sandbox\", \".sandbox-bin\", \"tmp\", \".tmp\"}",
+    "tests": [
+      "tests/test_adapters.py::test_a_codex_home_is_denied_but_for_what_a_reviewer_uses"
+    ]
+  },
+  "codex-home-spares-the-provisioning-guard": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        and not (name.startswith(\".codex-provisioning-\") and name.endswith(\".guard\")\n                 and (codex_home / name).is_file())\n",
+    "after": "",
+    "tests": [
+      "tests/test_adapters.py::test_a_codex_home_is_denied_but_for_what_a_reviewer_uses"
+    ]
+  },
+  "codex-home-guard-must-be-provisioning": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        and not (name.startswith(\".codex-provisioning-\") and name.endswith(\".guard\")\n",
+    "after": "        and not (name.endswith(\".guard\")\n",
+    "tests": [
+      "tests/test_adapters.py::test_a_codex_home_is_denied_but_for_what_a_reviewer_uses"
+    ]
+  },
+  "codex-home-guard-must-be-a-file": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "                 and (codex_home / name).is_file())\n",
+    "after": "                 )\n",
+    "tests": [
+      "tests/test_adapters.py::test_a_codex_home_is_denied_but_for_what_a_reviewer_uses"
+    ]
+  },
+  "codex-home-unlistable-refuses": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    except FileNotFoundError:\n        present = []\n    except OSError as exc:\n",
+    "after": "    except OSError as exc:\n        present = []\n    except FileNotFoundError:\n",
+    "tests": [
+      "tests/test_adapters.py::test_a_codex_home_that_cannot_be_listed_refuses_the_call"
+    ]
+  },
+  "codex-preflight-canary": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        denied = [str(_codex_canary())]\n",
+    "after": "        denied = []\n",
+    "tests": [
+      "tests/test_adapters.py::test_the_preflight_probes_the_workdir_and_every_existing_denial"
+    ]
+  },
+  "codex-preflight-loads-managed-config": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    managed = [\"--permission-profile\", profile[0], \"--include-managed-config\"] if profile else []\n",
+    "after": "    managed = []\n",
+    "tests": [
+      "tests/test_adapters.py::test_the_preflight_loads_managed_requirements_as_exec_does"
     ]
   }
 }
