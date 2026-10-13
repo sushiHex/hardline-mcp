@@ -137,10 +137,10 @@ def test_a_command_cannot_read_codex_s_own_environment(home, monkeypatch):
     out = _command(home / "project", (
         "import ctypes, ctypes.util, glob, os, sys\n"
         "token, plain = 'NEKOT-HG-YMMUD'[::-1], os.environ['HARDLINE_LIVE_PLAIN']\n"
-        "seen = []\n"
+        "seen = {}\n"
         "for path in glob.glob('/proc/[0-9]*/environ'):\n"
         "    try:\n"
-        "        seen.append(open(path, 'rb').read().decode('latin-1'))\n"
+        "        seen[path] = open(path, 'rb').read().decode('latin-1')\n"
         "    except OSError:\n"
         "        pass\n"
         "if sys.platform == 'darwin':\n"
@@ -150,9 +150,12 @@ def test_a_command_cannot_read_codex_s_own_environment(home, monkeypatch):
         "        size = ctypes.c_size_t(1 << 20)\n"
         "        buf = ctypes.create_string_buffer(size.value)\n"
         "        if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0:\n"
-        "            seen.append(buf.raw[:size.value].decode('latin-1'))\n"
-        "print('LEAKED' if any(token in s for s in seen) else 'SEALED',\n"
-        "      'route' if any(plain in s for s in seen) else 'no-route')\n"
+        "            raw = buf.raw[:size.value]\n"
+        "            exe = raw[4:].split(b'\\0')[0].decode('latin-1')\n"
+        "            seen[f'pid {pid} ({exe})'] = raw.decode('latin-1')\n"
+        "leaks = [where for where, text in seen.items() if token in text]\n"
+        "print('LEAKED from ' + ', '.join(leaks) if leaks else 'SEALED',\n"
+        "      'route' if any(plain in text for text in seen.values()) else 'no-route')\n"
     ))
     assert "SEALED route" in out, out
 
