@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -1085,15 +1086,74 @@ def test_off_windows_a_sandbox_that_starts_nothing_refuses_without_windows_advic
     assert calls == []
 
 
-@pytest.mark.parametrize(
-    ("on_windows", "noop"), [(True, ["cmd.exe", "/d", "/c", "exit 0"]), (False, ["true"])]
-)
-def test_the_preflight_runs_the_platforms_empty_command(monkeypatch, on_windows, noop):
-    monkeypatch.setattr(adapters, "_ON_WINDOWS", on_windows)
+def test_the_preflight_probes_the_workdir_and_every_existing_denial(
+    monkeypatch, secret_home, tmp_path
+):
+    """Inside the call's own sandbox, so it proves the policy that holds, not
+    the one passed: a requirements file can swap the profile out."""
+    (secret_home / ".ssh").mkdir()
     seen = []
     monkeypatch.setattr(adapters, "_run_cmd", lambda argv, **kwargs: seen.append(argv) or {"ok": True})
-    _real_sandbox_started("codex", ["-c", "x=1"], {}, None)
-    assert seen == [["codex", "sandbox", "-c", "x=1", "--", *noop]]
+    _real_sandbox_started("codex", ["-c", "x=1"], dict(os.environ), str(tmp_path))
+    (argv,) = seen
+    assert argv[:9] == [
+        "codex", "sandbox", "-c", "x=1", "--",
+        sys.executable, "-I", "-c", adapters._CODEX_POLICY_PROBE,
+    ]
+    assert argv[9] == str(tmp_path)
+    assert str(secret_home / ".ssh") in argv[10:]
+    assert all(os.path.exists(path) for path in argv[10:])  # a missing one proves nothing
+
+
+@pytest.mark.parametrize(
+    ("workdir", "denied", "refusal"),
+    [
+        ("project", [], None),
+        ("project", ["secret.txt"], "denied paths still open"),
+        ("project", ["secrets"], "denied paths still open"),
+        ("nowhere", [], "cannot read the workdir"),
+    ],
+    ids=["holds", "file-open", "directory-open", "workdir-unreadable"],
+)
+def test_the_policy_probe(tmp_path, workdir, denied, refusal):
+    """Run unsandboxed here, where every existing path opens."""
+    (tmp_path / "project").mkdir()
+    (tmp_path / "secret.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "secrets").mkdir()
+    out = subprocess.run(
+        [sys.executable, "-I", "-c", adapters._CODEX_POLICY_PROBE, str(tmp_path / workdir),
+         *(str(tmp_path / name) for name in denied)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert (out.returncode == 0) is (refusal is None), out.stderr
+    assert refusal is None or refusal in out.stderr
+
+
+def test_a_codex_home_is_denied_but_for_what_a_reviewer_uses(monkeypatch, windows, secret_home):
+    """Its secrets change names between releases (state_5.sqlite holds each
+    thread's first message), so every entry is denied but the instructions,
+    skills and the sandbox's own files - and locks, which hold nothing and
+    which MXC cannot deny while another process holds them."""
+    codex = secret_home / "codex"
+    for name in ("state_5.sqlite", "logs_2.sqlite", "dictation-history", "AGENTS.md",
+                 "skills", ".sandbox-bin", ".sqlite-maintenance.lock", ".codex-provisioning-1.guard"):
+        (codex / name).mkdir()
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    access = _access(calls[0]["cmd"])
+    assert _denies(access, [codex / "state_5.sqlite", codex / "logs_2.sqlite", codex / "dictation-history"])
+    for kept in ("AGENTS.md", "skills", ".sandbox-bin", ".sqlite-maintenance.lock",
+                 ".codex-provisioning-1.guard"):
+        assert str(codex / kept) not in access
+
+
+def test_the_default_codex_home_is_denied_beside_a_relocated_one(monkeypatch, windows, secret_home):
+    (secret_home / ".codex").mkdir()
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    assert _denies(_access(calls[0]["cmd"]), [
+        secret_home / ".codex" / "auth.json", secret_home / "codex" / "auth.json",
+    ])
 
 
 def test_ask_codex_ignores_transient_error_before_completed_turn(monkeypatch):

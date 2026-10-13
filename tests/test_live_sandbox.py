@@ -48,6 +48,8 @@ def home(monkeypatch, tmp_path):
         ".claude/.credentials.json": "DUMMY-CLAUDE",
         ".claude.json": "DUMMY-CLAUDE-JSON",
         ".codex/auth.json": "DUMMY-CODEX",
+        ".codex/state_5.sqlite": "DUMMY-CODEX-STATE",
+        ".codex/AGENTS.md": "CODEX-AGENTS-TEXT",
         "gh/hosts.yml": "DUMMY-GH",
         "store/mb.db": "DUMMY-STORE",
         ".ssh/id_ed25519": "DUMMY-SSH",
@@ -83,12 +85,23 @@ def _run(cwd, *paths, write=False):
 def test_the_read_only_pin_denies_every_secret_and_nothing_else(home):
     secrets = [
         home / ".claude" / ".credentials.json", home / ".claude.json",
-        home / ".codex" / "auth.json", home / "gh" / "hosts.yml",
-        home / "store" / "mb.db", home / ".ssh" / "id_ed25519",
+        home / ".codex" / "auth.json", home / ".codex" / "state_5.sqlite",
+        home / "gh" / "hosts.yml", home / "store" / "mb.db", home / ".ssh" / "id_ed25519",
     ]
-    out = _run(home / "project", *secrets, home / "project" / "README.md")
+    readable = [home / "project" / "README.md", home / ".codex" / "AGENTS.md"]
+    out = _run(home / "project", *secrets, *readable)
     assert "DUMMY-" not in out, out
-    assert "PROJECT-TEXT" in out, out  # the sandbox ran, and read what it may
+    # The sandbox ran, and read what it may: the project, Codex's instructions.
+    assert "PROJECT-TEXT" in out and "CODEX-AGENTS-TEXT" in out, out
+
+
+def test_the_preflight_catches_a_policy_without_the_denials(home):
+    """What a managed requirements file that rejects hardline's profile would
+    leave: the sandbox, but none of the denials."""
+    sandbox = adapters._codex_sandbox()
+    exe = adapters._prefix_for("codex")[0]
+    started = _started(exe, sandbox.overrides, dict(os.environ), str(home / "project"))
+    assert not started.get("ok") and "denied paths still open" in started["error"], started
 
 
 def test_the_read_only_pin_refuses_a_write(home):
@@ -105,9 +118,15 @@ def test_the_read_only_pin_refuses_a_write(home):
     assert not (project / "written.txt").exists()
 
 
-def test_a_workdir_inside_a_denied_directory_reads_alone(home):
-    """Its own read entry is more specific than the denial, so a reviewer of
-    ~/.claude/skills reads its workdir and nothing else under ~/.claude."""
+def test_a_workdir_inside_a_denied_directory(home):
+    """Its own read entry is more specific than the denial: MXC and Seatbelt
+    read the workdir and nothing else under ~/.claude. bubblewrap leaves it
+    unreadable, which the preflight reports instead of a review of nothing."""
     skills = home / ".claude" / "skills"
+    if sys.platform.startswith("linux"):
+        exe, overrides = _pinned(skills)
+        started = _started(exe, overrides, dict(os.environ), str(skills))
+        assert not started.get("ok") and "cannot read the workdir" in started["error"], started
+        return
     out = _run(skills, skills / "SKILL.md", home / ".claude" / ".credentials.json")
     assert "SKILL-TEXT" in out and "DUMMY-" not in out, out

@@ -2323,14 +2323,6 @@
       "tests/test_adapters.py::test_a_denial_under_a_missing_directory_denies_that_directory"
     ]
   },
-  "codex-preflight-posix-noop": {
-    "file": "hardline_mcp/adapters.py",
-    "before": "*([\"cmd.exe\", \"/d\", \"/c\", \"exit 0\"] if _ON_WINDOWS else [\"true\"])],",
-    "after": "*[\"cmd.exe\", \"/d\", \"/c\", \"exit 0\"]],",
-    "tests": [
-      "tests/test_adapters.py::test_the_preflight_runs_the_platforms_empty_command[False-noop1]"
-    ]
-  },
   "codex-refusal-windows-advice-only": {
     "file": "hardline_mcp/adapters.py",
     "before": "                        if _ON_WINDOWS\n                        else \"\"\n",
@@ -2353,6 +2345,71 @@
     "after": "",
     "tests": [
       "tests/test_adapters.py::test_every_home_gh_may_use_is_denied"
+    ]
+  },
+  "codex-probe-checks-denials": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "held = [path for path in denied if opens(path)]\n",
+    "after": "held = []\n",
+    "tests": [
+      "tests/test_adapters.py::test_the_policy_probe[file-open]",
+      "tests/test_adapters.py::test_the_policy_probe[directory-open]"
+    ]
+  },
+  "codex-probe-checks-workdir": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "if not opens(workdir):\n",
+    "after": "if False:\n",
+    "tests": [
+      "tests/test_adapters.py::test_the_policy_probe[workdir-unreadable]"
+    ]
+  },
+  "codex-preflight-passes-denials": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    denied = [str(path) for path in _codex_unreadable(env) if path.exists()]\n",
+    "after": "    denied = []\n",
+    "tests": [
+      "tests/test_adapters.py::test_the_preflight_probes_the_workdir_and_every_existing_denial"
+    ]
+  },
+  "codex-preflight-skips-missing-denials": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    denied = [str(path) for path in _codex_unreadable(env) if path.exists()]\n",
+    "after": "    denied = [str(path) for path in _codex_unreadable(env)]\n",
+    "tests": [
+      "tests/test_adapters.py::test_the_preflight_probes_the_workdir_and_every_existing_denial"
+    ]
+  },
+  "codex-home-listed-at-call-time": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        present = sorted(os.listdir(codex_home))\n",
+    "after": "        present = []\n",
+    "tests": [
+      "tests/test_adapters.py::test_a_codex_home_is_denied_but_for_what_a_reviewer_uses"
+    ]
+  },
+  "codex-home-keeps-what-a-reviewer-uses": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "if name not in _CODEX_HOME_READABLE and not name.endswith((\".lock\", \".guard\"))]",
+    "after": "if not name.endswith((\".lock\", \".guard\"))]",
+    "tests": [
+      "tests/test_adapters.py::test_a_codex_home_is_denied_but_for_what_a_reviewer_uses"
+    ]
+  },
+  "codex-home-skips-locks": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "if name not in _CODEX_HOME_READABLE and not name.endswith((\".lock\", \".guard\"))]",
+    "after": "if name not in _CODEX_HOME_READABLE]",
+    "tests": [
+      "tests/test_adapters.py::test_a_codex_home_is_denied_but_for_what_a_reviewer_uses"
+    ]
+  },
+  "codex-default-home-denied-beside-relocated": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        [home / \".codex\", *(Path(s[\"CODEX_HOME\"]) for s in (os.environ, env) if s.get(\"CODEX_HOME\"))]\n",
+    "after": "        [*(Path(s[\"CODEX_HOME\"]) for s in (os.environ, env) if s.get(\"CODEX_HOME\"))]\n",
+    "tests": [
+      "tests/test_adapters.py::test_the_default_codex_home_is_denied_beside_a_relocated_one"
     ]
   }
 }

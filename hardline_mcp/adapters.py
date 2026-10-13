@@ -45,6 +45,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -195,7 +196,9 @@ _CODEX_NO_CONNECTORS = ["-c", "features.apps=false", "-c", "features.plugins=fal
 # empty tmpfs, a denied file under /dev/null) and Seatbelt on macOS (denials
 # carved out of every allow rule), per process. tests/test_live_sandbox.py
 # measures it on Linux and macOS in CI; GitHub's Windows runners have no
-# native MXC, so Windows is measured locally.
+# native MXC, so Windows is measured locally. One difference, measured: a
+# read-only workdir inside a denied directory reads under MXC and Seatbelt,
+# while bubblewrap leaves it unreadable, so the preflight refuses that call.
 #
 # Codex 0.161.0's elevated sandbox refused to start any command while the Codex
 # desktop app ran its computer-use runtime (#47, openai/codex#51590). Before
@@ -256,14 +259,39 @@ def _codex_sandbox() -> _CodexSandbox:
     )
 
 
+# What a reviewer still uses from a Codex home: the instructions and skills it
+# reads, and the sandbox's own state, helper binaries and scratch space.
+_CODEX_HOME_READABLE = frozenset(
+    {"AGENTS.md", "AGENTS.override.md", "skills", ".sandbox", ".sandbox-bin", "tmp", ".tmp"}
+)
+
+
+def _codex_home_entries(codex_home: Path) -> list[Path]:
+    """A Codex home's entries but ``_CODEX_HOME_READABLE`` and its lock files.
+    It holds credentials, transcripts, logs, dictation, memories and state
+    databases under names that change between releases, so they are listed at
+    call time, not named; the known secrets are named too, in case they
+    appear. A lock holds nothing, and MXC refuses to start over a denial of a
+    file another process holds exclusively (a live provisioning `.guard`,
+    0x80070020, measured on 0.162.1)."""
+    try:
+        present = sorted(os.listdir(codex_home))
+    except OSError:
+        present = []
+    known = [".env", "auth.json", "config.toml", "sessions", "archived_sessions", "history.jsonl"]
+    return [codex_home / name for name in dict.fromkeys(known + present)
+            if name not in _CODEX_HOME_READABLE and not name.endswith((".lock", ".guard"))]
+
+
 def _codex_unreadable(env: dict[str, str]) -> list[Path]:
     """What no command of a spawned Codex may read: the credentials,
     configuration and transcripts of the agents hardline connects, gh's
     token, hardline's mail, and SSH keys.
 
     Every home that may hold them is named, not the one in use: a relocated
-    Claude home does not prove the default one empty. A Codex home of the
-    child's own (advisory's copy of auth.json) is denied beside the user's.
+    Claude or Codex home does not prove the default one empty. A Codex home of
+    the child's own (advisory's copy of auth.json) is denied beside the
+    user's.
     """
     home = Path.home()
     store = mailbox._resolve_db(None)
@@ -281,17 +309,12 @@ def _codex_unreadable(env: dict[str, str]) -> list[Path]:
         [home / ".claude", Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude")]
     )
     codex_homes = dict.fromkeys(
-        Path(source.get("CODEX_HOME") or home / ".codex") for source in (os.environ, env)
+        [home / ".codex", *(Path(s["CODEX_HOME"]) for s in (os.environ, env) if s.get("CODEX_HOME"))]
     )
     return [
         *claude_homes,
         home / ".claude.json",
-        *(
-            codex_home / name
-            for codex_home in codex_homes
-            for name in (".env", "auth.json", "config.toml", "sessions",
-                         "archived_sessions", "history.jsonl")
-        ),
+        *(entry for codex_home in codex_homes for entry in _codex_home_entries(codex_home)),
         *gh_homes,
         home / ".cache" / "hardline-mcp",
         *(store.with_name(store.name + suffix) for suffix in ("", "-wal", "-shm")),
@@ -348,20 +371,42 @@ def _codex_pin(sandbox: _CodexSandbox, write: bool, env: dict, cwd: str | None) 
     ]
 
 
-def _codex_sandbox_started(exe: str, overrides: list[str], env: dict, cwd: str | None, on_spawn=None) -> dict:
-    """The run of one empty command under ``overrides`` - the very sandbox and
-    pin the call will use - through ``codex sandbox``, in the child's own
-    environment and directory, under ``on_spawn``. Never cached (about 0.5 s).
+# Run by the preflight inside the call's own sandbox: the workdir must list and
+# no existing denied path may open. Opening reads nothing.
+_CODEX_POLICY_PROBE = """\
+import os, sys
+def opens(path):
+    try:
+        os.listdir(path) if os.path.isdir(path) else open(path, "rb").close()
+        return True
+    except OSError:
+        return False
+workdir, *denied = sys.argv[1:]
+if not opens(workdir):
+    sys.exit(f"cannot read the workdir {workdir}")
+held = [path for path in denied if opens(path)]
+if held:
+    sys.exit("denied paths still open: " + ", ".join(held))
+"""
 
-    The only sign that MXC works here: where Windows cannot provide it,
-    ``codex exec`` starts none of its commands and records no failed command
-    either, so the turn would read as a finished review that read nothing.
-    Elsewhere it proves the profile compiles and the sandbox can start in the
-    workdir before a model turn is spent finding out.
+
+def _codex_sandbox_started(exe: str, overrides: list[str], env: dict, cwd: str | None, on_spawn=None) -> dict:
+    """The run of hardline's own Python under ``overrides`` - the very sandbox
+    and pin the call will use - through ``codex sandbox``, in the child's own
+    environment and directory, under ``on_spawn``: proof that the policy holds
+    before a model turn is spent. Never cached (about 0.5 s).
+
+    It proves what was asked, not what was passed. Where Windows cannot
+    provide MXC, ``codex exec`` starts none of its commands and records no
+    failed command either. A managed requirements file can swap a profile it
+    does not allow for one without the denials. On Linux, bubblewrap hides a
+    read-only workdir inside a denied directory. Each would otherwise read as a
+    finished review.
     """
+    denied = [str(path) for path in _codex_unreadable(env) if path.exists()]
     return _run_cmd(
         [exe, "sandbox", *overrides, "--",
-         *(["cmd.exe", "/d", "/c", "exit 0"] if _ON_WINDOWS else ["true"])],
+         sys.executable, "-I", "-c", _CODEX_POLICY_PROBE, cwd or ".", *denied],
         env=_agent_env(env),
         cwd=cwd,
         timeout_s=_CODEX_ISOLATION_TIMEOUT_S,
@@ -2485,8 +2530,8 @@ def _ask_codex_structured(
             if not started.get("ok"):
                 return {
                     "ok": False,
-                    "error": f"Codex's {'MXC ' if _ON_WINDOWS else ''}sandbox started no "
-                    f"command here ({started.get('error') or 'no reason given'})"
+                    "error": f"Codex's {'MXC ' if _ON_WINDOWS else ''}sandbox does not hold "
+                    f"this call's policy here ({started.get('error') or 'no reason given'})"
                     + (
                         "; HARDLINE_CODEX_WINDOWS_SANDBOX=elevated runs the elevated "
                         "sandbox, which denies no reads"

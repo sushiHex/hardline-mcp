@@ -79,8 +79,14 @@ Seatbelt on macOS, and MXC (the default) on Windows. No command of a
 hardline-spawned Codex can read:
 - Claude Code's homes (`~/.claude`, and `CLAUDE_CONFIG_DIR` when set) and
   `~/.claude.json`: credentials, transcripts, settings;
-- Codex's `.env`, `auth.json`, `config.toml`, `sessions`, `archived_sessions`
-  and `history.jsonl`, in your Codex home and in advisory mode's temporary one;
+- Codex's home: `~/.codex`, `CODEX_HOME` when set, and advisory mode's
+  temporary copy. Every entry is denied except `AGENTS.md`, `skills`, the
+  sandbox's own `.sandbox`, `.sandbox-bin` and scratch directories, and lock
+  files. Besides `auth.json` and transcripts it holds logs, dictation,
+  memories and state databases under names that change between releases, so
+  entries are listed at each call rather than named. Locks hold nothing, and
+  MXC cannot start over a denial of a file another process holds open
+  exclusively;
 - gh's configuration, where its token may live: `GH_CONFIG_DIR`,
   `$XDG_CONFIG_HOME/gh`, `%APPDATA%\GitHub CLI` and `~/.config/gh`, each that
   applies;
@@ -90,24 +96,43 @@ hardline-spawned Codex can read:
 
 Each path is denied under its own spelling and its resolved one, so a
 junction or symlink does not open a second way in. A path under a missing
-directory is denied as the topmost missing directory: MXC refuses to start
-over a denial whose parent does not exist, and the missing directory hides
-nothing that exists and everything created there later.
+directory is denied as the topmost missing directory, since MXC refuses to
+start over a denial whose parent does not exist.
 
 The denial is per call. The sandbox holds it inside the reviewer's process
 and changes no file's permissions, so your own Codex sessions, full-access ones
 included, are untouched. A workdir inside a denied directory stays readable
 (writable with `write=True`): Codex's most specific entry wins, so a reviewer
 of `~/.claude/skills` reads its workdir and nothing else under `~/.claude`.
-A denied directory itself stays denied as a workdir.
+On Linux, bubblewrap leaves a read-only workdir there unreadable, so such a
+call is refused. A denied directory itself stays denied as a workdir.
 
-Every call first runs one empty command through `codex sandbox` with the
-call's own sandbox and pin (about half a second) and refuses the call if it
-does not start. `tests/test_live_sandbox.py` checks the pin against Codex
-0.162.1 with only dummy secrets: every denied path unreadable while the
-project reads, a write refused, and a workdir inside a denied directory read
-alone. It runs in CI on Linux and macOS, and on a Windows 11 host, since
-GitHub's Windows runners have no native MXC.
+**The preflight proves the policy that holds, not the one passed.** Before
+every call, hardline's own Python runs once through `codex sandbox` under the
+call's exact sandbox and pin, in its workdir (about half a second). It must
+list the workdir, and no existing denied path may open; opening reads
+nothing. Otherwise the call is refused. That catches each of these:
+- Windows without MXC, where `codex exec` would start no command and report
+  none failed;
+- a managed requirements file that rejects hardline's profile and swaps in
+  one without the denials;
+- the Linux workdir above;
+
+each of which would otherwise read as a finished review.
+`tests/test_live_sandbox.py` checks all of this against Codex 0.162.1 with
+dummy secrets only. It runs in CI on Linux and macOS, and on a Windows 11
+host, since GitHub's Windows runners have no native MXC. Real `ask_codex`
+runs, read-only and `write=True`, were also checked on that host.
+
+What the denial does not cover:
+- **Credentials in the environment.** `GH_TOKEN`, `GITHUB_TOKEN` and API keys
+  in hardline's environment reach the reviewer, since the denial covers files
+  only.
+- **Paths that appear mid-call.** A secret created after the call starts may
+  be readable: bubblewrap masks a missing path only under a writable root.
+- **Writable roots inside a denied directory.** A writable root of the
+  sandbox's own (the workdir, or `TMPDIR` under `write=True`) is opened again
+  there, because the most specific entry wins.
 
 A deny profile routes Codex's own file operations (AGENTS.md, apply_patch)
 through a sandboxed helper process whose answer Codex awaits with no timeout
