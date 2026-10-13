@@ -10,11 +10,28 @@ Default every test to the unqualified case; the lane tests opt in explicitly.
 """
 
 import os
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+# No fsync per commit in this process. Tests need no durability against power
+# loss, and on Windows CI runners each commit's fsync cost about 180 ms: one
+# 260-job listing test took 37 s. Locking, WAL and atomicity, which the suite
+# does exercise, are untouched. Patched at sqlite3.connect because the modules
+# import mailbox._connect by name.
+_sqlite_connect = sqlite3.connect
+
+
+def _connect_without_fsync(*args, **kwargs):
+    conn = _sqlite_connect(*args, **kwargs)
+    conn.execute("PRAGMA synchronous=OFF")
+    return conn
+
+
+sqlite3.connect = _connect_without_fsync
 
 # Isolate collection, subprocesses, and workers that outlive test fixtures.
 _store = tempfile.TemporaryDirectory(prefix="hardline-tests-")
