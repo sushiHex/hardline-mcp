@@ -857,8 +857,8 @@
   },
   "codex-timeout-validated-before-probes": {
     "file": "hardline_mcp/adapters.py",
-    "before": "    try:\n        _timeout_for(\"codex\")\n        sandbox = _codex_windows_sandbox()\n    except ValueError as exc:\n        return {\"ok\": False, \"error\": str(exc)}\n",
-    "after": "    sandbox = _codex_windows_sandbox()\n",
+    "before": "    try:\n        _timeout_for(\"codex\")\n        sandbox = _codex_sandbox()\n    except ValueError as exc:\n        return {\"ok\": False, \"error\": str(exc)}\n",
+    "after": "    sandbox = _codex_sandbox()\n",
     "tests": [
       "tests/test_codex_isolation.py::test_an_invalid_timeout_fails_before_any_probe[plain]",
       "tests/test_codex_isolation.py::test_an_invalid_timeout_fails_before_any_probe[telemetry]"
@@ -908,7 +908,7 @@
   },
   "codex-windows-sandbox-validated-before-resolution": {
     "file": "hardline_mcp/adapters.py",
-    "before": "        try:\n            _codex_windows_sandbox()\n        except ValueError as exc:\n            return {\"ok\": False, \"error\": str(exc)}, None\n",
+    "before": "        try:\n            _codex_sandbox()\n        except ValueError as exc:\n            return {\"ok\": False, \"error\": str(exc)}, None\n",
     "after": "        pass\n",
     "tests": [
       "tests/test_adapters.py::test_an_unknown_windows_sandbox_refuses_before_model_resolution"
@@ -1890,8 +1890,8 @@
   },
   "codex-mxc-pins-through-the-profile": {
     "file": "hardline_mcp/adapters.py",
-    "before": "        return _WindowsSandbox(overrides, {}, profile=True)\n",
-    "after": "        return _WindowsSandbox(overrides, {})\n",
+    "before": "        return _CodexSandbox(overrides, {}, profile=True)\n",
+    "after": "        return _CodexSandbox(overrides, {})\n",
     "tests": [
       "tests/test_adapters.py::test_ask_codex_on_windows_pins_mxc_with_the_secrets_denied"
     ]
@@ -1955,8 +1955,8 @@
   },
   "codex-unexpressible-denial-refuses": {
     "file": "hardline_mcp/adapters.py",
-    "before": "        if key is None or \"[\" in str(path) or \"]\" in str(path):\n",
-    "after": "        if \"[\" in str(path) or \"]\" in str(path):\n",
+    "before": "        if key is None or any(glob in str(path) for glob in \"[]*?\"):\n",
+    "after": "        if any(glob in str(path) for glob in \"[]*?\"):\n",
     "tests": [
       "tests/test_adapters.py::test_a_denial_codex_cannot_be_given_exactly_refuses_the_call[not-toml]"
     ]
@@ -1971,7 +1971,7 @@
   },
   "codex-deny-refuses-glob-paths": {
     "file": "hardline_mcp/adapters.py",
-    "before": "        if key is None or \"[\" in str(path) or \"]\" in str(path):\n",
+    "before": "        if key is None or any(glob in str(path) for glob in \"[]*?\"):\n",
     "after": "        if key is None:\n",
     "tests": [
       "tests/test_adapters.py::test_a_denial_codex_cannot_be_given_exactly_refuses_the_call[glob]"
@@ -2011,7 +2011,7 @@
   },
   "codex-deny-covers-gh": {
     "file": "hardline_mcp/adapters.py",
-    "before": "        Path(gh_home),\n",
+    "before": "        *gh_homes,\n",
     "after": "",
     "tests": [
       "tests/test_adapters.py::test_ask_codex_on_windows_pins_mxc_with_the_secrets_denied"
@@ -2296,6 +2296,63 @@
     "after": "        self.pointed = {k: v for k, v in self.pointed.items() if k in held_before()}\n        for lane, (newest, _) in sorted(waiting_before().items()):\n",
     "tests": [
       "tests/test_hints.py::test_a_push_names_the_lane_once_and_never_shows_the_mail"
+    ]
+  },
+  "codex-deny-refuses-posix-globs": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "for glob in \"[]*?\"",
+    "after": "for glob in \"[]\"",
+    "tests": [
+      "tests/test_adapters.py::test_a_denial_codex_cannot_be_given_exactly_refuses_the_call[star]",
+      "tests/test_adapters.py::test_a_denial_codex_cannot_be_given_exactly_refuses_the_call[question]"
+    ]
+  },
+  "codex-profile-off-windows": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if not _ON_WINDOWS:\n        return _CodexSandbox([], {}, profile=True)\n",
+    "after": "    if not _ON_WINDOWS:\n        return _CodexSandbox([], {})\n",
+    "tests": [
+      "tests/test_adapters.py::test_off_windows_the_pin_is_the_same_profile_with_no_windows_sandbox"
+    ]
+  },
+  "codex-deny-missing-parent-as-directory": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        next((above for above in reversed(spelling.parents) if not above.exists()), spelling)\n",
+    "after": "        spelling\n",
+    "tests": [
+      "tests/test_adapters.py::test_a_denial_under_a_missing_directory_denies_that_directory"
+    ]
+  },
+  "codex-preflight-posix-noop": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "*([\"cmd.exe\", \"/d\", \"/c\", \"exit 0\"] if _ON_WINDOWS else [\"true\"])],",
+    "after": "*[\"cmd.exe\", \"/d\", \"/c\", \"exit 0\"]],",
+    "tests": [
+      "tests/test_adapters.py::test_the_preflight_runs_the_platforms_empty_command[False-noop1]"
+    ]
+  },
+  "codex-refusal-windows-advice-only": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "                        if _ON_WINDOWS\n                        else \"\"\n",
+    "after": "                        if True\n                        else \"\"\n",
+    "tests": [
+      "tests/test_adapters.py::test_off_windows_a_sandbox_that_starts_nothing_refuses_without_windows_advice"
+    ]
+  },
+  "codex-deny-covers-gh-xdg": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            (os.environ.get(\"XDG_CONFIG_HOME\"), \"gh\"),\n",
+    "after": "",
+    "tests": [
+      "tests/test_adapters.py::test_every_home_gh_may_use_is_denied"
+    ]
+  },
+  "codex-deny-covers-gh-dot-config": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            (home / \".config\", \"gh\"),\n",
+    "after": "",
+    "tests": [
+      "tests/test_adapters.py::test_every_home_gh_may_use_is_denied"
     ]
   }
 }

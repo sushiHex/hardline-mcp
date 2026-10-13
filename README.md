@@ -134,11 +134,12 @@ and Hardline collects the pull request with its own `gh` and hands it over; see
 [GitHub evidence for reviews](docs/configuration.md#github-evidence-for-reviews).
 
 A spawned Codex is read-only unless `write=True`, and gets no MCP servers or app
-connectors. On Windows it runs in Codex's native MXC sandbox, whose permission
-profile also keeps its commands out of your secrets: Claude Code's and Codex's
-credentials and transcripts, gh's token, Hardline's mailbox, and `~/.ssh`. The
-denial holds for that one reviewer and leaves your own Codex sessions, full
-access included, untouched; see
+connectors. Its sandbox (bubblewrap on Linux, Seatbelt on macOS, MXC on
+Windows) is pinned through a permission profile that also keeps its commands
+out of your secrets: Claude Code's and Codex's credentials and transcripts,
+gh's token, Hardline's mailbox, and `~/.ssh`. The denial holds for that one
+reviewer and leaves your own Codex sessions, full access included, untouched;
+see
 [what a Codex reviewer can read](docs/configuration.md#what-a-codex-reviewer-can-read).
 
 Writes require both `write=True` and `HARDLINE_ALLOW_WRITE=1` in the MCP server's

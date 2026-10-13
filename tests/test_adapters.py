@@ -604,6 +604,10 @@ def test_ask_codex_write_still_gets_workspace_write(monkeypatch, tmp_path, allow
     assert 'approval_policy="never"' in _overrides(argv)
 
 
+# Captured at import: conftest replaces it with a stub inside every test.
+_real_sandbox_started = adapters._codex_sandbox_started
+
+
 def _windows_sandbox(argv: list[str]) -> list[str]:
     return [a for a in argv if a.startswith("windows.sandbox=")]
 
@@ -738,8 +742,11 @@ def _access(argv: list[str]) -> dict[str, str]:
 
 @pytest.fixture
 def secret_home(monkeypatch, tmp_path):
-    """A home, Codex home, gh home and store of known paths."""
+    """A home, Codex home, gh home and store of known paths, each in a
+    directory that exists, as on a host that has used them."""
     home = tmp_path / "user"
+    for directory in (home / "codex", home / "roaming", home / ".cache", tmp_path / "store"):
+        directory.mkdir(parents=True)
     monkeypatch.setattr(adapters.Path, "home", classmethod(lambda cls: home))
     for name in ("CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR"):
         monkeypatch.delenv(name, raising=False)
@@ -795,6 +802,7 @@ def test_every_call_names_a_profile_no_configuration_layer_can_reach(
 def test_a_relocated_store_is_denied_where_it_resolves(monkeypatch, windows, secret_home, tmp_path):
     """HARDLINE_DB may be relative; Codex is given the path it names."""
     monkeypatch.chdir(tmp_path)
+    (tmp_path / "rel").mkdir()
     monkeypatch.setenv("HARDLINE_DB", "rel/mb.db")
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     adapters.ask_codex("summarize")
@@ -809,6 +817,22 @@ def test_both_claude_homes_are_denied(monkeypatch, windows, secret_home, tmp_pat
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     adapters.ask_codex("summarize")
     assert _denies(_access(calls[0]["cmd"]), [tmp_path / "claude-home", secret_home / ".claude"])
+
+
+def test_every_home_gh_may_use_is_denied(monkeypatch, windows, secret_home, tmp_path):
+    """gh reads GH_CONFIG_DIR, else $XDG_CONFIG_HOME/gh, else %APPDATA%\\GitHub CLI
+    on Windows, else ~/.config/gh; the one in use does not prove the others
+    empty, and off Windows the token is in the last two."""
+    for directory in (tmp_path / "xdg", secret_home / ".config"):
+        directory.mkdir()
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh-dir"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    assert _denies(_access(calls[0]["cmd"]), [
+        tmp_path / "gh-dir", tmp_path / "xdg" / "gh",
+        secret_home / "roaming" / "GitHub CLI", secret_home / ".config" / "gh",
+    ])
 
 
 def _link(target, link):
@@ -840,6 +864,7 @@ def test_advisory_denies_its_copy_of_the_codex_login_too(
 ):
     """Advisory copies auth.json into a temporary Codex home of its own."""
     copy = tmp_path / "advisory" / "codex-home"
+    copy.mkdir(parents=True)
     monkeypatch.setattr(
         adapters, "_prepare_codex_advisory",
         lambda: (None, {**os.environ, "CODEX_HOME": str(copy)}, str(tmp_path / "advisory")),
@@ -886,7 +911,23 @@ def test_a_denied_directory_as_the_workdir_stays_denied(monkeypatch, windows, se
     assert _access(calls[0]["cmd"]).get(str(secret_home / ".ssh")) == "deny"
 
 
-@pytest.mark.parametrize("name", ["x\udcff", "a[1]"], ids=["not-toml", "glob"])
+def test_a_denial_under_a_missing_directory_denies_that_directory(
+    monkeypatch, windows, secret_home, tmp_path
+):
+    """MXC refuses to start over a denial whose parent does not exist
+    (measured on 0.162.1). The topmost missing directory is denied instead:
+    nothing in it exists to hide, and whatever appears there stays denied."""
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "gone" / "deeper" / "mb.db"))
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    adapters.ask_codex("summarize")
+    access = _access(calls[0]["cmd"])
+    assert _denies(access, [tmp_path / "gone"])
+    assert not [path for path in access if path.startswith(str(tmp_path / "gone") + os.sep)]
+
+
+@pytest.mark.parametrize(
+    "name", ["x\udcff", "a[1]", "a*", "a?"], ids=["not-toml", "glob", "star", "question"]
+)
 def test_a_denial_codex_cannot_be_given_exactly_refuses_the_call(
     monkeypatch, windows, secret_home, tmp_path, name
 ):
@@ -1014,12 +1055,45 @@ def test_an_unknown_windows_sandbox_refuses_before_model_resolution(monkeypatch)
     assert calls == []
 
 
-def test_ask_codex_passes_no_windows_sandbox_elsewhere(monkeypatch):
+def test_off_windows_the_pin_is_the_same_profile_with_no_windows_sandbox(
+    monkeypatch, secret_home, sandbox_probe
+):
+    """bubblewrap and Seatbelt enforce the profile too, per process
+    (tests/test_live_sandbox.py), and there is no Windows sandbox to pick."""
     monkeypatch.setattr(adapters, "_ON_WINDOWS", False)
     monkeypatch.setenv("HARDLINE_CODEX_WINDOWS_SANDBOX", "elevated")
     calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
     adapters.ask_codex("summarize")
-    assert _windows_sandbox(calls[0]["cmd"]) == []
+    argv = calls[0]["cmd"]
+    assert _windows_sandbox(argv) == []
+    assert "--sandbox" not in argv
+    assert _pin(argv) == "read-only"
+    assert _denies(_access(argv), [secret_home / ".claude", secret_home / ".ssh"])
+    (probe,) = sandbox_probe.calls
+    assert _profile(probe["overrides"]) == _profile(argv)
+
+
+def test_off_windows_a_sandbox_that_starts_nothing_refuses_without_windows_advice(
+    monkeypatch, secret_home, sandbox_probe
+):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", False)
+    sandbox_probe.result = {"ok": False, "error": "bwrap: Can't chdir"}
+    calls = _capture_run(monkeypatch, _FakeCompleted(stdout=_codex_reply("codex reply")))
+    out = adapters.ask_codex("summarize")
+    assert out["ok"] is False and "bwrap: Can't chdir" in out["error"]
+    assert "MXC" not in out["error"] and "HARDLINE_CODEX_WINDOWS_SANDBOX" not in out["error"]
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("on_windows", "noop"), [(True, ["cmd.exe", "/d", "/c", "exit 0"]), (False, ["true"])]
+)
+def test_the_preflight_runs_the_platforms_empty_command(monkeypatch, on_windows, noop):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", on_windows)
+    seen = []
+    monkeypatch.setattr(adapters, "_run_cmd", lambda argv, **kwargs: seen.append(argv) or {"ok": True})
+    _real_sandbox_started("codex", ["-c", "x=1"], {}, None)
+    assert seen == [["codex", "sandbox", "-c", "x=1", "--", *noop]]
 
 
 def test_ask_codex_ignores_transient_error_before_completed_turn(monkeypatch):

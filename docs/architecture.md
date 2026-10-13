@@ -154,9 +154,10 @@ but would need a separate policy for messages sent to an unattended role.
 
 Earlier Codex calls inherited the host sandbox unless an option selected one.
 A recorded Windows probe in a trusted checkout wrote a file despite the tool's
-read-only description. Default calls now explicitly pin read-only: with
-`--sandbox read-only`, or on Windows through an MXC permission profile that also
-denies the reviewer the profile's secrets (see
+read-only description. Default calls now explicitly pin read-only, through a
+permission profile that also denies the reviewer the user's secrets (under
+MXC on Windows; `--sandbox read-only` for the Windows sandboxes that cannot
+deny; see
 [configuration](configuration.md#what-a-codex-reviewer-can-read)).
 The lesson is to select the execution boundary in the adapter instead of relying
 on an operator's incidental configuration.
