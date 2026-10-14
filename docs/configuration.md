@@ -275,8 +275,9 @@ accepts only `prompt` and uses Hermes's own defaults.
 
 Omitting `model` passes no model flag. Hardline passes identifiers through
 unchanged; use an identifier supported by the selected CLI. Claude models
-(`fable`, `opus`, `sonnet`, `claude-fable-5-1`) go to `ask_claude`, and
-ChatGPT models (`astra`, `sol`, `gpt-6-astra`) to `ask_codex`.
+(`fable`, `opus`, `sonnet`, `haiku`, `claude-fable-5-1`) go to `ask_claude`,
+and ChatGPT models (`astra`, `luna`, `sol`, `terra`, `gpt-6-astra`) to
+`ask_codex`.
 
 `list_models()` says which tool takes which names. Under `claude` are Claude
 Code's documented aliases, since it has no command that lists models; full
@@ -300,8 +301,8 @@ job's request, so a job lost or cancelled without a result shows it too.
 
 For Codex, a letters-only family name such as `astra` or `sol` resolves to the
 newest current model in that family, read from `codex debug models` on the
-selected executable: `astra` becomes `gpt-6-astra`, and `sol` becomes
-`gpt-6-sol` rather than `gpt-5.6-sol`. Only identifiers shaped
+selected executable: with `gpt-5.6-sol`, `gpt-6-sol` and `gpt-6.1-sol` all
+listed, `sol` becomes `gpt-6.1-sol`. Only identifiers shaped
 `<prefix>-<generation>-<family>` qualify, so variants such as `-mini` and dated
 snapshots never stand in for the family. Hidden and retiring models (any
 `upgrade`) are skipped, and generations compare numerically. Advisory calls read

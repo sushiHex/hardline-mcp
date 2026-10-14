@@ -1637,10 +1637,11 @@ def _list_models(mode: str, workdir: str | None) -> dict:
 async def list_models(mode: CodexMode = "default", workdir: str | None = None) -> dict:
     """The model names ``ask_claude`` and ``ask_codex`` take, and which serves which.
 
-    Claude models (``fable``, ``opus``, ``sonnet``...) go to ``ask_claude``,
-    ChatGPT models (``astra``, ``sol``...) to ``ask_codex``. ``claude.aliases``
-    are Claude Code's documented aliases, since it cannot list models; a full
-    ID (``claude-fable-5-1``) passes through too, and either may still be
+    Claude models (``fable``, ``opus``, ``sonnet``, ``haiku``) go to
+    ``ask_claude``, ChatGPT models (``astra``, ``luna``, ``sol``, ``terra``) to
+    ``ask_codex``. ``claude.aliases`` are Claude Code's documented aliases,
+    since it cannot list models; a full ID (``claude-fable-5-1``) passes
+    through too, and either may still be
     unavailable to the account or provider. ``codex`` is read live from
     ``codex debug models`` as ``ask_codex`` with this ``mode`` and ``workdir``
     would read it: ``families`` maps each family name to the model a call
@@ -1675,10 +1676,10 @@ async def ask_codex(
 ) -> dict:
     """Ask Codex a question and wait for its reply.
 
-    Runs the Codex CLI, normally for ChatGPT models (``astra``, ``sol``).
-    Claude models such as ``fable`` go through ``ask_claude``; a known Claude
-    name here comes back with a ``model_hint`` saying so, and ``list_models``
-    lists both.
+    Runs the Codex CLI, normally for ChatGPT models (``astra``, ``luna``,
+    ``sol``, ``terra``). Claude models (``fable``, ``opus``, ``sonnet``,
+    ``haiku``) go through ``ask_claude``; a known Claude name here comes back
+    with a ``model_hint`` saying so, and ``list_models`` lists both.
 
     Spawns an ephemeral ``codex exec`` with no MCP servers or app connectors
     (the user's configured ones are disabled per call; Codex's built-in web
@@ -2493,9 +2494,9 @@ async def ask_claude(
     Edit/Write/NotebookEdit are denied by default — inspection tools like
     Read/Grep/Bash still work. ``model`` pins a Claude model: an alias
     (``fable``, ``opus``, ``sonnet``, ``haiku``) or a full ID, passed through
-    and judged by Claude Code. ChatGPT models (``astra``, ``sol``) go through
-    ``ask_codex``; a Codex-shaped name here comes back with a ``model_hint``,
-    and ``list_models`` lists both.
+    and judged by Claude Code. ChatGPT models (``astra``, ``luna``, ``sol``,
+    ``terra``) go through ``ask_codex``; a Codex-shaped name here comes back
+    with a ``model_hint``, and ``list_models`` lists both.
     ``effort`` is one of ``default|low|medium|high|xhigh|max``; ``default``
     omits the flag. ``workdir`` targets a repository in default mode and is
     rejected in advisory mode. ``write=True`` opts into full tool access plus
