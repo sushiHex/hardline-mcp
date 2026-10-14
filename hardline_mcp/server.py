@@ -19,8 +19,10 @@ the same posture as the sibling vram-mcp's claim ledger.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import functools
 import json
+import math
 import os
 import threading
 import time
@@ -144,14 +146,17 @@ def _track_job(db_path: Path, job_id: str, future: Future, slots) -> None:
 
 # A job's terminal write the store refused. Its result exists only here until
 # that write lands, so it is retried from this process's own polls, job
-# lookups and wake cycles (``_settle_debts``). It is lost only if the process
-# exits first, when the job reads ``lost``, or if the store loses the job.
+# lookups and wake cycles (``_settle_debts``), and once more at a clean exit
+# (``_settle_at_exit``). It is lost only if the process is killed first, or the
+# store stays shut through that last try: the job then reads ``lost``.
 _debts: dict[tuple[Path, str], Callable[[], object]] = {}
 _debt_slots: dict[tuple[Path, str], threading.BoundedSemaphore] = {}
 _debts_lock = threading.Lock()
 _settling = threading.Lock()  # one pass at a time; another caller does not wait
 _debt_rest_until = [0.0]  # monotonic; written only while _settling is held
 _DEBT_REST_S = 5.0
+_EXIT_SETTLE_S = 10.0
+_EXIT_RETRY_S = 0.5
 
 
 def _owe(db_path: Path, job_id: str, write: Callable[[], object]) -> None:
@@ -163,9 +168,10 @@ def _owe(db_path: Path, job_id: str, write: Callable[[], object]) -> None:
     try:
         write()
     except Exception:  # noqa: BLE001 - kept, retried by _settle_debts
-        traceback.print_exc()
         with _debts_lock:
             _debts[(db_path, job_id)] = write
+        with contextlib.suppress(Exception):  # a closed stderr at exit, say
+            traceback.print_exc()
 
 
 def _fail_unstarted(db_path: Path, job_id: str, result: dict) -> None:
@@ -192,26 +198,54 @@ def _settle_debts() -> None:
     if not _debts or not _settling.acquire(blocking=False):
         return
     try:
-        if time.monotonic() < _debt_rest_until[0]:
-            return
-        with _debts_lock:
-            owed = list(_debts.items())
-        for key, write in owed:
-            try:
-                write()
-            except Exception:  # noqa: BLE001 - still owed
-                with _debts_lock:
-                    if _debts.get(key) is write:
-                        _debts[key] = _debts.pop(key)
-                _debt_rest_until[0] = time.monotonic() + _DEBT_REST_S
-                return
+        if time.monotonic() >= _debt_rest_until[0] and not _pay_owed():
+            _debt_rest_until[0] = time.monotonic() + _DEBT_REST_S
+    finally:
+        _settling.release()
+
+
+def _pay_owed(deadline: float = math.inf) -> bool:
+    """One pass, holding ``_settling``: False at the first refusal, or at a
+    write it would start past ``deadline`` (monotonic)."""
+    with _debts_lock:
+        owed = list(_debts.items())
+    for key, write in owed:
+        if time.monotonic() >= deadline:
+            return False
+        try:
+            write()
+        except Exception:  # noqa: BLE001 - still owed
             with _debts_lock:
-                paid = _debts.get(key) is write
-                if paid:
-                    del _debts[key]
-                slots = _debt_slots.pop(key, None) if paid else None
-            if slots is not None:
-                slots.release()
+                if _debts.get(key) is write:
+                    _debts[key] = _debts.pop(key)
+            return False
+        with _debts_lock:
+            paid = _debts.get(key) is write
+            if paid:
+                del _debts[key]
+            slots = _debt_slots.pop(key, None) if paid else None
+        if slots is not None:
+            slots.release()
+    return True
+
+
+def _settle_at_exit() -> None:
+    """Retry what is still owed before a clean exit, past any rest: after it
+    the results exist nowhere. Best effort, starting no write after
+    ``_EXIT_SETTLE_S``; one already started can still wait out SQLite's busy
+    timeout.
+
+    Runs from ``atexit``, which an uninterrupted interpreter shutdown reaches
+    after ``threading._shutdown()`` has joined every running dispatch (see
+    ``_drain_async_executor_at_exit``), so no debt appears after this starts.
+    A host that kills the process, by any signal Python does not handle
+    (SIGTERM included), skips it."""
+    deadline = time.monotonic() + _EXIT_SETTLE_S
+    if not _debts or not _settling.acquire(timeout=_EXIT_SETTLE_S):
+        return
+    try:
+        while not _pay_owed(deadline) and time.monotonic() < deadline:
+            time.sleep(_EXIT_RETRY_S)
     finally:
         _settling.release()
 
@@ -2648,13 +2682,25 @@ async def ask_claude_async(
 
 
 def main() -> None:
-    """Console-script entry point (``hardline-mcp``). Serves over stdio."""
+    """The console script's target before ``cli.main``, kept for the launchers
+    generated then: pip does not regenerate an editable install's launcher on a
+    pull, and one still calling this served stdio whatever command it was given,
+    so ``hardline-mcp report`` exited 0 having done nothing. It selects as
+    ``hardline-mcp`` does."""
+    from .cli import main as select
+
+    select()
+
+
+def serve() -> None:
+    """Serve MCP over stdio: ``hardline-mcp`` with no command."""
     # Announce before serving, so a session is discoverable from its first
     # moment rather than only after it happens to call a tool. Best effort by
     # construction (see _announce_self): a registry problem must not stop the
     # server from doing its actual job.
     _announce_self()
     atexit.register(_unregister_self)
+    atexit.register(_settle_at_exit)
     anyio.run(_serve_stdio)
 
 
@@ -2751,4 +2797,4 @@ _code_revision()
 
 
 if __name__ == "__main__":
-    main()
+    serve()  # not main(): through cli it would import this module a second time

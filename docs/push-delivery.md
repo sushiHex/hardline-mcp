@@ -14,7 +14,7 @@ Operator setup is in [inbox signals](inbox-signals.md#claude-code-channel-push).
 
 ## Serving
 
-`server.main` serves through `server.serve_streams`. That is FastMCP's own `Server.run`, with two tasks spliced onto the raw stdio streams. All MCP types stay in `server.py`; `channel.py` is pure logic that emits notification params through an injected `send`.
+`server.serve` serves through `server.serve_streams`. That is FastMCP's own `Server.run`, with two tasks spliced onto the raw stdio streams. All MCP types stay in `server.py`; `channel.py` is pure logic that emits notification params through an injected `send`.
 
 - **Capability.** The initialize result declares the capability. FastMCP's `run_stdio_async` passes no experimental capabilities, which is why it is replaced.
 - **Tap.** Passes client messages through unchanged and notes `clientInfo.name` and `notifications/initialized`.

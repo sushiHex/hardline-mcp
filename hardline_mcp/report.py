@@ -31,9 +31,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from .jobs import ACTIVE_STATES
 from .mailbox import _iso, _resolve_db
 from .procid import DEAD, instance_state
-from .sessions import host_state
+from .sessions import _is_live, host_state
 
 SAMPLE = 20  # other-instance notices shown, newest first; the count is whole
 
@@ -43,6 +44,8 @@ NOTES = [
     "other_instance: consumed by another process (a relaunch, a /bg move, an inherited role, "
     "or a misdelivery), not a verdict; notices are matched by job id, sender and recipient, "
     "which a hand-sent copy can imitate",
+    "tokenless: records with no creation token not shown dead, whose pid may be their own "
+    "process or a stranger's; zero is this run's finding, not a guarantee",
 ]
 
 # Each section's rows, read in the snapshot. None marks a table current code
@@ -51,7 +54,7 @@ _READS = {
     "sessions": "SELECT pid, process_key, lane, host_pid, host_key FROM agent_sessions ORDER BY pid, seq",
     "revisions": "SELECT pid, process_key, revision FROM process_revisions",
     "legacy": "SELECT DISTINCT pid, process_key FROM sessions",
-    "jobs": "SELECT job_id, agent, requester, owner_pid, owner_key FROM jobs",
+    "jobs": "SELECT job_id, agent, requester, state, owner_pid, owner_key, child_pid, child_key FROM jobs",
     "acks": "SELECT message_id, pid, process_key, conversation FROM message_acks",
     # instr, not LIKE: LIKE reads `_` as a wildcard. Parsed and checked below.
     "notices": "SELECT id, sender, recipient, body, created_at, acked_at FROM messages"
@@ -79,6 +82,7 @@ def report(db_path: Optional[Path] = None) -> dict:
         "processes": _section(_processes, read, probe, "sessions", "revisions"),
         "legacy_sessions": _section(_legacy_sessions, read, probe, "legacy"),
         "job_notices": _section(_job_notices, read, probe, "jobs", "acks", "notices", "unrecorded"),
+        "tokenless": _section(_tokenless, read, probe, "sessions", "jobs"),
         "notes": NOTES,
     }
 
@@ -197,6 +201,35 @@ def _job_notices(
         "acks_recorded": acks is not None,
         # Every kind of message, so it overlaps "unknown" above; not additive.
         "acked_messages_without_record": unrecorded[0]["n"] if unrecorded is not None else None,
+    }
+
+
+def _tokenless(sessions: list, jobs: list, *, probe: Callable) -> dict:
+    """Records that still act on a pid without a creation token (TODO.md,
+    "Known limits"), judged as their consumers judge them: a stranger on a
+    reused pid passes for the process, so a registration keeps its lanes held
+    (a server honoured on liveness alone, a host held as unknown), a job looks
+    owned, and a cancel kills a child's tree unverified. Those shown dead act
+    on nothing. Counts for this run only: new ones appear when a token will
+    not read."""
+    active = [j for j in jobs if j["state"] in ACTIVE_STATES]
+    return {
+        "processes": len(
+            {
+                (r["pid"], r["process_key"])
+                for r in sessions
+                if (r["process_key"] is None or r["host_pid"] is not None and r["host_key"] is None)
+                and _is_live(r, probe)
+            }
+        ),
+        "unfinished_jobs": sum(
+            1 for j in active if j["owner_key"] is None and probe(j["owner_pid"], None) != DEAD
+        ),
+        "children": sum(
+            1
+            for j in active
+            if j["child_pid"] and j["child_key"] is None and probe(j["child_pid"], None) != DEAD
+        ),
     }
 
 

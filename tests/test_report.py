@@ -78,6 +78,46 @@ def test_job_notices_are_classified_by_who_acked_them(tmp_path, monkeypatch):
     assert got["acked_messages_without_record"] == 0
 
 
+def test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them(
+    tmp_path, child
+):
+    """A registration counts once per process, by its own token or its host's,
+    unless either is shown dead; a job's owner or child only while unfinished."""
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lane="codex:mine", db_path=db)
+    me = procid.current_identity()
+    pid, key = child
+    gone = 2147483646
+    raw = sqlite3.connect(db)
+    with raw:
+        raw.executemany(
+            "INSERT INTO agent_sessions (pid, lane, agent, process_key, host_pid, host_key,"
+            " started_at, last_seen, claimed_at) VALUES (?, ?, 'codex', ?, ?, ?, 't', 't', 't')",
+            [
+                (pid, "codex:a", None, None, None),
+                (pid, "codex:b", None, None, None),  # the same process
+                (gone, "codex:gone", None, None, None),
+                (pid, "codex:hosted", key, me[0], None),  # its host held as unknown
+                (me[0], "codex:orphan", None, gone, "k"),  # its host is dead
+            ],
+        )
+        raw.executemany(
+            "INSERT INTO jobs (job_id, agent, requester, state, request, owner_pid,"
+            " owner_key, child_pid, child_key, created_at)"
+            " VALUES (?, 'codex', 'claude:r', ?, '{}', ?, ?, ?, ?, 't')",
+            [
+                ("queued", jobs.QUEUED, pid, None, None, None),
+                ("running", jobs.RUNNING, pid, None, None, None),
+                ("done", jobs.COMPLETED, pid, None, pid, None),
+                ("orphaned", jobs.RUNNING, gone, None, gone, None),
+                ("tokened", jobs.RUNNING, pid, key, pid, key),
+                ("unverified-child", jobs.RUNNING, pid, key, pid, None),
+            ],
+        )
+    raw.close()
+    assert report.report(db)["tokenless"] == {"processes": 2, "unfinished_jobs": 2, "children": 1}
+
+
 def test_any_body_is_free_text(tmp_path, monkeypatch):
     """A body is whatever a sender wrote: odd ones are skipped, never fatal."""
     db = tmp_path / "mb.db"

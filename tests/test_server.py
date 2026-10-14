@@ -1793,6 +1793,143 @@ def test_a_refused_debt_goes_to_the_back_of_the_line(owed, monkeypatch):
     assert paid == ["fine"] and list(server._debts) == [("db", "stuck")]
 
 
+_LAST_MOMENT_DEBT = """
+import sys, threading, time
+from pathlib import Path
+from hardline_mcp import jobs, server
+
+db = Path(sys.argv[1])
+job = jobs.create(agent="codex", requester="claude:r", label=None, request={}, db_path=db)
+jobs.mark_running(job, db_path=db)
+refused, started = [], threading.Event()
+
+def finish():
+    if not refused:
+        refused.append(1)
+        raise RuntimeError("store refused")
+    jobs.finish(job, result={"ok": True}, db_path=db)
+
+def dispatch():
+    started.set()
+    time.sleep(0.5)  # still running when serving ends
+    server._owe(db, job, finish)
+
+def serving(_serve_stdio):
+    server._async_executor.submit(dispatch)
+    started.wait(30)
+
+server.anyio.run = serving
+server.serve()
+print(job)
+"""
+
+
+def test_a_clean_exit_pays_what_a_running_dispatch_still_owes(tmp_path):
+    """atexit follows threading's shutdown, which joins a running dispatch: a
+    debt it leaves after serving has ended is still paid before the exit."""
+    db = tmp_path / "mb.db"
+    run = subprocess.run(
+        [sys.executable, "-c", _LAST_MOMENT_DEBT, str(db)],
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
+        env={**os.environ, "HARDLINE_DB": str(db)},
+    )
+    assert run.returncode == 0, run.stderr
+    assert "store refused" in run.stderr, "the dispatch never owed anything"
+    job = server.jobs.get(run.stdout.strip(), db_path=db)
+    assert job["state"] == server.jobs.COMPLETED
+
+
+def test_a_clean_exit_pays_past_the_rest(owed, monkeypatch):
+    paid = []
+    server._debts[("db", "job")] = lambda: paid.append(1)
+    server._debt_rest_until[0] = float("inf")
+    server._settle_debts()
+    assert not paid
+    server._settle_at_exit()
+    assert paid == [1] and not server._debts
+
+
+class _Clock:
+    """Monotonic time that only writes and sleeps advance."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    fake = _Clock()
+    monkeypatch.setattr(server, "time", fake)
+    return fake
+
+
+def test_a_store_still_down_is_retried_until_the_deadline(owed, clock):
+    starts = []
+
+    def down():
+        starts.append(clock.now)
+        clock.now += 3.0  # a busy wait
+        raise RuntimeError("store unavailable")
+
+    server._debts[("db", "job")] = down
+    server._settle_at_exit()
+    assert len(starts) > 1 and max(starts) < server._EXIT_SETTLE_S
+    assert list(server._debts) == [("db", "job")]
+
+
+def test_no_write_starts_past_the_exit_deadline(owed, clock):
+    """Slow writes that succeed: the budget is checked before each one."""
+    starts = []
+
+    def slow():
+        starts.append(clock.now)
+        clock.now += 0.6 * server._EXIT_SETTLE_S
+
+    for name in ("a", "b", "c"):
+        server._debts[("db", name)] = slow
+    server._settle_at_exit()
+    assert starts == [0.0, 0.6 * server._EXIT_SETTLE_S]
+    assert list(server._debts) == [("db", "c")]
+
+
+def test_a_refusal_with_stderr_closed_is_still_kept(owed, monkeypatch):
+    import io
+
+    closed = io.StringIO()
+    closed.close()
+    monkeypatch.setattr(sys, "stderr", closed)
+
+    def refused():
+        raise RuntimeError("store refused")
+
+    raised = None
+    try:
+        server._owe("db", "job", refused)
+    except ValueError as exc:
+        raised = exc
+    assert server._debts == {("db", "job"): refused} and raised is None
+
+
+def test_the_module_entry_serves_whatever_its_arguments(tmp_path):
+    """python -m hardline_mcp.server serves, as it always did; through cli it
+    would import a second copy of the module."""
+    db = tmp_path / "mb.db"
+    server.mailbox.send("a", "b", "c", db_path=db)
+    run = subprocess.run(
+        [sys.executable, "-m", "hardline_mcp.server", "report", "--db", str(db)],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+        timeout=120, env={**os.environ, "HARDLINE_DB": str(db)},
+    )
+    assert run.returncode == 0, run.stderr
+    assert '"db_path"' not in run.stdout, "ran the report instead of serving"
+
+
 def test_a_debt_replaced_while_it_was_retried_is_kept(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_debts", {})
     monkeypatch.setattr(server, "_debt_slots", {})

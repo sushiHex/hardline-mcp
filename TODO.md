@@ -35,7 +35,14 @@ date here.
 platform reads one now (macOS since #69), but rows written before that, or
 whose token would not read, let a reused pid pass for its process: they can
 keep a lane held or a job looking owned, which refuses rather than steals. They
-age out with the processes that wrote them.
+age out with the processes that wrote them; `hardline-mcp report` counts the
+ones still in force under `tokenless`, with unfinished jobs' children, whose
+cancel kills on the pid alone.
+
+**A cancelled or unsubmittable job's refused write is outside the admission
+bound.** Its slot is freed before the write is kept as a debt (#72's bound
+covers only a finished job's result). Needs a store refusing those writes
+repeatedly to matter.
 
 ## Shipped since this list was written
 

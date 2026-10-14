@@ -58,7 +58,7 @@ Dependencies point one way: `procid` <- `mailbox` <- `jobs`/`sessions` <-
   bound Codex app-server thread.
 - `channel.py` decides what to push into a Claude Code session and when (pure
   logic, no MCP import); `delivery.py` records push facts and derives
-  receipted/awaiting/unreceipted. `server.main` serves through
+  receipted/awaiting/unreceipted. `server.serve` serves through
   `server.serve_streams` - FastMCP's own `Server.run` with `channel.tap` and
   the pusher spliced onto the raw streams - not `mcp.run()`. See
   `docs/push-delivery.md`.

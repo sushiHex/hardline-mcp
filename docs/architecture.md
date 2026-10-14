@@ -115,9 +115,37 @@ next, so a store still down costs one wait per rest and one failing debt
 cannot hold up the rest. Repeats are safe because `finish` matches only a row
 still owed a result. A job whose claim (`mark_running`) the store refuses
 never runs its agent, since a cancel may have landed; it fails with the reason.
-An unpaid result keeps its admission slot, so admission bounds debts too. The
-result is lost only if its process exits first (the job then reads `lost`) or
-the store loses the job.
+An unpaid result keeps its admission slot, so admission bounds debts too. A
+clean exit retries what is still owed, past any rest, starting no write after
+ten seconds (`server._settle_at_exit`); a write already started can still wait
+out SQLite's busy timeout. It runs from `atexit`, which an uninterrupted
+interpreter shutdown reaches after `threading._shutdown()` has joined every
+running dispatch (CPython 3.10 to 3.14), so a debt left at the last moment is
+in it, though it then waits behind the longest running dispatch. A debt is
+recorded before its traceback is printed, so a closed stderr cannot lose it.
+The result is lost if its process is killed first (by any signal Python does
+not handle, SIGTERM included) or the store stays shut through that try, and
+the job then reads `lost`; or if the store loses the job.
+
+The old console-script target `server.main` selects the command as
+`cli.main` does, since pip does not regenerate an editable install's launcher
+on a pull: one generated before `cli.py` ran every command as the server, so
+`hardline-mcp report` exited 0 having done nothing. `python -m
+hardline_mcp.server` still serves directly; through `cli` it would import the
+module a second time.
+
+Review record (gpt-6-astra), adopted: the exit deadline was checked only
+after a pass, so it started writes past it and paid a whole pass of slow
+writes; it is now checked before each write. `_owe` printed before recording,
+so a closed stderr lost the debt. `python -m hardline_mcp.server` would have
+run the module twice. The report's tokenless count missed a registration
+whose host has no token (its lane is held as unknown) and counted one whose
+host is dead (it holds nothing); it now applies ownership's own predicate,
+and counts unfinished jobs' children too, whose cancel kills on the pid
+alone. Rejected: a stderr warning when `server.main` is called, which a
+direct caller would trigger as well. Not fixed here: a queued job cancelled,
+or one whose submission failed, frees its admission slot before its refused
+write is kept, so those debts are outside the admission bound.
 
 Admission bounds running plus queued work per server. Validation happens before
 capacity is reserved; a full pool creates no job. A cancellable queue removes
@@ -284,7 +312,12 @@ It counts acked job notices as `same_instance`, `other_instance` (with a
 newest-first sample carrying both identities and timestamps) or `unknown`, and
 lists the revision each registered server runs (`process_revisions`, keyed by
 identity so a reused pid cannot inherit one) beside any live writer of the
-legacy `sessions` table. It reads every table in one `mode=ro` snapshot and
+legacy `sessions` table. Under `tokenless` it counts records that still act on
+a pid without a creation token, judged as their consumers judge them:
+registered processes whose server or host has none and is not shown dead,
+unfinished jobs whose owner has none, and their children (a cancel kills the
+tree unverified). Zero is that run's finding: a token that will not read makes
+new ones. It reads every table in one `mode=ro` snapshot and
 closes it before probing any process, so a slow probe holds no reader against
 writers or checkpoints; it never initializes or prunes, and a missing column
 makes its section `unavailable`. Its review (gpt-6-astra) rejected a

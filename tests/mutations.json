@@ -2828,24 +2828,24 @@
   },
   "a-refusal-stops-the-pass": {
     "file": "hardline_mcp/server.py",
-    "before": "                _debt_rest_until[0] = time.monotonic() + _DEBT_REST_S\n                return\n",
-    "after": "                _debt_rest_until[0] = time.monotonic() + _DEBT_REST_S\n                continue\n",
+    "before": "            return False\n        with _debts_lock:\n",
+    "after": "            continue\n        with _debts_lock:\n",
     "tests": [
       "tests/test_server.py::test_a_store_still_down_costs_one_refusal_per_rest"
     ]
   },
   "a-refusal-rests": {
     "file": "hardline_mcp/server.py",
-    "before": "        if time.monotonic() < _debt_rest_until[0]:\n            return\n",
-    "after": "",
+    "before": "        if time.monotonic() >= _debt_rest_until[0] and not _pay_owed():\n",
+    "after": "        if not _pay_owed():\n",
     "tests": [
       "tests/test_server.py::test_a_store_still_down_costs_one_refusal_per_rest"
     ]
   },
   "a-settled-debt-is-removed-only-if-unreplaced": {
     "file": "hardline_mcp/server.py",
-    "before": "                paid = _debts.get(key) is write\n",
-    "after": "                paid = key in _debts\n",
+    "before": "            paid = _debts.get(key) is write\n",
+    "after": "            paid = key in _debts\n",
     "tests": [
       "tests/test_server.py::test_a_debt_replaced_while_it_was_retried_is_kept"
     ]
@@ -2860,8 +2860,8 @@
   },
   "a-refused-debt-goes-to-the-back": {
     "file": "hardline_mcp/server.py",
-    "before": "                        _debts[key] = _debts.pop(key)\n",
-    "after": "                        pass\n",
+    "before": "                    _debts[key] = _debts.pop(key)\n",
+    "after": "                    pass\n",
     "tests": [
       "tests/test_server.py::test_a_refused_debt_goes_to_the_back_of_the_line"
     ]
@@ -3004,6 +3004,134 @@
     "after": "    models, reason = _codex_catalog(\"default\", workdir)\n    if models is None:\n        return {\"error\": reason}\n",
     "tests": [
       "tests/test_model_routing.py::test_list_models_reads_the_catalog_its_options_name"
+    ]
+  },
+  "a-stale-launcher-selects-the-command": {
+    "file": "hardline_mcp/server.py",
+    "before": "    from .cli import main as select\n\n    select()\n",
+    "after": "    serve()\n",
+    "tests": [
+      "tests/test_cli.py::test_a_launcher_generated_for_server_main_still_selects_the_command"
+    ]
+  },
+  "a-clean-exit-pays-debts": {
+    "file": "hardline_mcp/server.py",
+    "before": "    atexit.register(_settle_at_exit)\n",
+    "after": "",
+    "tests": [
+      "tests/test_server.py::test_a_clean_exit_pays_what_a_running_dispatch_still_owes"
+    ]
+  },
+  "a-clean-exit-pays-past-the-rest": {
+    "file": "hardline_mcp/server.py",
+    "before": "        while not _pay_owed(deadline) and time.monotonic() < deadline:\n",
+    "after": "        while time.monotonic() >= _debt_rest_until[0] and not _pay_owed(deadline) and time.monotonic() < deadline:\n",
+    "tests": [
+      "tests/test_server.py::test_a_clean_exit_pays_past_the_rest"
+    ]
+  },
+  "a-clean-exit-retries-until-the-deadline": {
+    "file": "hardline_mcp/server.py",
+    "before": "        while not _pay_owed(deadline) and time.monotonic() < deadline:\n            time.sleep(_EXIT_RETRY_S)\n",
+    "after": "        _pay_owed(deadline)\n",
+    "tests": [
+      "tests/test_server.py::test_a_store_still_down_is_retried_until_the_deadline"
+    ]
+  },
+  "no-write-starts-past-the-exit-deadline": {
+    "file": "hardline_mcp/server.py",
+    "before": "        if time.monotonic() >= deadline:\n            return False\n",
+    "after": "",
+    "tests": [
+      "tests/test_server.py::test_no_write_starts_past_the_exit_deadline"
+    ]
+  },
+  "a-refusal-is-kept-before-it-is-printed": {
+    "file": "hardline_mcp/server.py",
+    "before": "        with _debts_lock:\n            _debts[(db_path, job_id)] = write\n        with contextlib.suppress(Exception):  # a closed stderr at exit, say\n            traceback.print_exc()\n",
+    "after": "        traceback.print_exc()\n        with _debts_lock:\n            _debts[(db_path, job_id)] = write\n",
+    "tests": [
+      "tests/test_server.py::test_a_refusal_with_stderr_closed_is_still_kept"
+    ]
+  },
+  "the-module-entry-serves": {
+    "file": "hardline_mcp/server.py",
+    "before": "    serve()  # not main(): through cli it would import this module a second time\n",
+    "after": "    main()\n",
+    "tests": [
+      "tests/test_server.py::test_the_module_entry_serves_whatever_its_arguments"
+    ]
+  },
+  "tokenless-server-token": {
+    "file": "hardline_mcp/report.py",
+    "before": "(r[\"process_key\"] is None or r[\"host_pid\"] is not None and r[\"host_key\"] is None)",
+    "after": "(r[\"host_pid\"] is not None and r[\"host_key\"] is None)",
+    "tests": [
+      "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
+    ]
+  },
+  "tokenless-host-token": {
+    "file": "hardline_mcp/report.py",
+    "before": "(r[\"process_key\"] is None or r[\"host_pid\"] is not None and r[\"host_key\"] is None)",
+    "after": "(r[\"process_key\"] is None)",
+    "tests": [
+      "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
+    ]
+  },
+  "tokenless-processes-judged-as-ownership-judges": {
+    "file": "hardline_mcp/report.py",
+    "before": "                and _is_live(r, probe)\n",
+    "after": "                and probe(r[\"pid\"], r[\"process_key\"]) != DEAD\n",
+    "tests": [
+      "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
+    ]
+  },
+  "tokenless-processes-once-each": {
+    "file": "hardline_mcp/report.py",
+    "before": "                (r[\"pid\"], r[\"process_key\"])\n                for r in sessions\n",
+    "after": "                (r[\"pid\"], r[\"lane\"])\n                for r in sessions\n",
+    "tests": [
+      "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
+    ]
+  },
+  "tokenless-only-unfinished-jobs": {
+    "file": "hardline_mcp/report.py",
+    "before": "active = [j for j in jobs if j[\"state\"] in ACTIVE_STATES]",
+    "after": "active = jobs",
+    "tests": [
+      "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
+    ]
+  },
+  "tokenless-owner-token": {
+    "file": "hardline_mcp/report.py",
+    "before": "if j[\"owner_key\"] is None and probe(j[\"owner_pid\"], None) != DEAD",
+    "after": "if probe(j[\"owner_pid\"], None) != DEAD",
+    "tests": [
+      "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
+    ]
+  },
+  "tokenless-owner-not-dead": {
+    "file": "hardline_mcp/report.py",
+    "before": "if j[\"owner_key\"] is None and probe(j[\"owner_pid\"], None) != DEAD",
+    "after": "if j[\"owner_key\"] is None",
+    "tests": [
+      "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
+    ]
+  },
+  "tokenless-child-token": {
+    "file": "hardline_mcp/report.py",
+    "before": "if j[\"child_pid\"] and j[\"child_key\"] is None and probe",
+    "after": "if j[\"child_pid\"] and probe",
+    "tests": [
+      "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
+    ]
+  },
+  "tokenless-child-not-dead": {
+    "file": "hardline_mcp/report.py",
+    "before": " and probe(j[\"child_pid\"], None) != DEAD\n",
+    "after": "\n",
+    "tests": [
+      "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
     ]
   }
 }

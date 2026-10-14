@@ -8,7 +8,7 @@ import sys
 def main(argv: list[str] | None = None) -> None:
     args = sys.argv[1:] if argv is None else argv
     if not args:
-        from .server import main as serve
+        from .server import serve
 
         serve()
     elif args[0] == "watch":
