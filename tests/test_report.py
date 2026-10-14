@@ -112,6 +112,8 @@ def test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them
                 ("orphaned", jobs.RUNNING, gone, None, gone, None),
                 ("tokened", jobs.RUNNING, pid, key, pid, key),
                 ("unverified-child", jobs.RUNNING, pid, key, pid, None),
+                ("lost-owner", jobs.RUNNING, gone, "k", pid, None),  # cancel finds it lost
+                ("dead-child", jobs.RUNNING, pid, key, gone, None),
             ],
         )
     raw.close()

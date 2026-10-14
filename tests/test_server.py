@@ -6,6 +6,7 @@ import itertools
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -1794,14 +1795,16 @@ def test_a_refused_debt_goes_to_the_back_of_the_line(owed, monkeypatch):
 
 
 _LAST_MOMENT_DEBT = """
-import sys, threading, time
+import sys, threading
 from pathlib import Path
 from hardline_mcp import jobs, server
 
 db = Path(sys.argv[1])
 job = jobs.create(agent="codex", requester="claude:r", label=None, request={}, db_path=db)
 jobs.mark_running(job, db_path=db)
-refused, started = [], threading.Event()
+refused, started, shutting_down = [], threading.Event(), threading.Event()
+# LIFO: runs at the start of threading's shutdown, before the executor's join.
+threading._register_atexit(shutting_down.set)
 
 def finish():
     if not refused:
@@ -1811,7 +1814,7 @@ def finish():
 
 def dispatch():
     started.set()
-    time.sleep(0.5)  # still running when serving ends
+    assert shutting_down.wait(60)  # owes only once the interpreter is exiting
     server._owe(db, job, finish)
 
 def serving(_serve_stdio):
@@ -1916,18 +1919,29 @@ def test_a_refusal_with_stderr_closed_is_still_kept(owed, monkeypatch):
     assert server._debts == {("db", "job"): refused} and raised is None
 
 
-def test_the_module_entry_serves_whatever_its_arguments(tmp_path):
-    """python -m hardline_mcp.server serves, as it always did; through cli it
-    would import a second copy of the module."""
+_INITIALIZE = json.dumps({
+    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "test", "version": "0"},
+    },
+})
+
+
+def test_the_module_entry_serves_once_whatever_its_arguments(tmp_path):
+    """python -m hardline_mcp.server serves, as it always did, from the one
+    copy of the module it runs; through cli it would import a second."""
     db = tmp_path / "mb.db"
     server.mailbox.send("a", "b", "c", db_path=db)
     run = subprocess.run(
-        [sys.executable, "-m", "hardline_mcp.server", "report", "--db", str(db)],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+        [sys.executable, "-X", "importtime", "-m", "hardline_mcp.server",
+         "report", "--db", str(db)],
+        input=_INITIALIZE + "\n", capture_output=True, text=True, encoding="utf-8",
         timeout=120, env={**os.environ, "HARDLINE_DB": str(db)},
     )
     assert run.returncode == 0, run.stderr
-    assert '"db_path"' not in run.stdout, "ran the report instead of serving"
+    assert '"serverInfo"' in run.stdout, "did not serve"
+    assert not re.search(r"\|\s*hardline_mcp\.server\s*$", run.stderr, re.M), "imported twice"
 
 
 def test_a_debt_replaced_while_it_was_retried_is_kept(monkeypatch, tmp_path):

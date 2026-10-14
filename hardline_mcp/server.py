@@ -206,7 +206,7 @@ def _settle_debts() -> None:
 
 def _pay_owed(deadline: float = math.inf) -> bool:
     """One pass, holding ``_settling``: False at the first refusal, or at a
-    write it would start past ``deadline`` (monotonic)."""
+    debt it would begin past ``deadline`` (monotonic)."""
     with _debts_lock:
         owed = list(_debts.items())
     for key, write in owed:
@@ -231,9 +231,9 @@ def _pay_owed(deadline: float = math.inf) -> bool:
 
 def _settle_at_exit() -> None:
     """Retry what is still owed before a clean exit, past any rest: after it
-    the results exist nowhere. Best effort, starting no write after
-    ``_EXIT_SETTLE_S``; one already started can still wait out SQLite's busy
-    timeout.
+    the results exist nowhere. Best effort, beginning no debt after
+    ``_EXIT_SETTLE_S``; one begun still makes its writes (two for a job that
+    never started), each of which can wait on the store.
 
     Runs from ``atexit``, which an uninterrupted interpreter shutdown reaches
     after ``threading._shutdown()`` has joined every running dispatch (see

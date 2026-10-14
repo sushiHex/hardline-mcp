@@ -3059,7 +3059,7 @@
     "before": "    serve()  # not main(): through cli it would import this module a second time\n",
     "after": "    main()\n",
     "tests": [
-      "tests/test_server.py::test_the_module_entry_serves_whatever_its_arguments"
+      "tests/test_server.py::test_the_module_entry_serves_once_whatever_its_arguments"
     ]
   },
   "tokenless-server-token": {
@@ -3130,6 +3130,30 @@
     "file": "hardline_mcp/report.py",
     "before": " and probe(j[\"child_pid\"], None) != DEAD\n",
     "after": "\n",
+    "tests": [
+      "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
+    ]
+  },
+  "the-module-entry-serves-at-all": {
+    "file": "hardline_mcp/server.py",
+    "before": "    serve()  # not main(): through cli it would import this module a second time\n",
+    "after": "    pass\n",
+    "tests": [
+      "tests/test_server.py::test_the_module_entry_serves_once_whatever_its_arguments"
+    ]
+  },
+  "the-module-entry-runs-one-copy": {
+    "file": "hardline_mcp/server.py",
+    "before": "    serve()  # not main(): through cli it would import this module a second time\n",
+    "after": "    from hardline_mcp.server import serve as canonical\n\n    canonical()\n",
+    "tests": [
+      "tests/test_server.py::test_the_module_entry_serves_once_whatever_its_arguments"
+    ]
+  },
+  "tokenless-child-needs-a-live-owner": {
+    "file": "hardline_mcp/report.py",
+    "before": "            and probe(j[\"owner_pid\"], j[\"owner_key\"]) != DEAD\n",
+    "after": "",
     "tests": [
       "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
     ]

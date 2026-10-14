@@ -225,10 +225,12 @@ def _tokenless(sessions: list, jobs: list, *, probe: Callable) -> dict:
         "unfinished_jobs": sum(
             1 for j in active if j["owner_key"] is None and probe(j["owner_pid"], None) != DEAD
         ),
+        # A cancel finds a dead owner's job lost and kills nothing.
         "children": sum(
             1
             for j in active
             if j["child_pid"] and j["child_key"] is None and probe(j["child_pid"], None) != DEAD
+            and probe(j["owner_pid"], j["owner_key"]) != DEAD
         ),
     }
 
