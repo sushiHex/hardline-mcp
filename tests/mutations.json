@@ -3487,8 +3487,8 @@
   },
   "revision-note-told-once-per-revision-in-inbox": {
     "file": "hardline_mcp/server.py",
-    "before": "    if note is None or note in _revision_told:\n",
-    "after": "    if note is None:\n",
+    "before": "        if note in _revision_told:\n            return None\n",
+    "after": "",
     "tests": [
       "tests/test_server.py::test_inbox_says_a_moved_checkout_once_per_revision"
     ]
@@ -3512,7 +3512,7 @@
   "running-revision-is-the-spawn-revision": {
     "file": "hardline_mcp/server.py",
     "before": "    if not _revision_cache:\n        _revision_cache.append(_read_head())\n    return _revision_cache[0][1] or None\n",
-    "after": "    return _read_revision()\n",
+    "after": "    return _read_head()[1] or None\n",
     "tests": [
       "tests/test_server.py::test_a_server_says_when_its_checkout_has_moved"
     ]

@@ -1542,7 +1542,7 @@ async def test_server_info_reports_version_limits_and_timeouts(monkeypatch, tmp_
 def checkout(monkeypatch):
     """This process spawned on main at "aaa111"; the checkout says whatever is set."""
     monkeypatch.setattr(server, "_revision_cache", [("refs/heads/main", "aaa111")])
-    monkeypatch.setattr(server, "_revision_told", [])
+    monkeypatch.setattr(server, "_revision_told", set())
     now = {"ref": "refs/heads/main", "rev": "aaa111"}
     monkeypatch.setattr(server, "_read_head", lambda: (now["ref"], now["rev"]))
     return now
@@ -1586,6 +1586,8 @@ async def test_inbox_says_a_moved_checkout_once_per_revision(monkeypatch, tmp_pa
     assert "revision_note" not in await server.inbox(agent="claude"), "told once"
     checkout["rev"] = "ccc333"
     assert "ccc333" in (await server.inbox(agent="claude")).get("revision_note", "")
+    checkout["rev"] = "bbb222"  # back again: already told
+    assert "revision_note" not in await server.inbox(agent="claude")
 
 
 @pytest.mark.anyio
