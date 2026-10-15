@@ -3222,5 +3222,22 @@
     "tests": [
       "tests/test_adapters.py::test_nonzero_exit_with_a_clean_result_is_still_a_failure"
     ]
+  },
+  "failed-exit-error-omits-captured-stdout": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        said = (stderr if capture_failed_output else stderr or stdout).strip()\n",
+    "after": "        said = (stderr or stdout).strip()\n",
+    "tests": [
+      "tests/test_adapters.py::test_a_silent_failed_exit_does_not_quote_its_stream_in_the_error[claude]",
+      "tests/test_adapters.py::test_a_silent_failed_exit_does_not_quote_its_stream_in_the_error[codex]"
+    ]
+  },
+  "parsed-failure-carries-stdin-shortfall": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "_PROCESS_TELEMETRY = (\"elapsed_s\", \"timeout_s\", \"exit_code\", \"stdin_shortfall\")",
+    "after": "_PROCESS_TELEMETRY = (\"elapsed_s\", \"timeout_s\", \"exit_code\")",
+    "tests": [
+      "tests/test_adapters.py::test_a_parsed_failure_keeps_the_stdin_shortfall"
+    ]
   }
 }

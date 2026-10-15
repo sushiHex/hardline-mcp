@@ -1243,7 +1243,10 @@ def _run_cmd(
     if proc.returncode != 0 or undelivered:
         # A reply to a prompt whose evidence never arrived is not a reply to
         # the question asked, however well formed: it fails like an exit.
-        detail = undelivered or f"exit {proc.returncode}: {(stderr or stdout).strip()}"
+        # A caller capturing failed output gets stdout parsed or as bounded
+        # evidence; quoting it here too put a whole stream in one error line.
+        said = (stderr if capture_failed_output else stderr or stdout).strip()
+        detail = undelivered or f"exit {proc.returncode}" + (f": {said}" if said else "")
         response = {
             "ok": False,
             "error": detail,
@@ -1251,6 +1254,8 @@ def _run_cmd(
             "elapsed_s": elapsed,
             "timeout_s": timeout_s,
         }
+        if undelivered:
+            response["stdin_shortfall"] = undelivered  # kept under a parsed error
         if capture_failed_output and stdout:
             response["_stdout"] = stdout.strip()
         return tagged(response)
@@ -2766,7 +2771,7 @@ def _ask_codex_structured(
 # they silently dropped them, on success and on a structured failure alike, and
 # "how long did that take / what budget was it under / how did it exit" became
 # unanswerable on exactly the calls slow or broken enough for anyone to ask.
-_PROCESS_TELEMETRY = ("elapsed_s", "timeout_s", "exit_code")
+_PROCESS_TELEMETRY = ("elapsed_s", "timeout_s", "exit_code", "stdin_shortfall")
 
 
 def _carry_process_telemetry(parsed: dict, run: dict) -> dict:
@@ -3297,11 +3302,11 @@ def _ask_claude_structured(
             shutil.rmtree(neutral_cwd, ignore_errors=True)
     failed_output = run.pop("_stdout", "")
     if not run.get("ok"):
-        # _run_cmd reports `stderr or stdout`, so a nonzero exit that wrote
-        # anything to stderr discarded stdout entirely - losing a reply Claude
-        # had already produced and been paid for. Codex's path was fixed for
-        # exactly this; leaving Claude's twin unfixed was an inconsistency,
-        # not a decision.
+        # A failed run's stdout is still Claude's own account, and possibly a
+        # reply already paid for. Its result event, when there is one, carries
+        # the real reason (a model Claude Code will not serve, say), as Codex's
+        # turn.failed does on its twin path. Only a parsed result has "usage";
+        # _unparsed_error does not.
         if failed_output:
             parsed = _parse_claude_stream(
                 failed_output,
@@ -3309,15 +3314,10 @@ def _ask_claude_structured(
                 requested_effort=effort,
                 require_base_subscription=mode == "advisory",
             )
-            # A result event is the stream's own account of the failure (an
-            # is_error result carries the real reason, e.g. a model Claude Code
-            # will not serve), where "exit 1: <raw stream>" buried it. Only a
-            # parsed result has "usage"; _unparsed_error does not.
             if "usage" in parsed:
                 if parsed.get("ok"):
-                    # The process exited nonzero, so the call failed whatever
-                    # the stream says. Keep the reply Claude produced as
-                    # partial, under the process error and exit code.
+                    # The run failed whatever the stream says: keep the reply
+                    # as partial, under the process error.
                     parsed["ok"] = False
                     parsed["error"] = run["error"]
                     parsed["partial_reply"] = parsed.pop("reply", "")

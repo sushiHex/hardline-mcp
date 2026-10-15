@@ -2351,6 +2351,39 @@ def test_failed_claude_job_without_a_result_keeps_raw_evidence(monkeypatch):
     assert out["raw_length"] > 0
 
 
+@pytest.mark.parametrize("agent", ["claude", "codex"])
+def test_a_silent_failed_exit_does_not_quote_its_stream_in_the_error(monkeypatch, agent):
+    """With nothing on stderr, the error used to be "exit 1: <all of stdout>",
+    an unbounded copy of what raw_excerpt already carries, bounded."""
+    _capture_run(
+        monkeypatch,
+        _FakeCompleted(stdout="x" * 50_000, stderr="", returncode=1),
+    )
+
+    out = getattr(adapters, f"ask_{agent}")("review", effort="high")
+
+    assert out["ok"] is False
+    assert out["error"] == "exit 1"
+    assert out["raw_length"] == 50_000 and len(out["raw_excerpt"]) < 50_000
+
+
+def test_a_parsed_failure_keeps_the_stdin_shortfall(monkeypatch):
+    """Input the child never fully took is a process fact: a parsed error
+    from the stream must not hide it."""
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "m"},
+        {"type": "result", "subtype": "success", "is_error": True, "result": _CLAUDE_REFUSED},
+    )
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout, stderr="", returncode=1))
+    shortfall = "the child closed its stdin after accepting 0 of 9 bytes (no error)"
+    monkeypatch.setattr(adapters, "_stdin_shortfall", lambda *_: shortfall)
+
+    out = adapters.ask_claude("review", effort="high")
+
+    assert out["error"] == _CLAUDE_REFUSED
+    assert out.get("stdin_shortfall") == shortfall
+
+
 def test_ask_unknown_agent_rejected(monkeypatch):
     calls = _capture_run(monkeypatch)
     out = adapters.ask("nobody", "hi")
