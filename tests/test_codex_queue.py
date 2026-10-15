@@ -8,6 +8,7 @@ server side: whose thread is woken, with exactly what text, and when again.
 
 import json
 import os
+import sys
 
 import anyio
 import pytest
@@ -79,7 +80,7 @@ async def call(wire, **kw):
 
 async def codex(tg, queue, steer=None):
     wake = codex_queue.CodexWake(queue=queue, steer=steer or Steer(), poll_s=0.02)
-    wake.unsteered = None  # steering available, whatever this environment has
+    wake.unsteered, wake.decide = None, lambda: None  # steering, whatever this environment has
     wire = await serving(tg, channel.Pusher(poll_s=0.02), wake=wake)
     await wire.handshake(client=codex_queue.CLIENT)
     return wire, wake
@@ -107,6 +108,7 @@ class Steer:
 
 TURN = "01a13d10-94c1-7c41-bfd8-df2eeeab32a4"
 TURN2 = "01a13d10-94c1-7c41-bfd8-000000000002"
+TURN3 = "01a13d10-94c1-7c41-bfd8-000000000003"
 ACCEPTED = codex_steer.Outcome(codex_steer.ACCEPTED, None, "codex/test")
 REFUSED = codex_steer.Outcome(codex_steer.REFUSED, "no active turn to steer", "codex/test")
 
@@ -576,10 +578,31 @@ async def test_a_busy_session_is_steered_into_its_turn_not_queued(lane):
         tg.cancel_scope.cancel()
 
 
-def test_a_refused_steer_queues_the_same_notice():
-    queue = Queue()
-    wake = armed(Steer(REFUSED), queue)
+@pytest.mark.anyio
+async def test_steering_is_decided_without_missing_the_first_call(lane, monkeypatch):
+    """Deciding before arming missed a call made right after the handshake,
+    so the thread was never pinned. It is decided at the first poll."""
+    monkeypatch.setattr(codex_queue, "steering", lambda: None)
+    queue, steer = Queue(), Steer(ACCEPTED)
+    async with anyio.create_task_group() as tg:
+        wake = codex_queue.CodexWake(queue=queue, steer=steer, poll_s=0.02)
+        wire = await serving(tg, channel.Pusher(poll_s=0.02), wake=wake)
+        await wire.handshake(client=codex_queue.CLIENT)
+        await call(wire, turn=TURN)
+        mailbox.send("claude", lane, "one")
+        with anyio.move_on_after(5):
+            while not steer.calls:
+                await anyio.sleep(0.01)
+        assert [turn for _, turn, _ in steer.calls] == [TURN]
+        assert wake.transport == "codex steer"
+        tg.cancel_scope.cancel()
+
+
+def test_a_refused_steer_queues_the_same_notice_without_steering_again():
+    queue, steer = Queue(), Steer(REFUSED, ACCEPTED)
+    wake = armed(steer, queue)
     wake.send(THREAD, "notice")
+    assert len(steer.calls) == 1, "the turn did not move: no second steer"
     assert queue.calls == [(THREAD, "notice")]
 
 
@@ -627,18 +650,21 @@ def test_a_refusal_is_steered_again_once_for_a_turn_that_moved():
     assert queue.calls == []
 
 
-def test_a_second_refusal_queues():
+def test_a_second_refusal_queues_even_if_the_turn_moved_again():
     queue = Queue()
     wake = None
 
-    def moved():
-        wake.observe({"_meta": meta(turn=TURN2)})
-        return REFUSED
+    def moved_to(turn):
+        def refuse():
+            wake.observe({"_meta": meta(turn=turn)})
+            return REFUSED
+        return refuse
 
-    steer = Steer(moved, REFUSED)
+    steer = Steer(moved_to(TURN2), moved_to(TURN3), ACCEPTED)
     wake = armed(steer, queue)
     wake.send(THREAD, "notice")
-    assert len(steer.calls) == 2 and queue.calls == [(THREAD, "notice")]
+    assert len(steer.calls) == 2, "two steers at most"
+    assert queue.calls == [(THREAD, "notice")]
 
 
 def test_only_the_pinned_threads_calls_leave_a_turn():
@@ -652,16 +678,30 @@ def test_steering_can_be_turned_off(monkeypatch):
     monkeypatch.setenv("HARDLINE_CODEX_STEER", "0")
     queue, steer = Queue(), Steer(ACCEPTED)
     wake = codex_queue.CodexWake(queue=queue, steer=steer)
+    wake.decide()
     wake.observe({"_meta": meta(turn=TURN)})
     wake.send(THREAD, "notice")
     assert (steer.calls, queue.calls) == ([], [(THREAD, "notice")])
     assert wake.transport == "codex queue"
 
 
+def test_notices_are_queued_until_steering_is_decided():
+    queue, steer = Queue(), Steer(ACCEPTED)
+    wake = codex_queue.CodexWake(queue=queue, steer=steer)
+    wake.observe({"_meta": meta(turn=TURN)})
+    wake.send(THREAD, "notice")
+    assert (steer.calls, wake.transport) == ([], "codex queue")
+
+
 def test_the_transport_says_whether_notices_are_steered(monkeypatch):
     monkeypatch.delenv("HARDLINE_CODEX_STEER", raising=False)
-    monkeypatch.setattr(codex_queue.importlib.util, "find_spec", lambda name: object())
-    assert codex_queue.CodexWake(queue=Queue()).transport == "codex steer"
-    monkeypatch.setattr(codex_queue.importlib.util, "find_spec", lambda name: None)
-    assert "websockets" in codex_queue.steering()
-    assert codex_queue.CodexWake(queue=Queue()).transport == "codex queue"
+    wake = codex_queue.CodexWake(queue=Queue())
+    with monkeypatch.context() as patch:
+        patch.setattr(codex_steer, "unusable", lambda: None)
+        wake.decide()
+    assert wake.transport == "codex steer"
+    # Importable on paper, broken in fact: find_spec would have said "steer".
+    monkeypatch.setitem(sys.modules, "websockets.client", None)
+    assert "websockets does not import" in codex_queue.steering()
+    wake.decide()
+    assert wake.transport == "codex queue"

@@ -3308,7 +3308,7 @@
   },
   "steer-only-pre-admission-errors-refuse": {
     "file": "hardline_mcp/codex_steer.py",
-    "before": "        if isinstance(error, dict) and error.get(\"code\") in NOT_ADMITTED:\n",
+    "before": "        if type(code) is int and code in NOT_ADMITTED:\n",
     "after": "        if error:\n",
     "tests": [
       "tests/test_codex_steer.py::test_an_internal_error_may_follow_admission_so_is_ambiguous"
@@ -3403,6 +3403,62 @@
     "after": "self.turn = turn.get(\"turn_id\") or self.turn",
     "tests": [
       "tests/test_codex_queue.py::test_only_the_pinned_threads_calls_leave_a_turn"
+    ]
+  },
+  "steer-deadline-stops-reading": {
+    "file": "hardline_mcp/codex_steer.py",
+    "before": "        if remaining <= 0:  # however much more is already waiting\n            raise TimeoutError(\"the daemon did not answer in time\")\n",
+    "after": "        remaining = max(remaining, 0)\n",
+    "tests": [
+      "tests/test_codex_steer.py::test_a_read_past_the_deadline_times_out_even_with_data_waiting"
+    ]
+  },
+  "steer-accepted-needs-a-result": {
+    "file": "hardline_mcp/codex_steer.py",
+    "before": "        if error is None and isinstance(reply.get(\"result\"), dict):\n",
+    "after": "        if error is None:\n",
+    "tests": [
+      "tests/test_codex_steer.py::test_an_answer_of_no_documented_shape_is_ambiguous[bare-id]"
+    ]
+  },
+  "steer-fragments-are-assembled": {
+    "file": "hardline_mcp/codex_steer.py",
+    "before": "                if not event.fin:\n                    continue\n",
+    "after": "",
+    "tests": [
+      "tests/test_codex_steer.py::test_a_fragmented_answer_is_assembled"
+    ]
+  },
+  "steer-proxy-ended-if-reader-fails": {
+    "file": "hardline_mcp/codex_steer.py",
+    "before": "            self.close()  # spawned, so ours to end\n",
+    "after": "            pass\n",
+    "tests": [
+      "tests/test_codex_steer.py::test_a_proxy_whose_reader_cannot_start_is_still_ended"
+    ]
+  },
+  "codexwake-decides-at-first-poll": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "        if self.unsteered == UNDECIDED:\n            self.decide()\n",
+    "after": "        if self.unsteered == UNDECIDED:\n            pass\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_steering_is_decided_without_missing_the_first_call"
+    ]
+  },
+  "codexwake-at-most-two-steers": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "        for _ in range(0 if self.unsteered else 2):\n",
+    "after": "        for _ in range(0 if self.unsteered else 3):\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_second_refusal_queues_even_if_the_turn_moved_again"
+    ]
+  },
+  "codexwake-no-second-steer-into-the-same-turn": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "            if turn is None or turn == tried:\n",
+    "after": "            if turn is None:\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_refused_steer_queues_the_same_notice_without_steering_again"
     ]
   },
   "codexwake-transport-reports-steering": {

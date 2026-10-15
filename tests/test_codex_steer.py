@@ -51,8 +51,15 @@ class Daemon:
             elif event.opcode == Opcode.TEXT:
                 message = json.loads(event.data)
                 self.requests.append(message)
+                if message.get("method") == "turn/steer" and self.hangup == "steer":
+                    raise BrokenPipeError("the proxy died taking the steer")
                 for reply in self.answer(message):
-                    self.server.send_text(json.dumps(reply).encode("utf-8"))
+                    data = json.dumps(reply).encode("utf-8")
+                    if self.steer == "fragmented" and reply.get("id") == message.get("id"):
+                        self.server.send_text(data[:10], fin=False)
+                        self.server.send_continuation(data[10:], fin=True)
+                    else:
+                        self.server.send_text(data)
         self.pending += [chunk for chunk in self.server.data_to_send() if chunk]
 
     def answer(self, message: dict) -> list[dict]:
@@ -60,11 +67,12 @@ class Daemon:
         if method == "initialize":
             return [{"id": message["id"], **self.init}]
         if method == "turn/steer" and self.steer != "silent":
+            reply = {"result": {"turnId": TURN}} if self.steer == "fragmented" else self.steer
             return [
                 {"method": "thread/status/changed", "params": {}},  # skipped
                 {"id": 7, "method": "item/tool/requestUserInput", "params": {}},  # never answered
                 {"id": 99, "error": {"code": -32603, "message": "another request's"}},  # skipped
-                {"id": message["id"], **self.steer},
+                {"id": message["id"], **reply},
             ]
         return []
 
@@ -121,6 +129,24 @@ def test_a_steer_left_unanswered_is_ambiguous():
     assert ending(lambda: steer(Daemon(steer="silent"))) is codex_steer.Ambiguous
 
 
+def test_a_steer_whose_write_failed_is_ambiguous():
+    """The proxy copies stdin on its own: bytes it took may have gone on."""
+    assert ending(lambda: steer(Daemon(hangup="steer"))) is codex_steer.Ambiguous
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [{}, {"result": None}, {"error": {"code": []}}, {"error": {"code": "-32600"}}, {"error": "no"}],
+    ids=["bare-id", "null-result", "code-list", "code-string", "error-string"],
+)
+def test_an_answer_of_no_documented_shape_is_ambiguous(reply):
+    assert ending(lambda: steer(Daemon(steer=reply))) is codex_steer.Ambiguous
+
+
+def test_a_fragmented_answer_is_assembled():
+    assert ending(lambda: steer(Daemon(steer="fragmented"))) == codex_steer.ACCEPTED
+
+
 @pytest.mark.parametrize(
     "daemon",
     [Daemon(hangup="handshake"), Daemon(init={"error": {"code": -32603, "message": "no"}})],
@@ -172,3 +198,52 @@ def test_over_real_pipes_silence_is_bounded_and_ambiguous():
     assert ending(run) is codex_steer.Ambiguous
     assert time.monotonic() - started < 30
     assert made[0].proc.poll() is not None
+
+
+def test_a_daemon_that_keeps_talking_cannot_outlast_the_deadline():
+    """Data already waiting was read past the deadline; a flood of
+    notifications kept a steer alive as long as the flood lasted (15 s)."""
+    made: list = []
+    started = time.monotonic()
+    run = lambda: codex_steer.steer(THREAD, TURN, "x", connect=proxy("flood", made), timeout_s=4)  # noqa: E731
+    assert ending(run) is codex_steer.Ambiguous
+    elapsed = time.monotonic() - started
+    assert elapsed >= 4, "ended before the deadline: the flood never ran"
+    assert elapsed < 12, "read on past the deadline"
+
+
+def test_a_read_past_the_deadline_times_out_even_with_data_waiting():
+    """Through a real pipe the reader drains faster than a daemon can talk, so
+    the backlog this guards against is set up directly."""
+    pipe = object.__new__(codex_steer._Proxy)
+    pipe._chunks = codex_steer.queue.Queue()
+    pipe._chunks.put(b"more")
+    with pytest.raises(TimeoutError):
+        pipe.recv(time.monotonic() - 1)
+
+
+def test_a_proxy_whose_reader_cannot_start_is_still_ended(monkeypatch):
+    spawned = []
+    real_popen = codex_steer.subprocess.Popen
+
+    def popen(*args, **kwargs):
+        spawned.append(real_popen(*args, **kwargs))
+        return spawned[-1]
+
+    class NoThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(codex_steer.subprocess, "Popen", popen)
+    monkeypatch.setattr(codex_steer.threading, "Thread", NoThread)
+    try:
+        codex_steer._Proxy([sys.executable, str(FAKE_PROXY), "silent"])
+    except RuntimeError:
+        pass
+    assert spawned and spawned[0].poll() is not None, "the spawned proxy was left running"

@@ -193,8 +193,11 @@ queued.
 **Steering needs `websockets`**, the `codex-watch` extra. Without it, or with
 `HARDLINE_CODEX_STEER=0`, every notice is queued as in rev 2, and
 `list_agents().you.transport` says so: `codex steer` when notices are steered
-first, `codex queue` when they never are. The reason is logged once, when the
-Codex client connects.
+first, `codex queue` when they never are. That is decided at the wake's first
+poll: off the event loop, after arming, and only for a Codex client, so no
+other client imports `websockets`. It is an actual import, not a lookup. The
+reason is logged then. Until it is decided, notices are queued. Changing
+either needs a hardline restart.
 
 **Reach.** Only threads hosted by the shared daemon, which the TUI uses by
 default. A session the TUI runs embedded (`--no-daemon`, `--profile`, a `-c`
@@ -375,6 +378,30 @@ sessions too.
 - **A synchronous fake shares the client's assumptions.** Added a real proxy
   subprocess test, which caught a bug the fake could not (a raw pipe has no
   `read1`), and a live run through the module itself.
+
+**Rev 3 implementation review (gpt-6-astra), each with a test and a mutation
+case:**
+- **Malformed answers escaped the outcome contract.** An error with a
+  non-integer `code` raised a raw `TypeError`, and `{"id": 2}` with no `result`
+  counted as accepted. Accepted now needs a `result` object, refused needs an
+  integer code in the set, and anything else is ambiguous.
+- **Data already waiting was read past the deadline.** `recv` checks expiry
+  first. Through a real pipe the reader drains faster than a daemon talks, so
+  the regression test sets up the backlog directly. A flood test bounds the
+  whole steer end to end.
+- **Fragmented text frames were parsed one by one.** They are assembled.
+- **A proxy whose reader thread failed to start was left running.** It is
+  ended, and `close` is repeatable and joins the reader.
+- **`find_spec` said `websockets` was there when it would not import.** The
+  decision now imports it.
+- **The retry tests could not tell one attempt from two.** They assert exact
+  counts, and the turn moves again during the second refusal.
+- **Found while fixing these:** deciding before arming delayed arming, so a
+  call made right after the handshake was missed and the thread never
+  pinned. The decision moved to the first poll, with a test.
+
+Not adopted: a watchdog on writes. Everything one steer writes is under 1 KB,
+which fits any OS pipe buffer even if the proxy reads none of it.
 
 **Not adopted:**
 - **Gating on the daemon's version.** Refusal is classified by JSON-RPC code,

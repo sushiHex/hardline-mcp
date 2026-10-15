@@ -16,7 +16,6 @@ nothing a sender influences goes into the notice.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import uuid
 from typing import Callable, Optional
@@ -24,6 +23,7 @@ from typing import Callable, Optional
 from . import adapters, announce, codex_steer
 
 CLIENT = "codex-mcp-client"
+UNDECIDED = "not decided yet"  # queue until steering is known to work
 
 
 def notice(nonce: str) -> str:
@@ -48,12 +48,11 @@ def _uuid(value) -> Optional[str]:
 
 
 def steering() -> Optional[str]:
-    """Why notices cannot be steered here, or None when they can."""
+    """Why notices cannot be steered here, or None when they can. Read when
+    the wake is made, at startup: a change needs a hardline restart."""
     if os.environ.get("HARDLINE_CODEX_STEER", "").strip() == "0":
         return "HARDLINE_CODEX_STEER=0"
-    if importlib.util.find_spec("websockets") is None:
-        return "websockets is not installed (pip install 'hardline-mcp[codex-watch]')"
-    return None
+    return codex_steer.unusable()
 
 
 class CodexWake(announce.Announcer):
@@ -72,7 +71,22 @@ class CodexWake(announce.Announcer):
         self.queue = queue
         self.steer = steer
         self.turn: Optional[str] = None  # the pinned thread's latest turn that called us
-        self.unsteered = steering()  # why not, or None
+        # Why notices are not steered, or None. Decided at the first poll, so
+        # no other client ever imports websockets.
+        self.unsteered: Optional[str] = UNDECIDED
+
+    def decide(self) -> None:
+        """Blocking (an import); off the loop."""
+        self.unsteered = steering()
+
+    def poll(self):
+        # Polling runs off the loop and only once the client is known to be
+        # Codex, after arming - deciding earlier would miss its first call.
+        if self.unsteered == UNDECIDED:
+            self.decide()
+            if self.unsteered:
+                self._note(f"codex notices are queued, never steered: {self.unsteered}")
+        return super().poll()
 
     @property
     def transport(self) -> str:
@@ -117,8 +131,6 @@ class CodexWake(announce.Announcer):
 
     def arm(self, client: dict) -> None:
         client["on_call"] = self.observe
-        if self.unsteered:  # caller holds the lock
-            self._notes.append(f"codex notices are queued, never steered: {self.unsteered}")
 
     def observe(self, params) -> None:
         """One ``tools/call``: pin the thread, or detect a conflicting one.

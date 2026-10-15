@@ -74,7 +74,12 @@ class _Proxy:
             env=adapters._agent_env(None),
         )
         self._chunks: "queue.Queue[bytes]" = queue.Queue()
-        threading.Thread(target=self._pump, name="hardline-steer", daemon=True).start()
+        self._reader = threading.Thread(target=self._pump, name="hardline-steer", daemon=True)
+        try:
+            self._reader.start()
+        except BaseException:
+            self.close()  # spawned, so ours to end
+            raise
 
     def _pump(self) -> None:
         # Unbuffered, so a raw read returns whatever has arrived. End of stream
@@ -88,23 +93,31 @@ class _Proxy:
             self._chunks.put(b"")
 
     def send(self, data: bytes) -> None:
-        # Frames here are a few hundred bytes; the pipe's buffer holds them.
+        # Never blocks: everything one steer writes - an upgrade request and
+        # three short frames, under 1 KB - fits any OS pipe buffer even if the
+        # proxy reads none of it, so only reads need the deadline.
         self.proc.stdin.write(data)
         self.proc.stdin.flush()
 
     def recv(self, deadline: float) -> bytes:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:  # however much more is already waiting
+            raise TimeoutError("the daemon did not answer in time")
         try:
-            return self._chunks.get(timeout=max(deadline - time.monotonic(), 0))
+            return self._chunks.get(timeout=remaining)
         except queue.Empty:
             raise TimeoutError("the daemon did not answer in time") from None
 
     def close(self) -> None:
-        """Bounded: a relay has no children, so a kill and a short wait."""
+        """Bounded and repeatable: a relay has no children, so a kill and a
+        short wait, then the reader ends at end of stream."""
         try:
             self.proc.kill()
         except OSError:
             pass
         adapters._reap(self.proc, timeout=2.0)
+        if self._reader.is_alive() and self._reader is not threading.current_thread():
+            self._reader.join(timeout=1.0)
 
 
 class _Session:
@@ -152,15 +165,33 @@ class _Session:
         are skipped, never answered: this client approves nothing."""
         from websockets.frames import Opcode
 
+        parts: list[bytes] = []  # one text message, possibly fragmented
         while True:
             for event in self._receive():
                 opcode = getattr(event, "opcode", None)
-                if opcode == Opcode.TEXT:
-                    message = json.loads(event.data.decode("utf-8"))
-                    if isinstance(message, dict) and message.get("id") == rid and "method" not in message:
-                        return message
-                elif opcode == Opcode.CLOSE:
+                if opcode == Opcode.CLOSE:
                     raise ConnectionError("the daemon closed the connection")
+                if opcode not in (Opcode.TEXT, Opcode.CONT):
+                    continue
+                parts.append(event.data)
+                if not event.fin:
+                    continue
+                message, parts = json.loads(b"".join(parts).decode("utf-8")), []
+                if isinstance(message, dict) and message.get("id") == rid and "method" not in message:
+                    return message
+
+
+def unusable() -> Optional[str]:
+    """Why this module cannot steer here, or None: ``websockets`` (the
+    ``codex-watch`` extra) must import, not merely be present."""
+    try:
+        import websockets.client  # noqa: F401
+        import websockets.frames  # noqa: F401
+        import websockets.http11  # noqa: F401
+        import websockets.uri  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - absent, or present and broken
+        return f"websockets does not import ({type(exc).__name__}: {exc}); install hardline-mcp[codex-watch]"
+    return None
 
 
 def _version() -> str:
@@ -183,10 +214,8 @@ def steer(
 ) -> Outcome:
     """Steer ``text`` into ``turn`` of ``thread``; see the module for outcomes."""
     deadline = time.monotonic() + timeout_s
-    try:
-        import websockets.client  # noqa: F401 - the codex-watch extra
-    except ImportError as exc:
-        raise Unreached(f"websockets is not installed ({exc})") from exc
+    if why := unusable():
+        raise Unreached(why)
     try:
         pipe = (connect or _Proxy)()
     except Exception as exc:  # noqa: BLE001 - nothing was written
@@ -216,12 +245,14 @@ def steer(
             reply = session.answer(2)
         except Exception as exc:  # noqa: BLE001
             raise Ambiguous(f"no answer to the steer: {type(exc).__name__}: {exc}") from exc
+        # Only the two shapes Codex documents count; anything else may have landed.
         error = reply.get("error")
-        if error is None:
+        if error is None and isinstance(reply.get("result"), dict):
             return Outcome(ACCEPTED, None, server)
-        if isinstance(error, dict) and error.get("code") in NOT_ADMITTED:
+        code = error.get("code") if isinstance(error, dict) else None
+        if type(code) is int and code in NOT_ADMITTED:
             return Outcome(REFUSED, str(error.get("message")), server)
-        raise Ambiguous(f"steer answered with an error that may follow admission: {error}")
+        raise Ambiguous(f"the steer was neither accepted nor refused: {reply}")
     finally:
         try:
             pipe.close()
