@@ -37,7 +37,8 @@ def notice(nonce: str) -> str:
     """The whole message: constant but for the server-generated nonce."""
     return (
         "[hardline] Automated notice from hardline-mcp, this session's MCP server. "
-        "No reply needed. You have unread hardline mail: read it with hardline's "
+        "No reply needed. New hardline mail arrived; you may have read it "
+        "already. Either way, read with hardline's "
         f"inbox(agent='claude', auto_ack=false, receipt='{nonce}') even if you "
         "defer the work, tell the user who sent each message and what it says, "
         "ack the ids you handle, and keep reading with after_id set to the last "

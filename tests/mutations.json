@@ -1640,6 +1640,38 @@
       "tests/test_codex_queue.py::test_a_receipt_counts_even_when_the_read_fails"
     ]
   },
+  "already-read-note-needs-an-empty-read": {
+    "file": "hardline_mcp/server.py",
+    "before": "    elif accepted and not msgs and not remaining:\n",
+    "after": "    elif accepted and not remaining:\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_only_an_empty_answer_to_a_notice_says_already_read"
+    ]
+  },
+  "already-read-note-needs-an-accepted-receipt": {
+    "file": "hardline_mcp/server.py",
+    "before": "    elif accepted and not msgs and not remaining:\n",
+    "after": "    elif not msgs and not remaining:\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_only_an_empty_answer_to_a_notice_says_already_read"
+    ]
+  },
+  "already-read-note-needs-nothing-unacked": {
+    "file": "hardline_mcp/server.py",
+    "before": "    elif accepted and not msgs and not remaining:\n",
+    "after": "    elif accepted and not msgs:\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_mail_left_unacked_is_not_already_read"
+    ]
+  },
+  "already-read-note-is-given": {
+    "file": "hardline_mcp/server.py",
+    "before": "        response[\"receipt_note\"] = ALREADY_READ_NOTE\n",
+    "after": "        pass\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_notice_for_mail_already_read_says_so"
+    ]
+  },
   "codexwake-facts-wait-for-identity": {
     "file": "hardline_mcp/announce.py",
     "before": "                raise RuntimeError(\"no process identity to record facts under\")",

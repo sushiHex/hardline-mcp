@@ -75,7 +75,8 @@ switching on missing receipts would be inference from absence.
 
 ```
 [hardline] Automated notice from hardline-mcp, this session's MCP server. No
-reply needed. You have unread hardline mail: read it with hardline's
+reply needed. New hardline mail arrived; you may have read it already. Either
+way, read with hardline's
 inbox(agent='claude', auto_ack=false, receipt='9f3a1c2e0b4d5e6f') even if you
 defer the work, tell the user who sent each message and what it says, ack the
 ids you handle, and keep reading with after_id set to the last message id
@@ -87,7 +88,10 @@ Constant but for the nonce: the host frames it as a teammate's request, so
 nothing a sender of hardline mail chose goes into it. Sent `from:
 "hardline-mcp"`, the name the session already sees on hardline's tools; the
 user's preview line reads "Message from @hardline-mcp". "Even if you defer the
-work" matters: the receipt is what reopens the gate.
+work" matters: the receipt is what reopens the gate. So does "either way": a
+notice can arrive after the session read its mail itself, and one that skipped
+the read as pointless would keep the gate shut. That read finds nothing, and
+its `receipt_note` says the mail was already read.
 
 ### Sending
 

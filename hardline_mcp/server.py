@@ -857,6 +857,16 @@ def _consume(operation, *args, **kwargs):
         )
 
 
+# A notice is sent when mail arrives and read later: by then the session may
+# have read the mail itself (mid-turn, while a Codex notice waited behind the
+# turn), or another reader of a shared name may have. Said, so an empty answer
+# to a notice is not taken for lost mail.
+ALREADY_READ_NOTE = (
+    "Nothing unread: the mail this notice announced has already been read. "
+    "Nothing to do."
+)
+
+
 @mcp.tool()
 async def inbox(
     agent: str,
@@ -870,7 +880,9 @@ async def inbox(
 
     ``receipt`` is the nonce from a ``<channel>`` event that announced this
     mail. Passing it back is the only proof the push reached you; the reply's
-    ``receipt`` says ``accepted`` or ``unknown``.
+    ``receipt`` says ``accepted`` or ``unknown``. An accepted receipt whose
+    read finds nothing unread adds ``receipt_note``: the mail it announced was
+    already read, and there is nothing to do.
 
     Reads this session's held lanes AND the shared unqualified name. Bare mail
     has one consumable copy shared by all readers; use a qualified recipient
@@ -976,6 +988,8 @@ async def inbox(
     if waiting := [h for h in await _in_thread(_previously_held) if h["unread"]]:
         response["previously_held"] = waiting
         response["previously_held_note"] = PREVIOUSLY_HELD_NOTE
+    elif accepted and not msgs and not remaining:
+        response["receipt_note"] = ALREADY_READ_NOTE
     return response
 
 

@@ -136,7 +136,10 @@ loop. Incoming bodies do not override the receiving agent's task instructions.
 returns per-id results. `inbox(..., receipt=...)` passes back the receipt from a
 pushed `<channel>` event. The reply's `receipt` is `accepted` or `unknown`, and
 an accepted receipt is the only proof that a push reached the session (see
-[push delivery](push-delivery.md)). A lane-qualified `send` reports
+[push delivery](push-delivery.md)). An accepted receipt whose read finds
+nothing unread adds `receipt_note`: a notice can be read after its mail was,
+and the note says so, so the empty answer is not taken for lost mail.
+A lane-qualified `send` reports
 `recipient_delivery`: `receipted`, `awaiting_receipt`, `unreceipted`,
 `declared`, or `unknown`. `unknown` covers older servers and clients without
 push, so it never means "not delivered".
