@@ -3305,5 +3305,112 @@
     "tests": [
       "tests/test_mutation_catalog.py::test_the_checks_see_a_stale_anchor_and_a_renamed_test"
     ]
+  },
+  "steer-only-pre-admission-errors-refuse": {
+    "file": "hardline_mcp/codex_steer.py",
+    "before": "        if isinstance(error, dict) and error.get(\"code\") in NOT_ADMITTED:\n",
+    "after": "        if error:\n",
+    "tests": [
+      "tests/test_codex_steer.py::test_an_internal_error_may_follow_admission_so_is_ambiguous"
+    ]
+  },
+  "steer-unanswered-is-ambiguous": {
+    "file": "hardline_mcp/codex_steer.py",
+    "before": "            raise Ambiguous(f\"no answer to the steer: {type(exc).__name__}: {exc}\") from exc\n",
+    "after": "            raise Unreached(f\"no answer to the steer: {type(exc).__name__}: {exc}\") from exc\n",
+    "tests": [
+      "tests/test_codex_steer.py::test_a_steer_left_unanswered_is_ambiguous",
+      "tests/test_codex_steer.py::test_over_real_pipes_silence_is_bounded_and_ambiguous"
+    ]
+  },
+  "steer-refused-initialize-writes-no-steer": {
+    "file": "hardline_mcp/codex_steer.py",
+    "before": "            if \"error\" in init:\n                raise RuntimeError(f\"initialize refused: {init['error']}\")\n",
+    "after": "",
+    "tests": [
+      "tests/test_codex_steer.py::test_a_failure_before_the_steer_is_written_is_unreached[initialize-refused]"
+    ]
+  },
+  "steer-always-closes-the-pipe": {
+    "file": "hardline_mcp/codex_steer.py",
+    "before": "        try:\n            pipe.close()\n",
+    "after": "        try:\n            pass\n",
+    "tests": [
+      "tests/test_codex_steer.py::test_an_accepted_steer_names_the_turn_and_the_server",
+      "tests/test_codex_steer.py::test_a_failure_before_the_steer_is_written_is_unreached[no-handshake]"
+    ]
+  },
+  "steer-pump-reads-a-raw-pipe": {
+    "file": "hardline_mcp/codex_steer.py",
+    "before": "            while chunk := self.proc.stdout.read(65536):\n",
+    "after": "            while chunk := self.proc.stdout.read1(65536):\n",
+    "tests": [
+      "tests/test_codex_steer.py::test_over_real_pipes_a_steer_is_accepted_and_the_proxy_reaped"
+    ]
+  },
+  "codexwake-accepted-steer-is-not-queued": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "                self._note(f\"codex notice steered into turn {turn} ({outcome.server})\")\n                return\n",
+    "after": "                self._note(f\"codex notice steered into turn {turn} ({outcome.server})\")\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_busy_session_is_steered_into_its_turn_not_queued",
+      "tests/test_codex_queue.py::test_a_refusal_is_steered_again_once_for_a_turn_that_moved"
+    ]
+  },
+  "codexwake-unreached-steer-is-queued": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "                self._note(f\"codex steer unreached, queueing: {exc}\")\n                break\n",
+    "after": "                self._note(f\"codex steer unreached, queueing: {exc}\")\n                raise\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_an_unreached_steer_queues"
+    ]
+  },
+  "codexwake-steers-again-only-for-a-moved-turn": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "            if turn is None or turn == tried:\n",
+    "after": "            if turn is None or tried is not None:\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_refusal_is_steered_again_once_for_a_turn_that_moved"
+    ]
+  },
+  "codexwake-steering-opt-out": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "        for _ in range(0 if self.unsteered else 2):\n",
+    "after": "        for _ in range(2):\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_steering_can_be_turned_off"
+    ]
+  },
+  "codexwake-opt-out-variable": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "    if os.environ.get(\"HARDLINE_CODEX_STEER\", \"\").strip() == \"0\":\n",
+    "after": "    if os.environ.get(\"HARDLINE_CODEX_STEER\", \"\").strip() == \"off\":\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_steering_can_be_turned_off"
+    ]
+  },
+  "codexwake-turn-only-from-the-pinned-thread": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "            if thread == self.address:\n                self.turn",
+    "after": "            if True:\n                self.turn",
+    "tests": [
+      "tests/test_codex_queue.py::test_only_the_pinned_threads_calls_leave_a_turn"
+    ]
+  },
+  "codexwake-turn-must-be-a-uuid": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "self.turn = _uuid(turn.get(\"turn_id\")) or self.turn",
+    "after": "self.turn = turn.get(\"turn_id\") or self.turn",
+    "tests": [
+      "tests/test_codex_queue.py::test_only_the_pinned_threads_calls_leave_a_turn"
+    ]
+  },
+  "codexwake-transport-reports-steering": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "        return \"codex queue\" if self.unsteered else \"codex steer\"\n",
+    "after": "        return \"codex queue\"\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_the_transport_says_whether_notices_are_steered"
+    ]
   }
 }

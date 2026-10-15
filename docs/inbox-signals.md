@@ -19,7 +19,8 @@ Two things apply to every path:
 - **Receipts prove delivery, nothing else does.** Each wake carries a receipt
   that the woken model passes back through `inbox(..., receipt=...)`.
   `list_agents().you` reports the `transport` in use (`inbox`, `channel`,
-  `codex queue`, or `null` until a wake has an address) and its `delivery`:
+  `codex steer`, `codex queue`, or `null` until a wake has an address) and its
+  `delivery`:
 
   | `delivery` | Meaning |
   | --- | --- |
@@ -93,6 +94,15 @@ notice exactly as if you had typed it.
   releases it. Only mail not yet announced triggers a notice, so deferred mail
   isn't re-announced. If a notice's receipt never comes back, waking pauses
   rather than repeats.
+- **A busy turn is steered.** If the session's current turn has called
+  hardline (it dispatched an async job, say), the notice goes into that turn
+  instead, through the local Codex daemon (`turn/steer`). The model sees it
+  before its next request, not when the turn ends. Codex refuses it if that
+  turn is over, and the notice is queued as above. This needs the
+  `codex-watch` extra (`websockets`); `transport` reads `codex steer` when
+  notices are steered first and `codex queue` when they never are.
+  `HARDLINE_CODEX_STEER=0` turns it off. See
+  [queue-wake, rev 3](codex-queue-wake.md#steering-a-busy-turn-rev-3).
 - **Requirements.** Codex 0.149 or newer (`codex queue`). If Codex runs with a
   custom `CODEX_HOME`, set the same `CODEX_HOME` in hardline's MCP registration
   env. Codex does not pass it to MCP servers, and without it the notice is

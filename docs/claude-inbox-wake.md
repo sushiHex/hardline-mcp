@@ -68,7 +68,8 @@ connects, not at startup, means a session record Claude Code writes after
 spawning its MCP servers is still found. The channel capability is still
 declared, so the flag finds nothing amiss. Never switched at runtime:
 switching on missing receipts would be inference from absence.
-`list_agents().you.transport` reports `inbox`, `channel` or `codex queue`, and
+`list_agents().you.transport` reports `inbox`, `channel`, `codex steer` or
+`codex queue`, and
 `null` until a wake has an address.
 
 ### The notice

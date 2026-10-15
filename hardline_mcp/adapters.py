@@ -1325,7 +1325,7 @@ def _close_fds(fds) -> None:
             pass
 
 
-def _reap(proc: subprocess.Popen) -> bool:
+def _reap(proc: subprocess.Popen, timeout: float = 10) -> bool:
     """Close the pipes and try to wait for the child. Never raises.
 
     Returns whether the child was actually reaped. It is BOUNDED, not
@@ -1345,7 +1345,7 @@ def _reap(proc: subprocess.Popen) -> bool:
         except BaseException:  # noqa: BLE001 - see below
             pass
     try:
-        proc.wait(timeout=10)
+        proc.wait(timeout=timeout)
         return True
     except BaseException:  # noqa: BLE001 - already on the failure path
         # BaseException, not Exception: this runs while another exception is

@@ -70,8 +70,10 @@ Dependencies point one way: `procid` <- `mailbox` <- `jobs`/`sessions` <-
     `~/.claude/sessions/<pid>.json`). It replaces channel push whenever the
     inbox is proven; push is the fallback. See `docs/claude-inbox-wake.md`.
   - `codex_queue.py` pins the Codex thread from `tools/call` `_meta` (through
-    the tap's `on_call` hook) and queues with `codex queue`. See
-    `docs/codex-queue-wake.md`.
+    the tap's `on_call` hook), steers a notice into the turn that last called
+    hardline (`codex_steer.py`: `turn/steer` on the local daemon, over
+    `codex app-server proxy`), and queues with `codex queue` when the daemon
+    refuses. See `docs/codex-queue-wake.md`.
 - `hints.py` remembers which Claude conversation last held each claimed name
   (`lane_hints`), so a relaunched or reconnected conversation is told about
   its old names and their mail. Advice only: it never claims, routes or reads.

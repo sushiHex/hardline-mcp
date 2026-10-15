@@ -1,4 +1,4 @@
-# Codex queue-wake: mail into a running Codex session (design, rev 2)
+# Codex queue-wake: mail into a running Codex session (design, rev 3)
 
 A Codex session holding a lane should learn about its mail without the user
 prompting it, and without the setup `watch-codex` needs (a loopback app-server
@@ -6,6 +6,7 @@ endpoint plus a thread UUID copied from the host). Claude gets this from channel
 push ([push delivery](push-delivery.md)). This is the Codex equivalent.
 
 Rev 2 rebuilds rev 1 after a gpt-6-astra review; the record is at the end.
+Rev 3 steers the notice into a busy turn first ("Steering a busy turn").
 
 ## Evidence (verified 2026-10-06/07, codex-cli 0.156.1, Windows)
 
@@ -125,6 +126,90 @@ Every 2 s, `CodexWake` follows these steps:
   UUID: the notice fails closed instead of misdelivering. Documented in
   configuration: set the same `CODEX_HOME` in hardline's MCP registration env.
 
+### Steering a busy turn (rev 3)
+
+A queued notice starts only when the turn ends. A session in a long turn sees
+an async job's result only then, while a Claude session sees it at its next
+tool call. And when such a session reads its mail itself, mid-turn, the queued
+notice that follows finds nothing (`receipt_note`). Rev 3 puts the notice into
+the running turn instead, when there is one. Evidence and source:
+`research/2026-10-14-codex-mid-turn-wake.md` (local), issue #80.
+
+**A candidate turn, not proof of a busy one.** Every `tools/call` to hardline
+carries `_meta.x-codex-turn-metadata.turn_id`, the id `turn/steer` checks
+against. `observe` keeps the latest one seen on the pinned thread (a UUID, and
+only from calls on that thread). It names the last turn that called hardline,
+which may be over, or may not be the active one. Codex decides: it compares the
+id with the active turn and enqueues under one lock, and a steer never starts
+a turn. The steer can only ever reach the pinned thread, with the constant
+notice text. On each notice, `CodexWake.send`:
+
+1. **Steers**, if a turn id is known: `turn/steer {threadId, expectedTurnId,
+   input}` on the local app-server daemon. The model sees it before its next
+   sampling request, not while a tool is running.
+2. **Steers once more** if the daemon refused and the session's turn id
+   changed meanwhile (a call from a newer turn).
+3. **Queues as before** when the daemon refused, or nothing reached it, or no
+   turn id has been seen:
+   - A refusal is an error raised before input is admitted, by code: `-32600`
+     (a mismatch, `no active turn to steer`, `thread not found`, draining),
+     `-32601`, `-32602`, `-32001`. Never by message text.
+   - Nothing reached it when `websockets` is not installed, the proxy would not
+     start, or the handshake or `initialize` failed: the steer was never
+     written.
+4. **Does neither** once the steer frame's write has begun and no refusal came
+   back: a timeout, a closed pipe, or any other error code. `-32603` is
+   returned when the submission itself fails, which can follow input that
+   landed. It may be enqueued and nothing dedupes a retry, so the notice
+   stays outstanding, like a failed queue attempt.
+
+**What steering reaches.** A turn that has called hardline: the turn that
+dispatched an async job, typically, which is the case this exists for. A turn
+that never calls hardline leaves no id, so the steer is refused as a mismatch
+and the notice is queued behind that turn, as in rev 2. Error text names the
+active turn's id, but it is never parsed for one.
+
+**An accepted steer is not a delivered one.** One landing in a finishing turn
+is seen next turn, and a `UserPromptSubmit` hook can block it. An interrupt
+drops it, unlike a queued notice, which waits for the resume. So nothing about
+the gate changes: the notice is outstanding until its receipt, and an accepted
+steer is never retried. A dropped steer pauses waking until the next receipt,
+which the session's `delivery` shows as `awaiting_receipt`, then `unreceipted`.
+
+**Transport.** `codex_steer.steer(thread, turn, text)` starts
+`codex app-server proxy` (the same executable and environment as
+`codex queue`), which relays raw bytes to the daemon's control socket. Over its
+pipes it speaks WebSocket through `websockets`' sans-I/O `ClientProtocol`
+(`ws://localhost/`, as the daemon's own client does), sends `initialize`,
+`initialized` and `turn/steer`, and closes. Server requests and notifications
+are skipped, never answered. One connection per notice: notices are rare, and
+a held connection would need its own lifecycle across daemon restarts. Reads
+share one 10 s deadline; cleanup is a kill and a 2 s wait (a relay has no
+children). Live on 0.162.1 the whole steer took 0.08 s. The daemon's
+`userAgent` is logged with each steered notice. Error semantics are taken from
+0.162.1. A daemon without `turn/steer` answers `-32601`, so its notices are
+queued.
+
+**Steering needs `websockets`**, the `codex-watch` extra. Without it, or with
+`HARDLINE_CODEX_STEER=0`, every notice is queued as in rev 2, and
+`list_agents().you.transport` says so: `codex steer` when notices are steered
+first, `codex queue` when they never are. The reason is logged once, when the
+Codex client connects.
+
+**Reach.** Only threads hosted by the shared daemon, which the TUI uses by
+default. A session the TUI runs embedded (`--no-daemon`, `--profile`, a `-c`
+override and others) is not loaded in the daemon. Its steer is refused with
+`thread not found`, and the notice is queued.
+
+**One side effect, from review and not verified here:** a steer without
+`additionalContext` replaces the session's shared map of deduplicated
+client context with an empty one. Another client's next context fragment may
+then be sent again rather than deduplicated. Nothing hardline sends is
+affected.
+
+**What it does not change:** the notice text, the gate, receipts and the
+delivery facts. Which route each notice took is logged.
+
 ### Delivery state and receipts
 
 `CodexWake` records the same coarse `push_delivery` facts: declared, last push,
@@ -138,13 +223,15 @@ sessions too.
 
 ### Lifecycle (accepted, stated)
 
-- **Interrupted.** Codex holds the notice until the user resumes, and it runs
-  then. It's harmless: a pointer to an inbox.
-- **Mail read mid-turn.** A busy session that reads its own mail (an async
-  job's result, say) still gets the notice queued behind its turn when the
-  turn ends. That read finds nothing; its `receipt_note` says the mail was
-  already read or is no longer this session's. Narrowing the window itself, by steering into the running
-  turn, is researched but not built.
+- **Interrupted.** A queued notice is held until the user resumes, and runs
+  then: harmless, a pointer to an inbox. A steered notice is dropped by the
+  interrupt, and waking pauses until a later receipt (rev 3).
+- **Mail read mid-turn.** A session that reads its own mail while a queued
+  notice waits behind its turn gets that notice when the turn ends. The read
+  finds nothing, and its `receipt_note` says the mail was already read or is
+  no longer this session's. Rev 3 steers the notice into a turn that has
+  called hardline instead, which leaves this to a turn that never did, and to
+  the seconds between a turn ending and its queued notice starting.
 - **Lane released or claimed elsewhere** after queueing: the notice runs, and
   the inbox shows what the session still holds. Harmless.
 - **Hardline restart** (MCP reconnect): the in-memory outstanding notice is
@@ -188,6 +275,17 @@ sessions too.
 - **Receipts:** only the issuing transport accepts a nonce, and a receipt proves
   only its own notice.
 - **Execution:** `codex queue` argv; no stdin; bounded.
+- **Steering (rev 3), `test_codex_steer.py` and `test_codex_queue.py`:**
+  - Outcomes against a real-framing fake daemon: accepted; refusal by code;
+    `-32603` and silence are ambiguous; failures before the steer are
+    unreached; server requests are never answered.
+  - The same over a real proxy subprocess: pipes, the deadline, reaping.
+  - `CodexWake`:
+    - an accepted steer is not queued; a refused or unreached one is;
+    - an ambiguous one is neither;
+    - one retry, only for a turn that moved;
+    - the turn id comes only from the pinned thread and must be a UUID;
+    - the opt-out, and `transport`.
 - **Live:** queue into a real app-server thread (opt-in), plus one manual
   two-session run (Claude sends to a Codex lane; Codex wakes and drains). That
   is also the first live session-to-session exchange CLAUDE.md lists as
@@ -255,3 +353,35 @@ sessions too.
 - **Docs:** the reserved-before-conflict boundary is stated, and two more
   overclaims ("the inbox then shows everything", "no instruction of its own")
   are corrected.
+
+**Rev 3 design review (gpt-6-astra, against `rust-v0.162.1`), adopted:**
+- **"Any error means not delivered" was unsafe.** A failed submission returns
+  `-32603` after input may have landed (`turn_processor.rs` maps the
+  `steer_turn` error to `internal_error`). Verified locally. Only codes raised
+  before admission refuse; anything else is ambiguous.
+- **"Written" is not daemon receipt.** The proxy copies stdin on its own, so
+  ambiguity starts when the steer frame's write begins, not after it returns.
+- **The turn id is a candidate, not busy evidence.** Recovery can preserve an
+  old id. Stated, and confined to the pinned thread and UUIDs.
+- **A mismatch means another turn is running, possibly for hours.** One retry
+  if the id moved meanwhile; otherwise queue, and the doc no longer promises
+  a short window for that case.
+- **Silent fallback looked healthy.** `transport` now says `codex steer` or
+  `codex queue`, and the reason is logged.
+- **"10 s in all" ignored cleanup.** Cleanup is now a kill and a 2 s wait, not
+  the 30 s tree kill.
+- **An interrupt drops a steer**, where a queued notice waits for the resume.
+  The lifecycle says so; the gate stays conservative.
+- **A synchronous fake shares the client's assumptions.** Added a real proxy
+  subprocess test, which caught a bug the fake could not (a raw pipe has no
+  `read1`), and a live run through the module itself.
+
+**Not adopted:**
+- **Gating on the daemon's version.** Refusal is classified by JSON-RPC code,
+  and a daemon without `turn/steer` answers `-32601`, so its notices are
+  queued. The version is logged instead.
+- **Making `websockets` a core dependency.** Steering is an improvement over a
+  queue that still works. `transport` shows which one a session gets.
+- **Releasing the gate when a steered turn ends without a receipt.** That
+  would trade a pause for possible duplicates, a choice rev 2 made the other
+  way. The pause shows in `delivery`.

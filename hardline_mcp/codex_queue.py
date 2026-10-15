@@ -6,16 +6,22 @@ from Codex itself: every ``tools/call`` carries it in ``_meta``, read here
 through ``channel.tap``'s ``on_call`` hook. The gate, the new-mail rule and the
 delivery facts are ``announce.Announcer``'s.
 
+A busy thread is steered first (rev 3): the same notice goes into the turn
+that last called hardline, through ``codex_steer``, and is queued only when
+the daemon refuses it.
+
 A queued turn carries the user's authority and renders as typed input, so
 nothing a sender influences goes into the notice.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import os
 import uuid
 from typing import Callable, Optional
 
-from . import adapters, announce
+from . import adapters, announce, codex_steer
 
 CLIENT = "codex-mcp-client"
 
@@ -32,7 +38,7 @@ def notice(nonce: str) -> str:
     )
 
 
-def _thread_id(value) -> Optional[str]:
+def _uuid(value) -> Optional[str]:
     if not isinstance(value, str):
         return None
     try:
@@ -41,41 +47,92 @@ def _thread_id(value) -> Optional[str]:
         return None
 
 
+def steering() -> Optional[str]:
+    """Why notices cannot be steered here, or None when they can."""
+    if os.environ.get("HARDLINE_CODEX_STEER", "").strip() == "0":
+        return "HARDLINE_CODEX_STEER=0"
+    if importlib.util.find_spec("websockets") is None:
+        return "websockets is not installed (pip install 'hardline-mcp[codex-watch]')"
+    return None
+
+
 class CodexWake(announce.Announcer):
     """Wake state for this process's one Codex connection."""
 
     client = CLIENT
-    transport = "codex queue"
 
-    def __init__(self, *, queue: Callable[[str, str], dict] = adapters.queue_codex, **kw):
+    def __init__(
+        self,
+        *,
+        queue: Callable[[str, str], dict] = adapters.queue_codex,
+        steer: Callable[[str, str, str], codex_steer.Outcome] = codex_steer.steer,
+        **kw,
+    ):
         super().__init__(**kw)
         self.queue = queue
+        self.steer = steer
+        self.turn: Optional[str] = None  # the pinned thread's latest turn that called us
+        self.unsteered = steering()  # why not, or None
+
+    @property
+    def transport(self) -> str:
+        return "codex queue" if self.unsteered else "codex steer"
 
     def notice(self, nonce: str) -> str:
         return notice(nonce)
 
     def send(self, thread: str, text: str) -> None:
+        """Steer into the turn that last called us, else queue.
+
+        A refusal is the daemon saying it admitted nothing, so the same
+        reservation is queued. A steer that went out unanswered raises: it
+        may be enqueued, so the notice stays outstanding and nothing is queued
+        after it. One retry, only for a turn id that changed meanwhile.
+        """
+        tried = None
+        for _ in range(0 if self.unsteered else 2):
+            with self._lock:
+                turn = self.turn
+            if turn is None or turn == tried:
+                break
+            try:
+                outcome = self.steer(thread, turn, text)
+            except codex_steer.Unreached as exc:
+                self._note(f"codex steer unreached, queueing: {exc}")
+                break
+            if outcome.status == codex_steer.ACCEPTED:
+                self._note(f"codex notice steered into turn {turn} ({outcome.server})")
+                return
+            self._note(f"codex steer into turn {turn} refused: {outcome.detail}")
+            tried = turn
         # A failure may still have enqueued (the commit can land before the
         # response is lost): it stays outstanding, never NotSent.
         result = self.queue(thread, text)
         if not result.get("ok"):
             raise RuntimeError(f"codex queue failed: {result.get('error')}")
 
+    def _note(self, line: str) -> None:
+        with self._lock:
+            self._notes.append(line)
+
     def arm(self, client: dict) -> None:
         client["on_call"] = self.observe
+        if self.unsteered:  # caller holds the lock
+            self._notes.append(f"codex notices are queued, never steered: {self.unsteered}")
 
     def observe(self, params) -> None:
         """One ``tools/call``: pin the thread, or detect a conflicting one.
 
         The address is the first top-level thread; a second one stops waking
-        for good rather than migrate. Called on the event loop: memory only,
-        under the lock.
+        for good rather than migrate. A call on the pinned thread also leaves
+        its turn id, the candidate a notice is steered into. Called on the
+        event loop: memory only, under the lock.
         """
         meta = params.get("_meta") if isinstance(params, dict) else None
         turn = meta.get("x-codex-turn-metadata") if isinstance(meta, dict) else None
         if not isinstance(turn, dict):
             return
-        thread = _thread_id(meta.get("threadId"))
+        thread = _uuid(meta.get("threadId"))
         if thread is None or turn.get("thread_id") not in (None, thread):
             return
         with self._lock:
@@ -90,3 +147,5 @@ class CodexWake(announce.Announcer):
                     f"codex wake stopped: a second top-level thread {thread} called "
                     f"this connection, pinned to {self.address}"
                 )
+            if thread == self.address:
+                self.turn = _uuid(turn.get("turn_id")) or self.turn
