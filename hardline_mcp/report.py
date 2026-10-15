@@ -44,10 +44,18 @@ NOTES = [
     "other_instance: consumed by another process (a relaunch, a /bg move, an inherited role, "
     "or a misdelivery), not a verdict; notices are matched by job id, sender and recipient, "
     "which a hand-sent copy can imitate",
+    "other_instance_by_suffix: whether the lane's eight-character suffix equals the acking "
+    "conversation's first eight; a correlation, not provenance: an explicit label can carry "
+    "any suffix, eight characters are not the whole id, and the conversation is the acking "
+    "server's CLAUDE_CODE_SESSION_ID, so a Codex ack normally records none",
     "tokenless: records with no creation token not shown dead, whose pid may be their own "
     "process or a stranger's; zero is this run's finding, not a guarantee",
     "codex_routes: facts each Codex wake wrote about itself; 'ambiguous' is a steer that may or may "
     "not have landed, counted apart from steered; a dead process's row stays until pruned",
+    "codex_lane_servers_without_row: registered processes not shown dead holding a codex: lane "
+    "with no route row - older code, a wake never pinned to a top-level thread (a subagent's "
+    "server), a failed write, or not a Codex client at all; their notices are in no total. A "
+    "row's zeros mean no persisted route outcome, not no notice: a failed queue records none",
     "unread_mail: counts only, nothing is acked or deleted; a registered holder is a session row "
     "not shown dead, not a consumer known to be reading",
 ]
@@ -69,8 +77,9 @@ _READS = {
     # because every writer stores UTC ISO-8601 (mailbox._iso of a UTC clock).
     "unread": "SELECT recipient, COUNT(*) AS n, MIN(created_at) AS oldest FROM messages"
     " WHERE acked_at IS NULL GROUP BY recipient",
+    # Every row: a wake writes one when it pins its thread, before any notice.
     "routes": "SELECT pid, process_key, last_route, last_route_reason, steered, queued, ambiguous"
-    " FROM codex_routes WHERE last_route IS NOT NULL ORDER BY pid",
+    " FROM codex_routes ORDER BY pid",
 }
 _CREATED_ON_USE = {
     "routes": "codex_routes",
@@ -98,7 +107,9 @@ def report(db_path: Optional[Path] = None) -> dict:
         "unread_mail": _section(
             functools.partial(_unread_mail, now=now), read, probe, "unread", "sessions"
         ),
-        "codex_routes": _section(_codex_routes, read, probe, "routes"),
+        "codex_routes": _section(
+            functools.partial(_codex_routes, sessions=read["sessions"]), read, probe, "routes"
+        ),
         "notes": NOTES,
     }
 
@@ -179,14 +190,33 @@ def _job_id(body: str) -> Optional[str]:
     return job_id if isinstance(job_id, str) else None
 
 
+SUFFIX_FACTS = ("suffix_equal", "suffix_differs", "no_suffix", "conversation_unrecorded")
+
+
+def _suffix_fact(lane: str, conversation: Optional[str]) -> str:
+    """Whether the lane a notice went to ends in the first eight characters of
+    the conversation that acked it, as a label derived for that conversation
+    would (``adapters``). A correlation, never provenance: an explicit label
+    can carry any suffix, and eight characters are not the whole id."""
+    if not conversation:
+        return "conversation_unrecorded"
+    suffix = lane.rpartition(".")[2] if "." in lane else ""
+    if len(suffix) != 8:
+        return "no_suffix"
+    return "suffix_equal" if conversation[:8] == suffix else "suffix_differs"
+
+
 def _job_notices(
     jobs: list, acks: Optional[list], notices: list, unrecorded: Optional[list], *, probe: Callable
 ) -> dict:
     """Acked job notices: consumed by the process that dispatched the job, by
-    another, or by one nothing recorded (an older revision, or no token)."""
+    another, or by one nothing recorded (an older revision, or no token).
+    Other-instance notices are also grouped by ``_suffix_fact``, each group
+    with its own newest ids, so no group can crowd another out of view."""
     by_job = {j["job_id"]: j for j in jobs}
     by_message = {a["message_id"]: a for a in acks or ()}
     counts: Counter = Counter(same_instance=0, other_instance=0, unknown=0)
+    by_suffix: dict = {fact: {"count": 0, "message_ids": []} for fact in SUFFIX_FACTS}
     sample = []
     for notice in notices:
         job = by_job.get(_job_id(notice["body"]))
@@ -199,6 +229,11 @@ def _job_notices(
             counts["same_instance"] += 1
         else:
             counts["other_instance"] += 1
+            fact = _suffix_fact(notice["recipient"], ack["conversation"])
+            group = by_suffix[fact]
+            group["count"] += 1
+            if len(group["message_ids"]) < SAMPLE:
+                group["message_ids"].append(notice["id"])
             if len(sample) < SAMPLE:
                 sample.append(
                     {
@@ -209,10 +244,12 @@ def _job_notices(
                         "acked_at": notice["acked_at"],
                         "dispatched_by": {"pid": job["owner_pid"], "process_key": job["owner_key"]},
                         "acked_by": ack,
+                        "suffix": fact,
                     }
                 )
     return {
         **counts,
+        "other_instance_by_suffix": by_suffix,
         "other_instance_sample": sample,
         "acks_recorded": acks is not None,
         # Every kind of message, so it overlaps "unknown" above; not additive.
@@ -251,14 +288,36 @@ def _tokenless(sessions: list, jobs: list, *, probe: Callable) -> dict:
     }
 
 
-def _codex_routes(routes: Optional[list], *, probe: Callable) -> dict:
+def _codex_routes(
+    routes: Optional[list], *, sessions: "list | Exception", probe: Callable
+) -> dict:
     """Which way each Codex wake sent its notices: steered into the turn,
-    queued (with the last reason), or ambiguous. Totals are over the rows shown."""
+    queued (with the last reason), or ambiguous. Totals are over the rows
+    shown, so the registered processes holding a ``codex:`` lane that wrote
+    none are listed beside them: without that, zero totals read the same as
+    nothing recording. The registry is enrichment here: a failed read of it
+    leaves the rows standing."""
     rows = [{**r, "state": probe(r["pid"], r["process_key"])} for r in routes or ()]
     return {
         **{k: sum(r[k] or 0 for r in rows) for k in ("steered", "queued", "ambiguous")},
+        "table": routes is not None,
+        "codex_lane_servers_without_row": _without_row(rows, sessions, probe),
         "processes": rows,
     }
+
+
+def _without_row(rows: list, sessions: "list | Exception", probe: Callable) -> "list | dict":
+    """Registered processes not shown dead that hold a ``codex:`` lane and have
+    no route row, with their lanes. A lane prefix, not the client's identity."""
+    if isinstance(sessions, Exception):
+        return {"unavailable": str(sessions)}
+    recorded = {(r["pid"], r["process_key"]) for r in rows}
+    lanes: dict[tuple, list] = {}
+    for s in sessions:
+        identity = (s["pid"], s["process_key"])
+        if s["lane"].startswith("codex:") and identity not in recorded and _is_live(s, probe):
+            lanes.setdefault(identity, []).append(s["lane"])
+    return [{"pid": p, "process_key": k, "lanes": v} for (p, k), v in lanes.items()]
 
 
 def _age_days(created_at: str, now: datetime) -> Optional[int]:

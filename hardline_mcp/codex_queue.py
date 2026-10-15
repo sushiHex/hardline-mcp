@@ -148,6 +148,13 @@ class CodexWake(announce.Announcer):
         with self._lock:
             self._notes.append(line)
 
+    def declare(self) -> None:
+        """Pinned: also a route row at zero, so ``report`` tells a wake that has
+        sent nothing yet from a server that records no routes. Caller holds
+        ``_lock``."""
+        super().declare()
+        self._routes_dirty = True
+
     def arm(self, client: dict) -> None:
         client["on_call"] = self.observe
 

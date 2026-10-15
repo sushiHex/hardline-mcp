@@ -219,8 +219,15 @@ unconfirmed; empty when steered) and running counts `steered`, `queued` and
 The facts live in their own table, written apart from `push_delivery`, because
 older revisions write `push_delivery` with positional values, which a column
 added there would break in every running server. Rows of dead processes are
-pruned with `push_delivery`'s. `hardline-mcp report` shows them under
-`codex_routes`.
+pruned with `push_delivery`'s. A wake writes its row, at zero, when it pins its
+thread, so a wake that has sent nothing yet is told apart from a server that
+records no routes. `hardline-mcp report` shows the rows under `codex_routes`,
+with `codex_lane_servers_without_row`: registered processes not shown dead that
+hold a `codex:` lane and wrote no row (older code, a subagent's server that
+never pins, a failed write, or a client that is not Codex at all: a lane prefix
+is not a client identity). Their notices are in no total. A row's zeros mean no
+persisted route outcome, not no notice: a queue that failed, possibly after
+committing, records no route.
 
 ### Delivery state and receipts
 

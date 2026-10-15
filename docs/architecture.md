@@ -328,9 +328,17 @@ content without acknowledging it.
 
 `hardline-mcp report` reads both triggers' evidence from a store, read-only.
 It counts acked job notices as `same_instance`, `other_instance` (with a
-newest-first sample carrying both identities and timestamps) or `unknown`, and
+newest-first sample carrying both identities and timestamps) or `unknown`.
+Other-instance notices are also grouped, each group with its own newest ids, by
+whether the lane's eight-character suffix equals the acking conversation's
+first eight (`suffix_equal`, `suffix_differs`, `no_suffix`,
+`conversation_unrecorded`): a correlation, not provenance, since an explicit
+label can carry any suffix. `lane_hints` is deliberately not consulted: it holds
+only the current holder, and a conversation that took a lane over writes its own
+hint, so it would make the case under study look benign. It also
 lists the revision each registered server runs (`process_revisions`, keyed by
-identity so a reused pid cannot inherit one) beside any live writer of the
+lists the revision each registered server runs (`process_revisions`, keyed by
+identity so a reused pid cannot inherit one), beside any live writer of the
 legacy `sessions` table. Under `tokenless` it counts records that still act on
 a pid without a creation token, judged as their consumers judge them:
 registered processes whose server or host has none and is not shown dead,

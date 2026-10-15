@@ -78,6 +78,48 @@ def test_job_notices_are_classified_by_who_acked_them(tmp_path, monkeypatch):
     assert got["acked_messages_without_record"] == 0
 
 
+def _other_instance_notices(db, monkeypatch, lanes, conversation):
+    """One finished job per lane, dispatched elsewhere, acked here as ``conversation``."""
+    monkeypatch.setattr(jobs, "current_identity", lambda: (1, "dispatcher"))
+    for lane in lanes:
+        job = jobs.create(agent="codex", requester=lane, label=None, request={}, db_path=db)
+        jobs.mark_running(job, db_path=db)
+        jobs.finish(job, result={"ok": True}, db_path=db)
+    mailbox.inbox(lanes, owned=lanes, conversation=conversation, db_path=db)
+    return report.report(db)["job_notices"]
+
+
+def test_other_instance_notices_are_grouped_by_lane_suffix_against_the_acker(
+    tmp_path, monkeypatch
+):
+    """The 10-27 review's relaunch reading as a fact: does the lane end in the
+    acking conversation's first eight characters? Each group keeps its own ids."""
+    lanes = ["claude:stray.99999999", "claude:short.abcd", "claude:held", "claude:p.abcdef12"]
+    got = _other_instance_notices(
+        tmp_path / "mb.db", monkeypatch, lanes, "abcdef12-3456-7890-abcd-ef1234567890"
+    )
+    by_suffix = got.get("other_instance_by_suffix", {})
+    counts = {fact: by_suffix.get(fact, {}).get("count") for fact in report.SUFFIX_FACTS}
+    assert counts == {
+        "suffix_equal": 1, "suffix_differs": 1, "no_suffix": 2, "conversation_unrecorded": 0,
+    }
+    facts = {e["recipient"]: e.get("suffix") for e in got["other_instance_sample"]}
+    assert facts == {
+        "claude:p.abcdef12": "suffix_equal",
+        "claude:stray.99999999": "suffix_differs",
+        "claude:short.abcd": "no_suffix",  # four characters prove nothing
+        "claude:held": "no_suffix",
+    }
+    ids = by_suffix.get("no_suffix", {}).get("message_ids", [])
+    assert len(ids) == 2 and ids == sorted(ids, reverse=True)
+
+
+def test_an_ack_with_no_conversation_is_unrecorded_not_a_mismatch(tmp_path, monkeypatch):
+    got = _other_instance_notices(tmp_path / "mb.db", monkeypatch, ["claude:p.abcdef12"], None)
+    group = got.get("other_instance_by_suffix", {}).get("conversation_unrecorded", {})
+    assert group.get("count") == 1
+
+
 def test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them(
     tmp_path, child
 ):

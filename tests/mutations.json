@@ -1531,7 +1531,8 @@
     "after": "                if False:\n                    return  # only a top-level thread is ever the address",
     "tests": [
       "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[subagent]",
-      "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[no-source]"
+      "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[no-source]",
+      "tests/test_codex_route_facts.py::test_a_wake_never_pinned_writes_no_row"
     ]
   },
   "codexwake-thread-must-be-a-uuid": {
@@ -3687,12 +3688,84 @@
       "tests/test_codex_route_facts.py::test_report_shows_each_codex_process_route_and_totals"
     ]
   },
-  "report-route-rows-only-when-recorded": {
+  "report-route-rows-include-pinned-wakes": {
     "file": "hardline_mcp/report.py",
-    "before": " FROM codex_routes WHERE last_route IS NOT NULL ORDER BY pid",
-    "after": " FROM codex_routes ORDER BY pid",
+    "before": " FROM codex_routes ORDER BY pid\",",
+    "after": " FROM codex_routes WHERE last_route IS NOT NULL ORDER BY pid\",",
     "tests": [
       "tests/test_codex_route_facts.py::test_report_shows_each_codex_process_route_and_totals"
+    ]
+  },
+  "route-row-written-when-pinned": {
+    "file": "hardline_mcp/codex_queue.py",
+    "before": "        super().declare()\n        self._routes_dirty = True\n",
+    "after": "        super().declare()\n",
+    "tests": [
+      "tests/test_codex_route_facts.py::test_a_pinned_wake_writes_its_row_before_any_notice"
+    ]
+  },
+  "report-without-row-only-codex-lanes": {
+    "file": "hardline_mcp/report.py",
+    "before": "if s[\"lane\"].startswith(\"codex:\") and identity not in recorded and _is_live(s, probe):",
+    "after": "if identity not in recorded and _is_live(s, probe):",
+    "tests": [
+      "tests/test_codex_route_facts.py::test_report_lists_codex_lane_servers_that_wrote_no_row"
+    ]
+  },
+  "report-without-row-excludes-recorded": {
+    "file": "hardline_mcp/report.py",
+    "before": "if s[\"lane\"].startswith(\"codex:\") and identity not in recorded and _is_live(s, probe):",
+    "after": "if s[\"lane\"].startswith(\"codex:\") and _is_live(s, probe):",
+    "tests": [
+      "tests/test_codex_route_facts.py::test_report_lists_codex_lane_servers_that_wrote_no_row"
+    ]
+  },
+  "report-without-row-only-not-dead": {
+    "file": "hardline_mcp/report.py",
+    "before": "if s[\"lane\"].startswith(\"codex:\") and identity not in recorded and _is_live(s, probe):",
+    "after": "if s[\"lane\"].startswith(\"codex:\") and identity not in recorded:",
+    "tests": [
+      "tests/test_codex_route_facts.py::test_report_lists_codex_lane_servers_that_wrote_no_row"
+    ]
+  },
+  "report-registry-failure-spares-route-rows": {
+    "file": "hardline_mcp/report.py",
+    "before": "            functools.partial(_codex_routes, sessions=read[\"sessions\"]), read, probe, \"routes\"\n",
+    "after": "            functools.partial(_codex_routes, sessions=read[\"sessions\"]), read, probe, \"routes\", \"sessions\"\n",
+    "tests": [
+      "tests/test_codex_route_facts.py::test_a_registry_that_will_not_read_leaves_the_route_rows_standing"
+    ]
+  },
+  "report-suffix-equal": {
+    "file": "hardline_mcp/report.py",
+    "before": "    return \"suffix_equal\" if conversation[:8] == suffix else \"suffix_differs\"",
+    "after": "    return \"suffix_differs\"",
+    "tests": [
+      "tests/test_report.py::test_other_instance_notices_are_grouped_by_lane_suffix_against_the_acker"
+    ]
+  },
+  "report-suffix-is-eight-characters": {
+    "file": "hardline_mcp/report.py",
+    "before": "    if len(suffix) != 8:\n",
+    "after": "    if not suffix:\n",
+    "tests": [
+      "tests/test_report.py::test_other_instance_notices_are_grouped_by_lane_suffix_against_the_acker"
+    ]
+  },
+  "report-suffix-unrecorded-conversation": {
+    "file": "hardline_mcp/report.py",
+    "before": "    if not conversation:\n        return \"conversation_unrecorded\"\n",
+    "after": "    conversation = conversation or \"\"\n",
+    "tests": [
+      "tests/test_report.py::test_an_ack_with_no_conversation_is_unrecorded_not_a_mismatch"
+    ]
+  },
+  "report-suffix-groups-keep-ids": {
+    "file": "hardline_mcp/report.py",
+    "before": "            if len(group[\"message_ids\"]) < SAMPLE:\n                group[\"message_ids\"].append(notice[\"id\"])\n",
+    "after": "",
+    "tests": [
+      "tests/test_report.py::test_other_instance_notices_are_grouped_by_lane_suffix_against_the_acker"
     ]
   },
   "sync-cancel-records-children": {

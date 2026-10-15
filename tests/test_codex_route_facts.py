@@ -5,8 +5,8 @@ from contextlib import closing
 
 import pytest
 
-from hardline_mcp import codex_steer, delivery, mailbox, procid, report
-from test_codex_queue import ACCEPTED, REFUSED, THREAD, Queue, Steer, armed
+from hardline_mcp import codex_queue, codex_steer, delivery, mailbox, procid, report
+from test_codex_queue import ACCEPTED, REFUSED, THREAD, Queue, Steer, armed, meta
 
 
 @pytest.fixture(autouse=True)
@@ -83,6 +83,22 @@ def test_the_counts_accumulate_and_the_last_route_is_the_latest():
     assert (row.get("steered"), row.get("queued"), row.get("last_route")) == (2, 1, "queue")
 
 
+def test_a_pinned_wake_writes_its_row_before_any_notice():
+    """A row at zero: a wake with nothing sent yet, not a server recording none."""
+    armed(Steer(ACCEPTED))._flush()
+    row = facts()
+    assert row, "no row until the first notice"
+    assert (row.get("last_route"), row.get("steered"), row.get("queued")) == (None, None, None)
+
+
+def test_a_wake_never_pinned_writes_no_row():
+    """A subagent's thread is never the address, so its server writes nothing."""
+    wake = codex_queue.CodexWake(queue=Queue(), steer=Steer(ACCEPTED))
+    wake.observe({"_meta": meta(source="subagent")})
+    wake._flush()
+    assert facts() == {}
+
+
 def test_a_failed_queue_records_no_route():
     wake = armed(Steer(REFUSED), Queue(ok=False))
     with pytest.raises(RuntimeError):
@@ -139,16 +155,27 @@ def test_routes_of_a_dead_process_are_pruned(tmp_path, monkeypatch):
         assert raw.execute("SELECT pid FROM codex_routes").fetchall() == [(8,)]
 
 
-def _routes(tmp_path, monkeypatch, rows):
+GONE = 2147483646
+
+
+def _routes(tmp_path, monkeypatch, rows, lanes=()):
     db = tmp_path / "mb.db"
     mailbox.send("x", "nobody", "creates the store", db_path=db)
-    monkeypatch.setattr(report, "instance_state", lambda pid, *_a, **_k: procid.ALIVE)
+    monkeypatch.setattr(
+        report, "instance_state",
+        lambda pid, *_a, **_k: procid.DEAD if pid == GONE else procid.ALIVE,
+    )
     raw = sqlite3.connect(db)
     with raw:
         raw.executemany(
             "INSERT INTO codex_routes (pid, process_key, last_route,"
             " last_route_reason, steered, queued, ambiguous) VALUES (?, ?, ?, ?, ?, ?, ?)",
             rows,
+        )
+        raw.executemany(
+            "INSERT INTO agent_sessions (pid, lane, agent, process_key, started_at,"
+            " last_seen, claimed_at) VALUES (?, ?, 'codex', ?, 't', 't', 't')",
+            lanes,
         )
     raw.close()
     return db
@@ -158,14 +185,45 @@ def test_report_shows_each_codex_process_route_and_totals(tmp_path, monkeypatch)
     db = _routes(tmp_path, monkeypatch, [
         (1, "a", "steer", None, 4, 1, None),
         (2, "b", "queue", "steer refused: no active turn to steer", None, 2, 1),
-        (3, "c", None, None, None, None, None),  # a Claude wake: no route facts
+        (3, "c", None, None, None, None, None),  # pinned, nothing sent yet
     ])
     got = report.report(db)["codex_routes"]
     assert (got.get("steered"), got.get("queued"), got.get("ambiguous")) == (4, 3, 1)
     by_pid = {p["pid"]: p for p in got.get("processes", [])}
-    assert sorted(by_pid) == [1, 2]
+    assert sorted(by_pid) == [1, 2, 3]
     assert by_pid[2].get("last_route_reason") == "steer refused: no active turn to steer"
     assert by_pid[1].get("state") == procid.ALIVE
+
+
+def test_report_lists_codex_lane_servers_that_wrote_no_row(tmp_path, monkeypatch):
+    """Zero totals are only as wide as the rows: the uncovered servers are listed."""
+    db = _routes(
+        tmp_path, monkeypatch,
+        [(1, "a", None, None, None, None, None)],
+        [
+            (1, "codex:covered", "a"),
+            (4, "codex:older", "d"),
+            (4, "codex:older-too", "d"),  # one server, two lanes
+            (5, "claude:not-codex", "e"),
+            (GONE, "codex:gone", "g"),
+        ],
+    )
+    got = report.report(db)["codex_routes"]
+    assert got.get("codex_lane_servers_without_row") == [
+        {"pid": 4, "process_key": "d", "lanes": ["codex:older", "codex:older-too"]}
+    ]
+    assert got.get("table") is True
+
+
+def test_a_registry_that_will_not_read_leaves_the_route_rows_standing(tmp_path, monkeypatch):
+    db = _routes(tmp_path, monkeypatch, [(1, "a", "steer", None, 2, None, None)])
+    raw = sqlite3.connect(db)
+    with raw:
+        raw.execute("DROP TABLE agent_sessions")
+    raw.close()
+    got = report.report(db)["codex_routes"]
+    assert got.get("steered") == 2
+    assert "no such table" in str(got.get("codex_lane_servers_without_row"))
 
 
 def test_report_reads_unavailable_when_the_route_columns_are_absent(tmp_path):

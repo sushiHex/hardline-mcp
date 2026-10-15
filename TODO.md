@@ -14,13 +14,16 @@ criteria and recorded when to revisit; see "Stable instance addresses" under
 
 **Review it on or after 2026-10-27, with `hardline-mcp report`.** By then most
 servers run code that records revisions and acks. Against the triggers:
-- *Misdelivery.* Read `job_notices.other_instance_sample`. An entry is a
-  relaunch when the acker's `conversation` is the one the requester lane was
-  derived from (its suffix carries the id's first eight characters) or one
-  that claimed that lane; anything else is a candidate misdelivery to trace.
+- *Misdelivery.* Read `job_notices.other_instance_by_suffix`. `suffix_equal`
+  is consistent with a relaunch of the conversation the lane was derived from,
+  not proof of one (an explicit label can carry any suffix); trace every
+  `suffix_differs`, `no_suffix` and `conversation_unrecorded` id, and check a
+  `suffix_equal` lane was not explicitly labelled. A conversation that claimed
+  the lane is not by itself benign: taking a lane over is the case under study.
   Baseline 2026-10-13: 3 of 128 acked notices `other_instance`, all a relaunch
   of the dispatching conversation; 0 `same_instance`, 125 `unknown` (acked
-  before acks were recorded).
+  before acks were recorded). 2026-10-15: 20 `other_instance`, all
+  `suffix_equal` on derived Claude lanes.
 - *Legacy writers retired.* Holds since 2026-10-13: a precondition for a
   recipient-format change, not a reason for one.
 - *Handover with jobs outstanding, contested names or the claim cap blocking
@@ -30,7 +33,9 @@ servers run code that records revisions and acks. Against the triggers:
 - *Codex wake routes.* `codex_routes` (#86): steered against queued and
   ambiguous notices, and the reasons for queueing. Ambiguous ones should be
   rare; a steady share of `no turn seen` means the turn id is not reaching
-  the wake.
+  the wake. Read the totals against `codex_lane_servers_without_row`, whose
+  notices are in none: on 2026-10-15 it listed every live Codex-lane server, so
+  the totals covered nothing yet.
 - *A Codex thread as the address.* The strongest candidate yet for a stable
   instance address: per thread, it survives reconnect and resume, and the client
   supplies it. A first design was reviewed and not built; its findings
