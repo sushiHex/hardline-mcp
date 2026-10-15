@@ -3257,5 +3257,37 @@
     "tests": [
       "tests/test_adapters.py::test_a_parsed_failure_keeps_the_stdin_shortfall"
     ]
+  },
+  "report-unread-excludes-acked": {
+    "file": "hardline_mcp/report.py",
+    "before": "    \" WHERE acked_at IS NULL GROUP BY recipient\",\n",
+    "after": "    \" GROUP BY recipient\",\n",
+    "tests": [
+      "tests/test_report.py::test_unread_mail_is_counted_by_recipient_and_held_or_not"
+    ]
+  },
+  "report-unread-held-ignores-dead-registrations": {
+    "file": "hardline_mcp/report.py",
+    "before": "live.get(row[\"lane\"], 0) + bool(_is_live(row, probe))",
+    "after": "live.get(row[\"lane\"], 0) + 1",
+    "tests": [
+      "tests/test_report.py::test_unread_mail_is_counted_by_recipient_and_held_or_not"
+    ]
+  },
+  "report-unread-two-live-registrations-are-contested": {
+    "file": "hardline_mcp/report.py",
+    "before": "\"registered\" if n == 1 else \"contested\"",
+    "after": "\"registered\"",
+    "tests": [
+      "tests/test_report.py::test_unread_mail_is_counted_by_recipient_and_held_or_not"
+    ]
+  },
+  "report-unread-held-lanes-first": {
+    "file": "hardline_mcp/report.py",
+    "before": "    lanes.sort(key=lambda e: e[\"holder\"] not in registered)  # stable: oldest first within\n",
+    "after": "",
+    "tests": [
+      "tests/test_report.py::test_unread_mail_is_counted_by_recipient_and_held_or_not"
+    ]
   }
 }

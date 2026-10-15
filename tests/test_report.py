@@ -229,6 +229,86 @@ def test_a_missing_table_reads_unavailable_not_zero(tmp_path):
     assert "no such table: jobs" in report.report(db)["job_notices"]["unavailable"]
 
 
+def test_unread_mail_is_counted_by_recipient_and_held_or_not(tmp_path, monkeypatch):
+    db = tmp_path / "mb.db"
+    mailbox.send("x", "nobody", "creates the store", db_path=db)
+    gone = 2147483646
+    monkeypatch.setattr(
+        report, "instance_state",
+        lambda pid, *_a, **_k: procid.DEAD if pid == gone else procid.ALIVE,
+    )
+    raw = sqlite3.connect(db)
+    with raw:
+        raw.execute("DELETE FROM messages")
+        raw.executemany(
+            "INSERT INTO agent_sessions (pid, lane, agent, process_key, started_at,"
+            " last_seen, claimed_at) VALUES (?, ?, 'codex', 'k', 't', 't', 't')",
+            [
+                (1001, "codex:held"),
+                (gone, "codex:dead"),
+                (1002, "codex:twice"),  # two live registrations: granted to neither
+                (1003, "codex:twice"),
+            ],
+        )
+        raw.executemany(
+            "INSERT INTO messages (sender, recipient, body, created_at, acked_at)"
+            " VALUES ('x', ?, 'SECRET-BODY', ?, ?)",
+            [
+                ("codex:held", "2020-01-08T00:00:00Z", None),
+                ("codex:held", "2020-01-07T00:00:00Z", None),
+                ("codex:held", "2020-01-01T00:00:00Z", "2020-01-03T00:00:00Z"),  # acked
+                ("claude:orphan", "2020-01-05T00:00:00Z", None),
+                ("codex:dead", "2020-01-06T00:00:00Z", None),
+                ("codex:twice", "2020-01-09T00:00:00Z", None),
+                ("hermes", "2020-01-04T00:00:00Z", None),  # bare
+                ("claude:gone", "2020-01-01T00:00:00Z", "2020-01-02T00:00:00Z"),  # only acked
+            ],
+        )
+    raw.close()
+
+    got = report.report(db)
+    mail = got["unread_mail"]
+    assert "SECRET-BODY" not in str(got)
+    totals = ("total_unread", "on_registered_lanes", "on_other_lanes", "on_bare_names")
+    assert tuple(mail[k] for k in totals) == (6, 3, 2, 1)
+    by_name = {e["recipient"]: e for e in mail["lanes"]}
+    held = by_name["codex:held"]
+    assert (held["unread"], held["oldest"], held["holder"]) == (2, "2020-01-07T00:00:00Z", "registered")
+    assert held["oldest_age_days"] > 2000
+    holders = {name: e["holder"] for name, e in by_name.items()}
+    assert holders == {
+        "codex:held": "registered", "codex:twice": "contested",
+        "claude:orphan": "none", "codex:dead": "dead",
+    }
+    # Live registrations first though newest: a holder not reading is the one to act on.
+    assert [e["recipient"] for e in mail["lanes"]] == [
+        "codex:held", "codex:twice", "claude:orphan", "codex:dead",
+    ]
+    (bare,) = mail["bare"]
+    assert (bare["recipient"], bare["unread"], bare["oldest"]) == ("hermes", 1, "2020-01-04T00:00:00Z")
+    assert "holder" not in bare
+    assert mail["lanes_not_shown"] == mail["bare_not_shown"] == 0
+
+
+def test_unread_mail_lists_are_bounded_but_totals_are_whole(tmp_path):
+    db = tmp_path / "mb.db"
+    for i in range(report.SAMPLE + 3):
+        mailbox.send("a", f"claude:l{i:02}", "c", db_path=db)
+    mail = report.report(db)["unread_mail"]
+    assert mail["total_unread"] == report.SAMPLE + 3
+    assert len(mail["lanes"]) == report.SAMPLE and mail["lanes_not_shown"] == 3
+
+
+def test_unread_mail_is_unavailable_without_the_session_table(tmp_path):
+    db = tmp_path / "mb.db"
+    mailbox.send("a", "claude:b", "c", db_path=db)
+    raw = sqlite3.connect(db)
+    with raw:
+        raw.execute("DROP TABLE agent_sessions")
+    raw.close()
+    assert "no such table: agent_sessions" in report.report(db)["unread_mail"]["unavailable"]
+
+
 def test_the_cli_prints_the_audit_of_the_named_store(tmp_path):
     db = tmp_path / "mb.db"
     mailbox.send("a", "b", "c", db_path=db)

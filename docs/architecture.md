@@ -335,6 +335,19 @@ reused pid's row would carry over, and reading through `mailbox._connect`,
 which initializes the store it is asked about; it also reproduced a crash on a
 notice body with a non-string job id and the held reader, both fixed.
 
+Under `unread_mail` it counts unread messages per recipient (count, oldest
+unread and its age in days at the report's `generated_at`; never a body, and
+nothing is acked or deleted). A lane's `holder` is what `agent_sessions` says:
+`registered` (one row not shown dead; UNKNOWN counts, as for a claim),
+`contested` (several, so `sessions.granted` grants none), `dead`, or `none`.
+That is a registration, not a consumer known to be reading, so an
+unregistered process is invisible here. Bare names have one shared copy and
+are listed apart, without a holder. Lanes with a live registration sort first
+(a holder not reading is the case to act on), then oldest unread first, and
+each list shows `SAMPLE` entries; the message totals (`on_registered_lanes`,
+`on_other_lanes`, `on_bare_names`) are whole. It needs `agent_sessions`, else
+`unavailable`.
+
 First run on the real store (2026-10-13): three `other_instance` notices, all
 results a conversation's earlier process dispatched on 2026-10-08 and the same
 conversation, relaunched, acked today: a relaunch, not a misdelivery.

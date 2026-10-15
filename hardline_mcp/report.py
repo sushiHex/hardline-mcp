@@ -46,6 +46,8 @@ NOTES = [
     "which a hand-sent copy can imitate",
     "tokenless: records with no creation token not shown dead, whose pid may be their own "
     "process or a stranger's; zero is this run's finding, not a guarantee",
+    "unread_mail: counts only, nothing is acked or deleted; a registered holder is a session row "
+    "not shown dead, not a consumer known to be reading",
 ]
 
 # Each section's rows, read in the snapshot. None marks a table current code
@@ -61,6 +63,10 @@ _READS = {
     " WHERE acked_at IS NOT NULL AND instr(body, '\"job_finished\"') > 0 ORDER BY id DESC",
     "unrecorded": "SELECT COUNT(*) AS n FROM messages m WHERE acked_at IS NOT NULL"
     " AND NOT EXISTS (SELECT 1 FROM message_acks a WHERE a.message_id = m.id)",
+    # Counts only: no body, sender or id leaves the store. MIN works on text
+    # because every writer stores UTC ISO-8601 (mailbox._iso of a UTC clock).
+    "unread": "SELECT recipient, COUNT(*) AS n, MIN(created_at) AS oldest FROM messages"
+    " WHERE acked_at IS NULL GROUP BY recipient",
 }
 _CREATED_ON_USE = {
     "revisions": "process_revisions",
@@ -76,13 +82,17 @@ def report(db_path: Optional[Path] = None) -> dict:
     db.stat()  # a missing store is an error, never an empty report
     read = _snapshot(db)
     probe = functools.lru_cache(maxsize=None)(instance_state)  # once per identity
+    now = datetime.now(timezone.utc)
     return {
-        "generated_at": _iso(datetime.now(timezone.utc)),
+        "generated_at": _iso(now),
         "db_path": str(db),
         "processes": _section(_processes, read, probe, "sessions", "revisions"),
         "legacy_sessions": _section(_legacy_sessions, read, probe, "legacy"),
         "job_notices": _section(_job_notices, read, probe, "jobs", "acks", "notices", "unrecorded"),
         "tokenless": _section(_tokenless, read, probe, "sessions", "jobs"),
+        "unread_mail": _section(
+            functools.partial(_unread_mail, now=now), read, probe, "unread", "sessions"
+        ),
         "notes": NOTES,
     }
 
@@ -232,6 +242,67 @@ def _tokenless(sessions: list, jobs: list, *, probe: Callable) -> dict:
             if j["child_pid"] and j["child_key"] is None and probe(j["child_pid"], None) != DEAD
             and probe(j["owner_pid"], j["owner_key"]) != DEAD
         ),
+    }
+
+
+def _age_days(created_at: str, now: datetime) -> Optional[int]:
+    """Whole days from a stored timestamp to ``now``; None if it does not parse."""
+    try:
+        then = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return max((now - then).days, 0)
+
+
+def _unread_mail(unread: list, sessions: list, *, now: datetime, probe: Callable) -> dict:
+    """Unread messages per recipient, counted and never touched.
+
+    ``holder`` is what ``agent_sessions`` says of a lane: ``registered``, one
+    row not shown dead (UNKNOWN counts, as when a claim is judged);
+    ``contested``, several, of which ``sessions.granted`` grants none; ``dead``,
+    rows all shown dead; or ``none``. A registration, not a consumer proven
+    reading: a process that never registers is invisible. A bare name has no
+    lane to hold - one shared copy, consumable by any session - so it is listed
+    apart. Lanes with a live registration sort first, being the case to act
+    on, then oldest unread first; each list shows SAMPLE entries, the totals
+    are whole."""
+    live: dict[str, int] = {}  # lane -> rows not shown dead
+    for row in sessions:
+        live[row["lane"]] = live.get(row["lane"], 0) + bool(_is_live(row, probe))
+
+    def entry(row: dict) -> dict:
+        return {
+            "recipient": row["recipient"],
+            "unread": row["n"],
+            "oldest": row["oldest"],
+            "oldest_age_days": _age_days(row["oldest"], now),
+        }
+
+    lanes, bare = [], []
+    for row in sorted(unread, key=lambda r: (r["oldest"], r["recipient"])):
+        if ":" not in row["recipient"]:
+            bare.append(entry(row))
+            continue
+        n = live.get(row["recipient"])
+        holder = (
+            "none" if n is None else "dead" if n == 0 else "registered" if n == 1 else "contested"
+        )
+        lanes.append({**entry(row), "holder": holder})
+    registered = ("registered", "contested")
+    lanes.sort(key=lambda e: e["holder"] not in registered)  # stable: oldest first within
+    on_registered = sum(e["unread"] for e in lanes if e["holder"] in registered)
+    other = sum(e["unread"] for e in lanes) - on_registered
+    return {
+        "total_unread": on_registered + other + sum(e["unread"] for e in bare),
+        "on_registered_lanes": on_registered,
+        "on_other_lanes": other,
+        "on_bare_names": sum(e["unread"] for e in bare),
+        "lanes": lanes[:SAMPLE],
+        "lanes_not_shown": max(len(lanes) - SAMPLE, 0),
+        "bare": bare[:SAMPLE],
+        "bare_not_shown": max(len(bare) - SAMPLE, 0),
     }
 
 
