@@ -3206,5 +3206,21 @@
     "tests": [
       "tests/test_report.py::test_records_acting_on_a_pid_alone_are_counted_as_their_consumers_judge_them"
     ]
+  },
+  "claude-failure-reports-stream-error": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "            if \"usage\" in parsed:\n                if parsed.get(\"ok\"):",
+    "after": "            if False:\n                if parsed.get(\"ok\"):",
+    "tests": [
+      "tests/test_adapters.py::test_failed_claude_job_reports_the_error_its_stream_gave"
+    ]
+  },
+  "claude-nonzero-exit-never-ok": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "                    parsed[\"ok\"] = False\n                    parsed[\"error\"] = run[\"error\"]",
+    "after": "                    pass",
+    "tests": [
+      "tests/test_adapters.py::test_nonzero_exit_with_a_clean_result_is_still_a_failure"
+    ]
   }
 }

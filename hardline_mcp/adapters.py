@@ -3303,6 +3303,25 @@ def _ask_claude_structured(
         # exactly this; leaving Claude's twin unfixed was an inconsistency,
         # not a decision.
         if failed_output:
+            parsed = _parse_claude_stream(
+                failed_output,
+                requested_model=model,
+                requested_effort=effort,
+                require_base_subscription=mode == "advisory",
+            )
+            # A result event is the stream's own account of the failure (an
+            # is_error result carries the real reason, e.g. a model Claude Code
+            # will not serve), where "exit 1: <raw stream>" buried it. Only a
+            # parsed result has "usage"; _unparsed_error does not.
+            if "usage" in parsed:
+                if parsed.get("ok"):
+                    # The process exited nonzero, so the call failed whatever
+                    # the stream says. Keep the reply Claude produced as
+                    # partial, under the process error and exit code.
+                    parsed["ok"] = False
+                    parsed["error"] = run["error"]
+                    parsed["partial_reply"] = parsed.pop("reply", "")
+                return _carry_process_telemetry(parsed, run)
             run.update(_raw_evidence(failed_output))
         return run
     return _carry_process_telemetry(

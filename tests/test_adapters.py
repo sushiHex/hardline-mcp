@@ -2280,6 +2280,77 @@ def test_nonzero_exit_still_surfaces_the_agents_output(monkeypatch):
     assert out["raw_length"] > 0
 
 
+_CLAUDE_REFUSED = (
+    "Claude Code can't respond to this message with Fable 5.1. "
+    "Please change your model and try again."
+)
+
+
+def test_failed_claude_job_reports_the_error_its_stream_gave(monkeypatch):
+    """A nonzero exit used to surface only "exit 1: <11KB of stream-json>",
+    burying the result event's real reason. The parsed error must lead."""
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "fable-5.1"},
+        {
+            "type": "assistant",
+            "message": {"model": "fable-5.1", "content": []},
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "result": _CLAUDE_REFUSED,
+        },
+    )
+    _capture_run(
+        monkeypatch, _FakeCompleted(stdout=stdout, stderr="", returncode=1)
+    )
+
+    out = adapters.ask_claude("review", model="fable-5.1")
+
+    assert out["ok"] is False
+    assert out["error"] == _CLAUDE_REFUSED
+    assert out["exit_code"] == 1
+    assert isinstance(out["elapsed_s"], float)
+    assert out["actual_model"] == "fable-5.1"
+
+
+def test_nonzero_exit_with_a_clean_result_is_still_a_failure(monkeypatch):
+    """A result event that is not an error must not turn a nonzero exit into
+    ok: True. The reply Claude produced is kept, but as partial_reply."""
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "m"},
+        {"type": "result", "subtype": "success", "is_error": False, "result": "done"},
+    )
+    _capture_run(
+        monkeypatch, _FakeCompleted(stdout=stdout, stderr="late crash", returncode=3)
+    )
+
+    out = adapters.ask_claude("review", effort="high")
+
+    assert out["ok"] is False
+    assert "reply" not in out
+    assert out["partial_reply"] == "done"
+    assert out["exit_code"] == 3
+    assert "exit 3" in out["error"]
+
+
+def test_failed_claude_job_without_a_result_keeps_raw_evidence(monkeypatch):
+    _capture_run(
+        monkeypatch,
+        _FakeCompleted(
+            stdout="some unparseable but valuable output", stderr="boom", returncode=1
+        ),
+    )
+
+    out = adapters.ask_claude("review", effort="high")
+
+    assert out["ok"] is False
+    assert out["error"].startswith("exit 1")
+    assert "valuable output" in out["raw_excerpt"]
+    assert out["raw_length"] > 0
+
+
 def test_ask_unknown_agent_rejected(monkeypatch):
     calls = _capture_run(monkeypatch)
     out = adapters.ask("nobody", "hi")
