@@ -31,6 +31,11 @@ servers run code that records revisions and acks. Against the triggers:
   ambiguous notices, and the reasons for queueing. Ambiguous ones should be
   rare; a steady share of `no turn seen` means the turn id is not reaching
   the wake.
+- *A Codex thread as the address.* The strongest candidate yet for a stable
+  instance address: per thread, it survives reconnect and resume, and the client
+  supplies it. A first design was reviewed and not built; its findings
+  (UUIDv7 prefixes collide, subagent results, the identity hook's contract) are
+  on #90.
 
 Record the outcome in `docs/architecture.md` and, if deferring again, a new
 date here.
