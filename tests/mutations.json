@@ -3289,5 +3289,21 @@
     "tests": [
       "tests/test_report.py::test_unread_mail_is_counted_by_recipient_and_held_or_not"
     ]
+  },
+  "catalog-check-reports-stale-anchors": {
+    "file": "tests/test_mutation_catalog.py",
+    "before": "            found.append(f\"{name}: {exc}\")\n",
+    "after": "            pass\n",
+    "tests": [
+      "tests/test_mutation_catalog.py::test_the_checks_see_a_stale_anchor_and_a_renamed_test"
+    ]
+  },
+  "catalog-check-reports-renamed-tests": {
+    "file": "tests/test_mutation_catalog.py",
+    "before": "                found.append(f\"{name}: {selector}\")\n",
+    "after": "                pass\n",
+    "tests": [
+      "tests/test_mutation_catalog.py::test_the_checks_see_a_stale_anchor_and_a_renamed_test"
+    ]
   }
 }

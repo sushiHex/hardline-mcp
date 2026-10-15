@@ -188,6 +188,9 @@ one of them a test that looked correct and proved nothing:
 Anchors go stale when code moves. A harness that stops at a stale anchor and
 reports a "kill" for a mutation it never applied is worse than no harness:
 assert each anchor appears exactly once before applying it.
+`tests/test_mutation_catalog.py` runs that check, and that every selector names
+a test that still exists, with the ordinary suite: rewording a string another
+case anchors on fails locally in milliseconds, not in CI minutes later.
 
 Run `python scripts/mutate.py` for all committed cases, or pass case names
 from `tests/mutations.json`. Each case runs a passing baseline, applies one

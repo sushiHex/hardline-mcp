@@ -8,4 +8,5 @@ dist/
 *.db-wal
 *.db-shm
 research/
+.claude/worktrees/
 uv.lock
