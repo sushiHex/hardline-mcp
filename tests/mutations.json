@@ -3759,6 +3759,14 @@
       "tests/test_sync_agent.py::test_ask_claude_runs_through_the_cancellable_helper"
     ]
   },
+  "kill-spares-own-process-group": {
+    "file": "hardline_mcp/jobs.py",
+    "before": "            if group == os.getpgid(0):\n                raise PermissionError(\"the child shares this process's group\")\n",
+    "after": "",
+    "tests": [
+      "tests/test_jobs.py::test_kill_never_signals_its_own_process_group"
+    ]
+  },
   "sync-codex-uses-the-helper": {
     "file": "hardline_mcp/server.py",
     "before": "    result = await _sync_agent(\n        ctx,\n        adapters.ask_codex,",

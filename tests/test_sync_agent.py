@@ -15,7 +15,10 @@ from hardline_mcp import procid, server
 @pytest.fixture
 def sleeper():
     """A real child standing in for a spawned agent."""
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    # Its own session, as _run_cmd gives every agent it spawns.
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True
+    )
     yield proc
     if proc.poll() is None:
         proc.kill()

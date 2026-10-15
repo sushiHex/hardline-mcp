@@ -492,7 +492,13 @@ def kill_process_tree(
         import signal
 
         try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            group = os.getpgid(pid)
+            # Never our own group: a child that did not start its own session
+            # shares it, and signalling it would take this server, its host
+            # and whatever shell started them down with the child.
+            if group == os.getpgid(0):
+                raise PermissionError("the child shares this process's group")
+            os.killpg(group, signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             os.kill(pid, signal.SIGTERM)
         return True, None

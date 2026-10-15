@@ -412,6 +412,19 @@ def test_kill_refuses_a_pid_whose_identity_no_longer_matches(tmp_path):
     assert err == jobs.ALREADY_GONE
 
 
+@pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX")
+def test_kill_never_signals_its_own_process_group(monkeypatch):
+    """A child that shares this process's group (it started no session of its
+    own) gets a plain kill. killpg there took a CI runner down with the test
+    that spawned it, and in a server would take its host down too."""
+    signalled = []
+    monkeypatch.setattr(jobs.os, "getpgid", lambda pid: 4242)
+    monkeypatch.setattr(jobs.os, "killpg", lambda group, sig: signalled.append(("group", group)))
+    monkeypatch.setattr(jobs.os, "kill", lambda pid, sig: signalled.append(("pid", pid)))
+    assert jobs.kill_process_tree(31337) == (True, None)
+    assert signalled == [("pid", 31337)]
+
+
 def test_cancel_warns_when_the_child_survived_the_kill(tmp_path, monkeypatch):
     """A row that says cancelled while a real process keeps running must not
     be reported identically to a clean cancel."""
