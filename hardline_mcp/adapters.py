@@ -2783,6 +2783,11 @@ def _carry_process_telemetry(parsed: dict, run: dict) -> dict:
     for key in _PROCESS_TELEMETRY:
         if key in run and key not in parsed:
             parsed[key] = run[key]
+    # A failed run's own error (its exit, and stderr nothing else carries) is
+    # a process fact too, kept where the stream's account replaced it.
+    error = run.get("error")
+    if not run.get("ok") and error and parsed.get("error") != error:
+        parsed.setdefault("process_error", error[:_EVIDENCE_TAIL])
     return parsed
 
 
@@ -3315,12 +3320,14 @@ def _ask_claude_structured(
                 require_base_subscription=mode == "advisory",
             )
             if "usage" in parsed:
+                # The run failed whatever the stream says. An answer it holds
+                # is partial - an is_error result's "reply" is only its error.
+                reply = parsed.pop("reply", "")
+                if reply and reply != parsed.get("error"):
+                    parsed["partial_reply"] = reply
                 if parsed.get("ok"):
-                    # The run failed whatever the stream says: keep the reply
-                    # as partial, under the process error.
                     parsed["ok"] = False
                     parsed["error"] = run["error"]
-                    parsed["partial_reply"] = parsed.pop("reply", "")
                 return _carry_process_telemetry(parsed, run)
             run.update(_raw_evidence(failed_output))
         return run

@@ -2367,6 +2367,44 @@ def test_a_silent_failed_exit_does_not_quote_its_stream_in_the_error(monkeypatch
     assert out["raw_length"] == 50_000 and len(out["raw_excerpt"]) < 50_000
 
 
+def test_a_parsed_failure_keeps_the_process_error_beside_it(monkeypatch):
+    """The stream's reason leads, but the exit and stderr are facts of the run
+    that nothing else carries."""
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "m"},
+        {"type": "result", "subtype": "success", "is_error": True, "result": _CLAUDE_REFUSED},
+    )
+    _capture_run(
+        monkeypatch, _FakeCompleted(stdout=stdout, stderr="only-on-stderr", returncode=1)
+    )
+
+    out = adapters.ask_claude("review", effort="high")
+
+    assert out["error"] == _CLAUDE_REFUSED
+    assert out.get("process_error") == "exit 1: only-on-stderr"
+    assert "reply" not in out, "an is_error result's reply is only its error again"
+
+
+def test_an_answer_already_failed_by_the_parser_is_partial_under_a_failed_run(
+    monkeypatch, tmp_path
+):
+    """Advisory mode fails a success it cannot attribute to the subscription
+    before the run's failure is looked at; its answer must still not read as
+    a reply."""
+    stdout = _claude_stream(
+        {"type": "system", "subtype": "init", "model": "claude-fable-5", "apiKeySource": "x"},
+        {"type": "result", "subtype": "success", "result": "the answer"},
+    )
+    _capture_run(monkeypatch, _FakeCompleted(stdout=stdout, stderr="", returncode=1))
+    monkeypatch.setattr(adapters.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
+
+    out = adapters.ask_claude("review", model="fable", mode="advisory")
+
+    assert out["ok"] is False and "subscription" in out["error"].lower()
+    assert "reply" not in out and out.get("partial_reply") == "the answer"
+    assert out.get("process_error") == "exit 1"
+
+
 def test_a_parsed_failure_keeps_the_stdin_shortfall(monkeypatch):
     """Input the child never fully took is a process fact: a parsed error
     from the stream must not hide it."""

@@ -203,6 +203,14 @@ Timeout results preserve available output and report `timed_out`, `timeout_s`,
 from one producing no output. See [limits](configuration.md#limits) before
 changing concurrency or timeout budgets.
 
+A Codex or Claude run that exits nonzero reports the agent's own account when
+its stream has one: Codex's `turn.failed`, or Claude's `result` event (a model
+Claude Code refuses to serve, say). The run's error, `exit N` plus any stderr,
+is then kept as `process_error`, and an answer Claude produced as
+`partial_reply`. Output with no such event comes back as a bounded
+`raw_excerpt`, never inside `error`. `stdin_shortfall` says the child did not
+take all of its input.
+
 ## Understand liveness
 
 Hardline checks process identities at read time. New job owners use a PID plus
