@@ -443,10 +443,9 @@ def _announce_self(agent: str | None = None) -> str | None:
 
     A session holding no lane registers nothing either, but that needs no guard
     here - it owns no recipients, so there is nothing to write, and ``register``
-    returns early. Worth knowing because it is load-bearing: a default-mode
-    ``ask_codex`` spawns Codex with the operator's real config, so a one-shot
-    review subprocess loads its own hardline. Those have no lane, so they cannot
-    appear as live sessions however many of them run.
+    returns early. A hardline nested under another (an agent child that started
+    one despite ``ask_*`` disabling its MCP servers) has no lane, so it cannot
+    appear as a live session however many of them run.
     """
     agent = agent or adapters.self_agent()
     if not agent:

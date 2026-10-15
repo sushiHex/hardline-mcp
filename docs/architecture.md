@@ -74,6 +74,16 @@ one verified ancestry snapshot supplies the launcher identity and recognized
 agent name together. Cached identities prevent reparenting from changing the
 session's address or lifetime binding.
 
+On Windows that walk starts at pip's `hardline-mcp.exe` console-script
+launcher, which is every server's parent. It is seen past, not read as an
+outer hardline (#87): the lane still hashes it, since every thread the Codex
+app-server daemon runs shares one parent, but the host is the recognized agent
+within two levels above it (`claude.exe`, the daemon's `codex.exe`). Where none
+is recognized, such as a Claude whose running exe its updater renamed, the
+launcher stays the host rather than a guessed ancestor whose exit would strip a
+live server's lanes. A POSIX `hardline-mcp` parent is still an outer server.
+Rows written before this keep the launcher as host.
+
 **One rule governs acquisition and consumption.** Registration reserves the
 SQLite writer before checking holders and outstanding work. Consuming reads and
 acknowledgements check the same durable grants inside their write transaction.

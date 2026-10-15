@@ -1,6 +1,7 @@
 import os
 import re
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -559,3 +560,122 @@ def test_a_store_initialization_cannot_repair_fails_where_it_is_opened(tmp_path,
 
     with pytest.raises(sqlite3.OperationalError, match="still lacks a column"):
         mailbox.send("a", "b", "c", db_path=db)
+
+
+def _process_table(monkeypatch, chain):
+    """This process under ``chain``, (image, pid) pairs from its parent upward,
+    walked by the real ``ancestry_snapshot``. Each ancestor is older than the
+    one below it, as a real chain is."""
+    me = os.getpid()
+    pids = [me] + [pid for _, pid in chain]
+    parents = dict(zip(pids, pids[1:]))
+    images = dict((pid, image) for image, pid in chain)
+    keys = {pid: f"1:{100000 - pid}" for pid in pids[1:]} | {me: "2:0"}
+    monkeypatch.setattr(adapters, "_session_anchor", [])
+    monkeypatch.setattr(adapters.os, "getppid", lambda: pids[1])
+    monkeypatch.setattr(procid, "current_identity", lambda: (me, keys[me]))
+    monkeypatch.setattr(procid, "parent_pid_of", parents.get)
+    monkeypatch.setattr(procid, "image_name", images.get)
+    monkeypatch.setattr(procid, "process_key", keys.get)
+    monkeypatch.setattr(procid, "_pid_state", lambda pid: procid.ALIVE)
+    return keys
+
+
+def test_the_console_script_launcher_is_not_the_session(monkeypatch):
+    """pip's ``hardline-mcp.exe`` is every Windows server's parent (#87). Read
+    as a hardline above this one, it made every session nested: no agent, and
+    the launcher, which dies with the server, recorded as the host, so a host
+    exit could never end a lingering server's ownership."""
+    keys = _process_table(
+        monkeypatch,
+        [("hardline-mcp.exe", 10001), ("claude.exe", 10002), ("pwsh.exe", 10003)],
+    )
+    assert adapters.parent_agent() == "claude"
+    assert adapters.host_identity() == {"host_pid": 10002, "host_key": keys[10002]}
+    # The address still names this server's own launcher, as it did.
+    token = procid.identity_token(10001, keys[10001])
+    assert adapters.parent_lane_suffix() == f"{Path.cwd().name}.{token}"
+
+
+def test_codex_threads_under_one_daemon_share_a_host_not_a_lane(monkeypatch):
+    """Every Codex thread the app-server daemon runs is a child of the one
+    daemon, so only the launcher tells two of them apart."""
+    seen = []
+    for launcher in (10001, 10011):
+        _process_table(monkeypatch, [("hardline-mcp.exe", launcher), ("codex.exe", 19844)])
+        seen.append((adapters.parent_agent(), adapters.host_identity()["host_pid"]))
+        seen.append(adapters.parent_lane_suffix())
+    assert seen[0] == seen[2] == ("codex", 19844)
+    assert seen[1] and seen[3] and seen[1] != seen[3]
+
+
+def test_a_hardline_an_agent_child_starts_is_still_nested(monkeypatch):
+    """Two launchers and the outer server sit between a nested hardline and the
+    agent child that started it from its shell: the walk must reach the outer
+    launcher."""
+    _process_table(
+        monkeypatch,
+        [
+            ("hardline-mcp.exe", 10001),
+            ("pwsh.exe", 10002),
+            ("codex.exe", 10003),
+            ("python.exe", 10004),
+            ("hardline-mcp.exe", 10005),
+            ("claude.exe", 10006),
+        ],
+    )
+    assert adapters.parent_agent() is None
+    assert adapters.parent_lane_suffix() == ""
+    assert adapters.host_identity()["host_pid"] == 10001
+
+
+def test_an_unrecognised_host_leaves_the_launcher_as_host(monkeypatch):
+    """Claude Code's updater renames its running exe. Whatever sits above the
+    launcher is not adopted as host on a guess: a short-lived spawner there
+    would read DEAD and strip a live server's lanes."""
+    _process_table(
+        monkeypatch,
+        [
+            ("hardline-mcp.exe", 10001),
+            ("claude.exe.old.1792003940764.5768", 10002),
+            ("pwsh.exe", 10003),
+        ],
+    )
+    assert adapters.parent_agent() is None
+    assert adapters.host_identity()["host_pid"] == 10001
+
+
+def test_a_posix_hardline_parent_is_an_outer_server(monkeypatch):
+    """A shebang script's /proc comm is its own name, so on POSIX a
+    ``hardline-mcp`` parent is a real outer server, not a launcher to see past."""
+    _process_table(monkeypatch, [("hardline-mcp", 10001), ("claude", 10002)])
+    assert adapters.parent_agent() is None
+    assert adapters.parent_lane_suffix() == ""
+
+
+def test_a_farther_agent_is_not_adopted_as_host(monkeypatch):
+    """Past the launcher the host search reaches no farther than it does
+    without one: a Claude run as node from a Codex shell must not die with
+    that Codex."""
+    _process_table(
+        monkeypatch,
+        [
+            ("hardline-mcp.exe", 10001),
+            ("node.exe", 10002),
+            ("pwsh.exe", 10003),
+            ("codex.exe", 10004),
+        ],
+    )
+    assert adapters.parent_agent() is None
+    assert adapters.host_identity()["host_pid"] == 10001
+
+
+def test_a_process_known_by_its_parent_cannot_declare_another_agent(monkeypatch):
+    """Once a Windows Codex is recognised and registers on its own, declaring
+    itself Claude would leave its Codex row advertised but unconsumable."""
+    monkeypatch.delenv("HARDLINE_AGENT", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    adapters.reset_claimed_lanes()
+    _process_table(monkeypatch, [("hardline-mcp.exe", 10001), ("codex.exe", 10002)])
+    assert adapters.declaration_conflict("claude")
+    assert adapters.declaration_conflict("codex") is None

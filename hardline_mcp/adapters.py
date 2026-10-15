@@ -642,6 +642,14 @@ def conversation_id() -> Optional[str]:
 # end.
 _NESTED_LAUNCHERS = frozenset({"hardline-mcp", "hardline_mcp"})
 
+# Except this server's own console-script launcher. On Windows pip (and uv)
+# start a script as a small `hardline-mcp.exe` that runs python as its child
+# and waits on it, so it is every server's parent, not a hardline above it
+# (#87). Matched on the whole image name: no POSIX name carries `.exe`, and
+# there a `hardline-mcp` parent can be a real outer server (a shebang script's
+# /proc comm is its own name).
+_CONSOLE_LAUNCHER = "hardline-mcp.exe"
+
 
 # ONE anchor, computed once, from which both the lane and the agent are read.
 #
@@ -669,18 +677,25 @@ def _anchor() -> dict:
 
 def _compute_anchor() -> dict:
     parent = os.getppid()
-    chain = procid.ancestry_snapshot(parent, depth=3, child=procid.current_identity())
+    chain = procid.ancestry_snapshot(parent, depth=5, child=procid.current_identity())
     blank = {"lane": "", "agent": "", "host_pid": None, "host_key": None}
     if not chain:
         return blank
     launcher = chain[0]
     blank.update(host_pid=launcher.pid, host_key=launcher.key)
-    if any(_launcher_name(p.image) in _NESTED_LAUNCHERS for p in chain):
+    # Looking past our own launcher, see as far as a server without one does:
+    # two more for a host, and for nesting two more again, since an outer
+    # server shows as python under its own launcher.
+    if launcher.image.lower() == _CONSOLE_LAUNCHER:
+        above, hosts = chain[1:], chain[1:3]
+    else:
+        above = hosts = chain[:3]
+    if any(_launcher_name(p.image) in _NESTED_LAUNCHERS for p in above):
         return blank
     token = procid.identity_token(launcher.pid, launcher.key)
     name = Path.cwd().name
     host = next(
-        (p for p in chain if _launcher_name(p.image) in _AGENT_BY_LAUNCHER), launcher
+        (p for p in hosts if _launcher_name(p.image) in _AGENT_BY_LAUNCHER), launcher
     )
     # Preserve the parent-derived address, but bind lifetime to the actual
     # agent host when a persistent launcher sits between it and this server.
@@ -875,7 +890,7 @@ def declaration_conflict(agent: str) -> Optional[str]:
     there for a real Codex session.
     """
     agent = (agent or "").strip().lower()
-    known = _declared_agent[0] if _declared_agent else intrinsic_agent()
+    known = self_agent()
     if known and known != agent:
         return (
             f"this process is {known!r}, so it cannot register as {agent!r}. "
@@ -988,9 +1003,9 @@ def self_agent() -> Optional[str]:
     return intrinsic_agent() or parent_agent()
 
 
-# The executable that spawns a hardline names the agent it serves. Checked as a
-# substring because the launcher is `codex.exe` on Windows and `codex` on
-# POSIX, and neither is going to be mistaken for the other.
+# The executable that spawns a hardline names the agent it serves. Matched
+# exactly on the extensionless name (`_launcher_name`), so `codex.exe` on
+# Windows and `codex` on POSIX are the same key.
 _AGENT_BY_LAUNCHER = {
     "codex": "codex",
     "claude": "claude",

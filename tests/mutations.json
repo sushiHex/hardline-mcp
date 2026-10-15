@@ -290,10 +290,67 @@
   },
   "host-initial-parent-edge": {
     "file": "hardline_mcp/adapters.py",
-    "before": "parent, depth=3, child=procid.current_identity()",
-    "after": "parent, depth=3",
+    "before": "parent, depth=5, child=procid.current_identity()",
+    "after": "parent, depth=5",
     "tests": [
       "tests/test_identity.py::test_anchor_rejects_a_reused_initial_parent_pid"
+    ]
+  },
+  "console-launcher-transparent": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        above, hosts = chain[1:], chain[1:3]\n",
+    "after": "        above, hosts = chain, chain[:3]\n",
+    "tests": [
+      "tests/test_identity.py::test_the_console_script_launcher_is_not_the_session",
+      "tests/test_identity.py::test_codex_threads_under_one_daemon_share_a_host_not_a_lane"
+    ]
+  },
+  "console-launcher-exact-image": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    if launcher.image.lower() == _CONSOLE_LAUNCHER:\n",
+    "after": "    if _launcher_name(launcher.image) in _NESTED_LAUNCHERS:\n",
+    "tests": [
+      "tests/test_identity.py::test_a_posix_hardline_parent_is_an_outer_server"
+    ]
+  },
+  "console-launcher-nesting-depth": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "parent, depth=5, child=procid.current_identity()",
+    "after": "parent, depth=3, child=procid.current_identity()",
+    "tests": [
+      "tests/test_identity.py::test_a_hardline_an_agent_child_starts_is_still_nested"
+    ]
+  },
+  "console-launcher-host-reach": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        above, hosts = chain[1:], chain[1:3]\n",
+    "after": "        above = hosts = chain[1:]\n",
+    "tests": [
+      "tests/test_identity.py::test_a_farther_agent_is_not_adopted_as_host"
+    ]
+  },
+  "console-launcher-host-fallback": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "        (p for p in hosts if _launcher_name(p.image) in _AGENT_BY_LAUNCHER), launcher\n",
+    "after": "        (p for p in hosts if _launcher_name(p.image) in _AGENT_BY_LAUNCHER), (hosts or [launcher])[0]\n",
+    "tests": [
+      "tests/test_identity.py::test_an_unrecognised_host_leaves_the_launcher_as_host"
+    ]
+  },
+  "console-launcher-lane-token": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    token = procid.identity_token(launcher.pid, launcher.key)\n",
+    "after": "    token = procid.identity_token(hosts[0].pid, hosts[0].key) if hosts else None\n",
+    "tests": [
+      "tests/test_identity.py::test_codex_threads_under_one_daemon_share_a_host_not_a_lane"
+    ]
+  },
+  "declaration-honours-parent-agent": {
+    "file": "hardline_mcp/adapters.py",
+    "before": "    known = self_agent()\n",
+    "after": "    known = _declared_agent[0] if _declared_agent else intrinsic_agent()\n",
+    "tests": [
+      "tests/test_identity.py::test_a_process_known_by_its_parent_cannot_declare_another_agent"
     ]
   },
   "codex-path-precedence": {
