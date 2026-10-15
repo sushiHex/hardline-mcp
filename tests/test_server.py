@@ -432,6 +432,7 @@ async def test_ask_codex_forwards_model_effort_mode_workdir_and_write(monkeypatc
         write=False,
         github=None,
         github_exclude=None,
+        on_spawn=None,
     ):
         captured.update(
             prompt=prompt,
@@ -484,6 +485,7 @@ async def test_ask_claude_forwards_model_effort_and_mode(monkeypatch):
         github=None,
         github_exclude=None,
         github_tools="none",
+        on_spawn=None,
     ):
         captured.update(
             prompt=prompt,
@@ -539,6 +541,7 @@ async def test_ask_claude_defaults_remain_backward_compatible(monkeypatch):
         github=None,
         github_exclude=None,
         github_tools="none",
+        on_spawn=None,
     ):
         captured.update(
             prompt=prompt,

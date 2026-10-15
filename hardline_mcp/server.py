@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 import anyio.to_thread
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification
@@ -419,6 +419,58 @@ async def _in_thread(fn, *args, limiter=None, **kwargs):
     return await anyio.to_thread.run_sync(
         functools.partial(fn, *args, **kwargs), limiter=limiter
     )
+
+
+# Seconds between progress notifications while a sync ask_* waits. Claude Code
+# aborts a call that sends no response and no progress for its idle window (30
+# minutes for a stdio server), shorter than a long Codex review.
+_SYNC_PROGRESS_S = 60.0
+
+
+async def _sync_agent(ctx: Context | None, fn, prompt: str, **kwargs) -> dict:
+    """Run a sync ask_* to completion, unless its caller cancels.
+
+    A cancelled caller is gone, so its worker is too: Claude Code sends
+    ``notifications/cancelled`` when its tool timeout fires (#89). The thread
+    is abandoned on cancel and each child it recorded is killed under its
+    creation key. A cancel that lands before a spawn is answered through the
+    same ``on_spawn`` contract the async jobs use: refused, ``_run_cmd`` kills
+    the child it holds. Codex sends no cancel, so there its worker still runs on.
+    """
+    cancelled = threading.Event()
+    children: list[tuple[int, str]] = []
+
+    def on_spawn(pid: int) -> bool:
+        if key := procid.process_key(pid):
+            children.append((pid, key))
+        return not cancelled.is_set()
+
+    kwargs["on_spawn"] = on_spawn
+    if fn is _ask_claude_with_reserve_guard:
+        kwargs["still_wanted"] = lambda: not cancelled.is_set()
+
+    async def keep_alive() -> None:
+        started = time.monotonic()
+        while True:
+            await anyio.sleep(_SYNC_PROGRESS_S)
+            with contextlib.suppress(Exception):  # a lost stream must not fail the call
+                await ctx.report_progress(round(time.monotonic() - started))
+
+    try:
+        async with anyio.create_task_group() as tg:
+            if ctx is not None:
+                tg.start_soon(keep_alive)
+            result = await anyio.to_thread.run_sync(
+                functools.partial(fn, prompt, **kwargs), abandon_on_cancel=True
+            )
+            tg.cancel_scope.cancel()
+    except anyio.get_cancelled_exc_class():
+        cancelled.set()
+        with anyio.CancelScope(shield=True):
+            for pid, key in list(children):
+                await _in_thread(jobs.kill_process_tree, pid, expect_key=key)
+        raise
+    return result
 
 
 # ── session registry ─────────────────────────────────────────────────────────
@@ -1777,13 +1829,15 @@ async def ask_codex(
     write: bool = False,
     github: str | None = None,
     github_exclude: list[str] | None = None,
+    ctx: Context | None = None,
 ) -> dict:
     """Ask Codex a question and wait for its reply.
 
     LONG WORK GOES THROUGH ``ask_codex_async``. This call blocks until Codex
     finishes, which can take many minutes, and a client that stops waiting
     first (Codex's own MCP client gives up after 300 s unless the server entry
-    sets ``tool_timeout_sec``) does not stop it: the reply is then lost.
+    sets ``tool_timeout_sec``) does not stop it: the reply is then lost. A
+    client that cancels (Claude Code does when its timeout fires) stops it.
 
     Runs the Codex CLI, normally for ChatGPT models (``astra``, ``luna``,
     ``sol``, ``terra``). Claude models (``fable``, ``opus``, ``sonnet``,
@@ -1835,7 +1889,8 @@ async def ask_codex(
     ``ok: false`` the same way, with ``commands_not_started``: its reply was
     written without reading anything. Some not starting is only counted.
     """
-    result = await _in_thread(
+    result = await _sync_agent(
+        ctx,
         adapters.ask_codex,
         prompt,
         model=model,
@@ -2594,13 +2649,15 @@ async def ask_claude(
     github: str | None = None,
     github_exclude: list[str] | None = None,
     github_tools: GithubTools = "none",
+    ctx: Context | None = None,
 ) -> dict:
     """Ask Claude Code a question and wait for its reply.
 
     LONG WORK GOES THROUGH ``ask_claude_async``. This call blocks until Claude
     finishes, which can take many minutes, and a client that stops waiting
     first (Codex's own MCP client gives up after 300 s unless the server entry
-    sets ``tool_timeout_sec``) does not stop it: the reply is then lost.
+    sets ``tool_timeout_sec``) does not stop it: the reply is then lost. A
+    client that cancels (Claude Code does when its timeout fires) stops it.
 
     With no options, preserves the original one-shot ``claude -p`` behavior
     and response shape — omitting ``model`` passes no ``--model`` flag, so
@@ -2670,7 +2727,7 @@ async def ask_claude(
         return _hinted(
             "claude", model, {"ok": False, "error": plan["error"], "routing": plan["routing"]}
         )
-    result = await _in_thread(plan["ask_fn"], prompt, **plan["ask_kwargs"])
+    result = await _sync_agent(ctx, plan["ask_fn"], prompt, **plan["ask_kwargs"])
     result = dict(result)
     if plan["routing"] is not None and "routing" not in result:
         result["routing"] = plan["routing"]

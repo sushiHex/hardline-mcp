@@ -3694,5 +3694,77 @@
     "tests": [
       "tests/test_codex_route_facts.py::test_report_shows_each_codex_process_route_and_totals"
     ]
+  },
+  "sync-cancel-records-children": {
+    "file": "hardline_mcp/server.py",
+    "before": "    kwargs[\"on_spawn\"] = on_spawn\n",
+    "after": "",
+    "tests": [
+      "tests/test_sync_agent.py::test_a_cancelled_call_kills_the_child_it_spawned"
+    ]
+  },
+  "sync-cancel-kills-children": {
+    "file": "hardline_mcp/server.py",
+    "before": "                await _in_thread(jobs.kill_process_tree, pid, expect_key=key)\n",
+    "after": "                pass\n",
+    "tests": [
+      "tests/test_sync_agent.py::test_a_cancelled_call_kills_the_child_it_spawned"
+    ]
+  },
+  "sync-cancel-abandons-thread": {
+    "file": "hardline_mcp/server.py",
+    "before": "functools.partial(fn, prompt, **kwargs), abandon_on_cancel=True",
+    "after": "functools.partial(fn, prompt, **kwargs)",
+    "tests": [
+      "tests/test_sync_agent.py::test_a_cancelled_call_kills_the_child_it_spawned"
+    ]
+  },
+  "sync-cancel-refuses-later-spawn": {
+    "file": "hardline_mcp/server.py",
+    "before": "        cancelled.set()\n        with anyio.CancelScope(shield=True):",
+    "after": "        with anyio.CancelScope(shield=True):",
+    "tests": [
+      "tests/test_sync_agent.py::test_a_spawn_after_the_cancel_is_refused"
+    ]
+  },
+  "sync-cancel-reaches-claude-guard": {
+    "file": "hardline_mcp/server.py",
+    "before": "        kwargs[\"still_wanted\"] = lambda: not cancelled.is_set()\n",
+    "after": "        pass\n",
+    "tests": [
+      "tests/test_sync_agent.py::test_the_guarded_claude_path_is_told_once_cancelled"
+    ]
+  },
+  "sync-progress-keeps-alive": {
+    "file": "hardline_mcp/server.py",
+    "before": "                tg.start_soon(keep_alive)\n",
+    "after": "                pass\n",
+    "tests": [
+      "tests/test_sync_agent.py::test_a_waiting_call_reports_progress"
+    ]
+  },
+  "sync-progress-failure-is-not-the-call": {
+    "file": "hardline_mcp/server.py",
+    "before": "            with contextlib.suppress(Exception):  # a lost stream must not fail the call\n                await ctx.report_progress",
+    "after": "            if True:\n                await ctx.report_progress",
+    "tests": [
+      "tests/test_sync_agent.py::test_a_waiting_call_reports_progress"
+    ]
+  },
+  "sync-tools-use-the-helper": {
+    "file": "hardline_mcp/server.py",
+    "before": "    result = await _sync_agent(ctx, plan[\"ask_fn\"], prompt, **plan[\"ask_kwargs\"])",
+    "after": "    result = await _in_thread(plan[\"ask_fn\"], prompt, **plan[\"ask_kwargs\"])",
+    "tests": [
+      "tests/test_sync_agent.py::test_ask_claude_runs_through_the_cancellable_helper"
+    ]
+  },
+  "sync-codex-uses-the-helper": {
+    "file": "hardline_mcp/server.py",
+    "before": "    result = await _sync_agent(\n        ctx,\n        adapters.ask_codex,",
+    "after": "    result = await _in_thread(\n        adapters.ask_codex,",
+    "tests": [
+      "tests/test_sync_agent.py::test_ask_claude_runs_through_the_cancellable_helper"
+    ]
   }
 }

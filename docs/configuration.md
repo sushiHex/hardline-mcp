@@ -270,10 +270,15 @@ in flight are awaited. See [job receipts and cancellation](messaging.md#track-ba
 for admission and recovery behavior.
 
 **A client's own deadline is separate.** A sync `ask_claude` or `ask_codex`
-blocks the client's tool call until the agent finishes, and a client that stops
-waiting first does not stop the agent: its reply is lost (#89). Codex's MCP
-client gives up after 300 s by default, so give hardline's entry a deadline
-past the budget above, and use the `_async` tools for anything longer:
+blocks the client's tool call until the agent finishes (#89). A client that
+cancels the call stops the agent: Claude Code sends `notifications/cancelled`
+when its timeout fires, and the recorded worker is killed. While it waits,
+hardline sends a progress notification every minute, which keeps Claude Code's
+idle cutoff (30 minutes for a stdio server) from ending a long call. A client
+that only stops waiting, as Codex does, leaves the agent running and its reply
+is lost. Codex's MCP client gives up after 300 s by default, so give hardline's
+entry a deadline past the budget above, and use the `_async` tools for anything
+longer:
 
 ```toml
 [mcp_servers.hardline]
