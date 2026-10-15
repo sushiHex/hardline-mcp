@@ -24,7 +24,9 @@ servers run code that records revisions and acks. Against the triggers:
 - *Legacy writers retired.* Holds since 2026-10-13: a precondition for a
   recipient-format change, not a reason for one.
 - *Handover with jobs outstanding, contested names or the claim cap blocking
-  real claims.* From the sessions in use.
+  real claims.* From the sessions in use; `unread_mail` lanes whose `holder`
+  is `contested` are contested names with mail waiting. Baseline 2026-10-15:
+  75 unread, all on lanes with no registration, none contested.
 
 Record the outcome in `docs/architecture.md` and, if deferring again, a new
 date here.
