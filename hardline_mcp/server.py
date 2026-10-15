@@ -1780,6 +1780,11 @@ async def ask_codex(
 ) -> dict:
     """Ask Codex a question and wait for its reply.
 
+    LONG WORK GOES THROUGH ``ask_codex_async``. This call blocks until Codex
+    finishes, which can take many minutes, and a client that stops waiting
+    first (Codex's own MCP client gives up after 300 s unless the server entry
+    sets ``tool_timeout_sec``) does not stop it: the reply is then lost.
+
     Runs the Codex CLI, normally for ChatGPT models (``astra``, ``luna``,
     ``sol``, ``terra``). Claude models (``fable``, ``opus``, ``sonnet``,
     ``haiku``) go through ``ask_claude``; a known Claude name here comes back
@@ -2591,6 +2596,11 @@ async def ask_claude(
     github_tools: GithubTools = "none",
 ) -> dict:
     """Ask Claude Code a question and wait for its reply.
+
+    LONG WORK GOES THROUGH ``ask_claude_async``. This call blocks until Claude
+    finishes, which can take many minutes, and a client that stops waiting
+    first (Codex's own MCP client gives up after 300 s unless the server entry
+    sets ``tool_timeout_sec``) does not stop it: the reply is then lost.
 
     With no options, preserves the original one-shot ``claude -p`` behavior
     and response shape — omitting ``model`` passes no ``--model`` flag, so

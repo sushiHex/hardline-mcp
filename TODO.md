@@ -27,6 +27,10 @@ servers run code that records revisions and acks. Against the triggers:
   real claims.* From the sessions in use; `unread_mail` lanes whose `holder`
   is `contested` are contested names with mail waiting. Baseline 2026-10-15:
   75 unread, all on lanes with no registration, none contested.
+- *Codex wake routes.* `codex_routes` (#86): steered against queued and
+  ambiguous notices, and the reasons for queueing. Ambiguous ones should be
+  rare; a steady share of `no turn seen` means the turn id is not reaching
+  the wake.
 
 Record the outcome in `docs/architecture.md` and, if deferring again, a new
 date here.

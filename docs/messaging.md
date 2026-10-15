@@ -41,7 +41,9 @@ Automatic lane selection prefers `HARDLINE_AGENT_LABEL`, then a host session
 ID, then a parent process identity. A runtime claim selects the current name.
 For a fixed role across reconnects, configure both `HARDLINE_AGENT` and
 `HARDLINE_AGENT_LABEL` in that client's server environment. Give concurrent
-sessions distinct labels.
+sessions distinct labels. A Codex session should claim its label before
+dispatching async work: until then results are addressed to its
+parent-derived lane, which a reconnect does not derive again (#90).
 
 Claims and automatic registration use the same atomic ownership check. A
 foreign holder whose liveness is `alive` or `unknown` blocks acquisition, as

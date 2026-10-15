@@ -269,6 +269,17 @@ fixed 180-second budget. Queued dispatches are dropped at shutdown; calls alread
 in flight are awaited. See [job receipts and cancellation](messaging.md#track-background-work)
 for admission and recovery behavior.
 
+**A client's own deadline is separate.** A sync `ask_claude` or `ask_codex`
+blocks the client's tool call until the agent finishes, and a client that stops
+waiting first does not stop the agent: its reply is lost (#89). Codex's MCP
+client gives up after 300 s by default, so give hardline's entry a deadline
+past the budget above, and use the `_async` tools for anything longer:
+
+```toml
+[mcp_servers.hardline]
+tool_timeout_sec = 1000   # past HARDLINE_CLAUDE_TIMEOUT_S (900)
+```
+
 ## Models, effort, and results
 
 `ask_codex` and `ask_claude` accept `model`, `effort`, `mode`, `workdir`, and
