@@ -1642,26 +1642,43 @@
   },
   "already-read-note-needs-an-empty-read": {
     "file": "hardline_mcp/server.py",
-    "before": "    elif accepted and not msgs and not remaining:\n",
-    "after": "    elif accepted and not remaining:\n",
+    "before": "    elif accepted and not msgs and not remaining and \":\" not in agent:\n",
+    "after": "    elif accepted and not remaining and \":\" not in agent:\n",
     "tests": [
       "tests/test_codex_queue.py::test_only_an_empty_answer_to_a_notice_says_already_read"
     ]
   },
   "already-read-note-needs-an-accepted-receipt": {
     "file": "hardline_mcp/server.py",
-    "before": "    elif accepted and not msgs and not remaining:\n",
-    "after": "    elif not msgs and not remaining:\n",
+    "before": "    elif accepted and not msgs and not remaining and \":\" not in agent:\n",
+    "after": "    elif not msgs and not remaining and \":\" not in agent:\n",
     "tests": [
       "tests/test_codex_queue.py::test_only_an_empty_answer_to_a_notice_says_already_read"
     ]
   },
   "already-read-note-needs-nothing-unacked": {
     "file": "hardline_mcp/server.py",
-    "before": "    elif accepted and not msgs and not remaining:\n",
-    "after": "    elif accepted and not msgs:\n",
+    "before": "    elif accepted and not msgs and not remaining and \":\" not in agent:\n",
+    "after": "    elif accepted and not msgs and \":\" not in agent:\n",
     "tests": [
       "tests/test_codex_queue.py::test_mail_left_unacked_is_not_already_read"
+    ]
+  },
+  "already-read-note-needs-every-lane-read": {
+    "file": "hardline_mcp/server.py",
+    "before": "    elif accepted and not msgs and not remaining and \":\" not in agent:\n",
+    "after": "    elif accepted and not msgs and not remaining:\n",
+    "tests": [
+      "tests/test_codex_queue.py::test_a_read_of_one_named_lane_never_says_already_read"
+    ]
+  },
+  "inbox-probe-blind-to-after-id": {
+    "file": "hardline_mcp/mailbox.py",
+    "before": "                \" AND acked_at IS NULL LIMIT 1\",\n                tuple(agents),\n",
+    "after": "                \" AND id > ? AND acked_at IS NULL LIMIT 1\",\n                (*agents, after_id),\n",
+    "tests": [
+      "tests/test_mailbox.py::test_a_consuming_read_past_the_last_message_still_counts_what_is_unread",
+      "tests/test_codex_queue.py::test_a_consuming_read_past_unread_mail_is_not_already_read"
     ]
   },
   "already-read-note-is-given": {

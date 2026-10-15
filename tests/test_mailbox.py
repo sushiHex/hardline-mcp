@@ -275,6 +275,15 @@ def test_after_id_pages_past_mail_left_unacked(tmp_path):
     assert [m["body"] for m in last] == ["m9"], "strictly after: m8 is skipped"
 
 
+def test_a_consuming_read_past_the_last_message_still_counts_what_is_unread(tmp_path):
+    """The look-before-reserving probe honoured after_id, so a consuming read
+    past every unread message answered ([], 0) and hid the mail before it."""
+    db = tmp_path / "mb.db"
+    sent = mailbox.send("codex", "hermes", "m0", db_path=db)["message_id"]
+    got, remaining = mailbox.inbox("hermes", after_id=sent, db_path=db)
+    assert (got, remaining) == ([], 1)
+
+
 def test_repeated_polls_advance_through_the_backlog(tmp_path):
     """The regression that makes a bare ``limit`` worse than no limit.
 

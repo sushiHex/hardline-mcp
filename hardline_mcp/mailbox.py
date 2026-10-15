@@ -636,10 +636,14 @@ def inbox(
             # Racy by nature, and harmlessly so: a message arriving between the
             # probe and the return is found by the next poll, which is exactly
             # what would have happened had it arrived a moment later.
+            #
+            # Blind to after_id: only "nothing unread at all" may skip the
+            # remaining count, which after_id does not change. Mail before the
+            # cursor still counts.
             probe = conn.execute(
                 f"SELECT 1 FROM messages WHERE recipient IN ({placeholders})"
-                " AND id > ? AND acked_at IS NULL LIMIT 1",
-                (*agents, after_id),
+                " AND acked_at IS NULL LIMIT 1",
+                tuple(agents),
             ).fetchone()
             if probe is None:
                 return [], 0
