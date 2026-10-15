@@ -1538,6 +1538,56 @@ async def test_server_info_reports_version_limits_and_timeouts(monkeypatch, tmp_
     assert got["quota_routing"]["claude_weekly_reserve_percent"] == 7
 
 
+@pytest.fixture
+def checkout(monkeypatch):
+    """This process spawned on main at "aaa111"; the checkout says whatever is set."""
+    monkeypatch.setattr(server, "_revision_cache", [("refs/heads/main", "aaa111")])
+    monkeypatch.setattr(server, "_revision_told", [])
+    now = {"ref": "refs/heads/main", "rev": "aaa111"}
+    monkeypatch.setattr(server, "_read_head", lambda: (now["ref"], now["rev"]))
+    return now
+
+
+@pytest.mark.anyio
+async def test_a_server_says_when_its_checkout_has_moved(monkeypatch, tmp_path, in_session, checkout):
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    same = await server.server_info()
+    assert (same["code_revision"], same["checkout_revision"], same["revision_note"]) == (
+        "aaa111", "aaa111", None,
+    )
+    assert "revision_note" not in (await server.list_agents())["you"]
+
+    checkout["rev"] = "bbb222"
+    moved = await server.server_info()
+    assert (moved["code_revision"], moved["checkout_revision"]) == ("aaa111", "bbb222")
+    assert "aaa111" in moved["revision_note"] and "bbb222" in moved["revision_note"]
+    assert (await server.list_agents())["you"].get("revision_note") == moved["revision_note"]
+
+
+@pytest.mark.anyio
+async def test_a_checkout_on_another_branch_is_work_in_progress_not_news(
+    monkeypatch, tmp_path, in_session, checkout
+):
+    """Reconnecting then would load somebody's unfinished branch into the fleet."""
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    checkout.update(ref="refs/heads/feat/wip", rev="bbb222")
+    got = await server.server_info()
+    assert (got["checkout_revision"], got.get("revision_note")) == ("bbb222", None)
+    checkout.update(ref="", rev="ccc333")  # detached
+    assert (await server.server_info()).get("revision_note") is None
+
+
+@pytest.mark.anyio
+async def test_inbox_says_a_moved_checkout_once_per_revision(monkeypatch, tmp_path, in_session, checkout):
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    assert "revision_note" not in await server.inbox(agent="claude")
+    checkout["rev"] = "bbb222"
+    assert "bbb222" in (await server.inbox(agent="claude")).get("revision_note", "")
+    assert "revision_note" not in await server.inbox(agent="claude"), "told once"
+    checkout["rev"] = "ccc333"
+    assert "ccc333" in (await server.inbox(agent="claude")).get("revision_note", "")
+
+
 @pytest.mark.anyio
 async def test_server_info_reports_what_dispatch_would_run(monkeypatch, tmp_path):
     """Dispatch's own resolver, asked afresh on every call, spawning nothing.

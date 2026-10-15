@@ -991,6 +991,8 @@ async def inbox(
         response["previously_held_note"] = PREVIOUSLY_HELD_NOTE
     elif accepted and not msgs and not remaining and ":" not in agent:
         response["receipt_note"] = ALREADY_READ_NOTE
+    if revision_note := await _in_thread(_new_revision_note):
+        response["revision_note"] = revision_note
     return response
 
 
@@ -1093,6 +1095,8 @@ async def list_agents() -> dict:
     if previously_held := await _in_thread(_previously_held):
         you["previously_held"] = previously_held
         you["previously_held_note"] = PREVIOUSLY_HELD_NOTE
+    if revision_note := await _in_thread(_revision_note):
+        you["revision_note"] = revision_note
 
     result = {
         "agents": list(adapters.known_agents()),
@@ -1299,7 +1303,7 @@ async def register_session(
     )
 
 
-_revision_cache: list[str] = []
+_revision_cache: list[tuple[str, str]] = []  # (branch ref or "", revision or "") at spawn
 
 
 def _code_revision() -> str | None:
@@ -1322,9 +1326,20 @@ def _code_revision() -> str | None:
     telling two running revisions apart is the entire point, a lazily-read
     answer is worse than none.
     """
-    if _revision_cache:
-        return _revision_cache[0] or None
-    revision = ""
+    if not _revision_cache:
+        _revision_cache.append(_read_head())
+    return _revision_cache[0][1] or None
+
+
+def _read_revision() -> str | None:
+    """The checkout's revision now: ``_code_revision``'s read, uncached."""
+    return _read_head()[1] or None
+
+
+def _read_head() -> tuple[str, str]:
+    """``(branch ref, revision)`` of the checkout now; ``""`` for what cannot be
+    read, and a detached HEAD has no ref."""
+    ref, revision = "", ""
     try:
         git = Path(__file__).resolve().parent.parent / ".git"
         head = (git / "HEAD").read_text(encoding="utf-8").strip()
@@ -1345,9 +1360,41 @@ def _code_revision() -> str | None:
         else:
             revision = head[:12]
     except Exception:  # noqa: BLE001 - a diagnostic must never be the failure
-        revision = ""
-    _revision_cache.append(revision)
-    return revision or None
+        return "", ""
+    return ref, revision
+
+
+def _revision_note() -> str | None:
+    """Said when the branch this process spawned on has moved, or None.
+
+    A process runs the tree it spawned from, forever, and nothing else tells
+    its session that newer code is waiting for a reconnect (#84). Only the
+    same branch counts: a checkout switched to another branch, or detached, is
+    someone working, and a reconnect then would load their unfinished code.
+    Blocking (two small reads of .git); off the loop.
+    """
+    _code_revision()  # captured at import; this only reads the cache
+    (ref, running), (now_ref, checkout) = _revision_cache[0], _read_head()
+    if not (ref and running and checkout) or now_ref != ref or running == checkout:
+        return None
+    branch = ref.removeprefix("refs/heads/")
+    return (
+        f"This hardline server runs {running}; {branch} is now at {checkout}. "
+        "Reconnect hardline (/mcp in Claude Code; restart a Codex session) to run it."
+    )
+
+
+_revision_told: list[str] = []
+
+
+def _new_revision_note() -> str | None:
+    """``_revision_note`` the first time for each checkout revision: for
+    ``inbox``, which sessions call on every notice, so each hears it once."""
+    note = _revision_note()
+    if note is None or note in _revision_told:
+        return None
+    _revision_told[:] = [note]
+    return note
 
 
 def _agent_commands() -> dict[str, dict[str, str]]:
@@ -1380,6 +1427,8 @@ async def server_info() -> dict:
     except Exception:  # noqa: BLE001 - version is diagnostic, never fatal
         pkg_version = "unknown"
     revision = _code_revision()
+    checkout = await _in_thread(_read_revision)
+    revision_note = await _in_thread(_revision_note)
 
     timeouts: dict[str, object] = {}
     for agent in adapters.known_agents():
@@ -1394,6 +1443,10 @@ async def server_info() -> dict:
         # The version cannot tell two of these processes apart; the revision
         # can. Several incompatible ones run against one store at a time.
         "code_revision": revision,
+        # What the checkout says now. A different value means newer (or
+        # older) code is waiting for this process's session to reconnect.
+        "checkout_revision": checkout,
+        "revision_note": revision_note,
         # A comment above _registration_failure said this was reported here.
         # It was not - only list_agents consulted it - so the claim was simply
         # false, and this is the tool an operator reaches for when a session is

@@ -7,7 +7,13 @@ changing its environment or updating the editable source; an already-running
 server retains its loaded code. `server_info()` reports the code revision,
 package version, module path, database path, limits, write gate, job counts,
 watcher command, and the agent executables a spawn would run. Check
-`code_revision` when confirming an update is loaded.
+`code_revision` when confirming an update is loaded: it is the revision the
+process spawned on, and `checkout_revision` is what the checkout says now.
+When the branch the process spawned on has moved, `revision_note` says to
+reconnect. A checkout switched to another branch, or detached, gets no note: a
+reconnect then would load unfinished work. `list_agents().you` carries
+the same note, and `inbox` gives it once for each new checkout revision, so a
+session learns that newer code is waiting without being asked.
 
 ## Mailbox and CLI paths
 

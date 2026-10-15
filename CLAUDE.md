@@ -252,6 +252,12 @@ against every real writer.
 **Shell.** No heredocs — quoting breaks. Use `git commit -F <file>`, and write
 files with the Write tool rather than `echo >` or `python -c`.
 
+**Never kill by image name.** Every hardline server is a `python.exe`, beside
+other sessions' MCP servers and work. On 2026-10-15 one session's
+`Stop-Process -Name python -Force` took the whole fleet down at once. Kill
+only what you started, by PID. A user-level PreToolUse hook
+(`~/.claude/hooks/guard_image_kills.py`) now refuses such kills.
+
 ## Open question
 
 The design review argued that absence-based ownership is the wrong foundation:
