@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/report.py",
+  "before": " for r in routes or () if r[\"last_route\"] == NOT_TOP_LEVEL}",
+  "after": " for r in routes or ()}",
+  "tests": [
+    "tests/test_report.py::test_mail_no_wake_got_read_is_listed_four_ways"
+  ]
+}

@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from .delivery import GRACE
+from .delivery import GRACE, NOT_TOP_LEVEL
 from .jobs import ACTIVE_STATES
 from .mailbox import _iso, _resolve_db
 from .procid import DEAD, instance_state
@@ -54,8 +54,9 @@ NOTES = [
     "codex_routes: facts each Codex wake wrote about itself; 'ambiguous' is a steer that may or may "
     "not have landed, counted apart from steered; a dead process's row stays until pruned",
     "codex_lane_servers_without_row: registered processes not shown dead holding a codex: lane "
-    "with no route row - older code, a wake never pinned to a top-level thread (a subagent's "
-    "server), a failed write, or not a Codex client at all; their notices are in no total. A "
+    "with no route row - older code, a wake not yet called (current code records a subagent's "
+    "server as last_route 'not_top_level' at its first call), a failed write, or not a Codex "
+    "client at all; their notices are in no total. A "
     "row's zeros mean no counted route outcome, not no notice: a failed queue is in no count "
     "(current code records it as last_route 'failed'; older code recorded nothing)",
     "unread_mail: counts only, nothing is acked or deleted; a registered holder is a session row "
@@ -65,9 +66,10 @@ NOTES = [
     "stalled_wakes: live servers with mail waiting past the delivery grace: 'stalled', a "
     "notice's receipt overdue (the notice may have failed, or the session is busy or ignoring "
     "it); 'unannounced', nothing owed yet mail newer than the last notice (the wake is not "
-    "announcing); 'unwatched', no wake facts at all (older code, a Codex server that never "
-    "pinned a thread, or no wake). Evidence, not proof; since is when it was owed, or the "
-    "oldest such arrival",
+    "announcing); 'never_announced', a Codex server whose thread is not top-level (a "
+    "subagent's), which announces nothing; 'unwatched', no wake facts at all (older code, a "
+    "Codex server that never pinned a thread and has not been called, or no wake). Evidence, "
+    "not proof; since is when it was owed, or the oldest such arrival",
 ]
 
 # Each section's rows, read in the snapshot. None marks a table current code
@@ -126,7 +128,8 @@ def report(db_path: Optional[Path] = None) -> dict:
             functools.partial(_codex_routes, sessions=read["sessions"]), read, probe, "routes"
         ),
         "stalled_wakes": _section(
-            functools.partial(_stalled_wakes, now=now), read, probe, "pushes", "sessions", "waiting"
+            functools.partial(_stalled_wakes, now=now),
+            read, probe, "pushes", "routes", "sessions", "waiting",
         ),
         "notes": NOTES,
     }
@@ -339,15 +342,23 @@ def _without_row(rows: list, sessions: "list | Exception", probe: Callable) -> "
 
 
 def _stalled_wakes(
-    pushes: Optional[list], sessions: list, waiting: list, *, now: datetime, probe: Callable
+    pushes: Optional[list],
+    routes: Optional[list],
+    sessions: list,
+    waiting: list,
+    *,
+    now: datetime,
+    probe: Callable,
 ) -> dict:
     """Live servers whose registered lanes hold mail their wake has not got
-    read, each past ``delivery.GRACE``, in one of three ways:
+    read, each past ``delivery.GRACE``, in one of four ways:
 
     - ``stalled``: a notice has owed its receipt that long (as
       ``delivery.derive`` reads ``unreceipted``) while the lanes hold mail;
     - ``unannounced``: nothing is owed, yet mail arrived after the last notice,
       or none was ever sent - a free wake announces new mail within a poll;
+    - ``never_announced``: a Codex server whose thread is not top-level (a
+      subagent's), which by design announces nothing (#109);
     - ``unwatched``: no wake facts at all, so no notice can be shown either way.
 
     Joined on pid and creation token, against every unread message, not the
@@ -366,14 +377,18 @@ def _stalled_wakes(
         if _is_live(s, probe):
             lanes.setdefault((s["pid"], s["process_key"]), []).append(s["lane"])
     facts = {(p["pid"], p["process_key"]): p for p in pushes or ()}
-    found: dict[str, list] = {"stalled": [], "unannounced": [], "unwatched": []}
+    not_top = {(r["pid"], r["process_key"]) for r in routes or () if r["last_route"] == NOT_TOP_LEVEL}
+    found: dict[str, list] = {"stalled": [], "unannounced": [], "never_announced": [], "unwatched": []}
     for (pid, key), held in lanes.items():
         p = facts.get((pid, key))
         owed = _parse(p["oldest_unreceipted_at"]) if p else None
         since = _parse(p["last_push_at"]) if p else None
         if owed is not None and owed > cutoff:
             continue  # a notice still within its grace
-        kind = "stalled" if owed else "unannounced" if p else "unwatched"
+        kind = (
+            "stalled" if owed else "unannounced" if p
+            else "never_announced" if (pid, key) in not_top else "unwatched"
+        )
         # Stalled, the whole backlog waits on the receipt; otherwise, mail past
         # the grace that arrived after the last notice could have named it.
         unread = {

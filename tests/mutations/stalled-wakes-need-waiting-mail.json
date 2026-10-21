@@ -3,6 +3,6 @@
   "before": "        if not unread:\n            continue\n",
   "after": "        if False:\n            continue\n",
   "tests": [
-    "tests/test_report.py::test_mail_no_wake_got_read_is_listed_three_ways"
+    "tests/test_report.py::test_mail_no_wake_got_read_is_listed_four_ways"
   ]
 }

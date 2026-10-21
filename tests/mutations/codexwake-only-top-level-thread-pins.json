@@ -1,10 +1,10 @@
 {
   "file": "hardline_mcp/codex_queue.py",
-  "before": "                if turn.get(\"thread_source\") != \"user\":\n                    return  # only a top-level thread is ever the address",
-  "after": "                if False:\n                    return  # only a top-level thread is ever the address",
+  "before": "                if turn.get(\"thread_source\") != \"user\":\n                    # Only a top-level thread is ever the address.",
+  "after": "                if False:\n                    # Only a top-level thread is ever the address.",
   "tests": [
     "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[subagent]",
     "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[no-source]",
-    "tests/test_codex_route_facts.py::test_a_wake_never_pinned_writes_no_row"
+    "tests/test_codex_route_facts.py::test_a_wake_never_pinned_writes_only_that_it_is_not_top_level"
   ]
 }

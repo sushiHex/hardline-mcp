@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "                self.routes = {}  # pinned after all: not what the row said\n",
+  "after": "",
+  "tests": [
+    "tests/test_subagent_lanes.py::test_a_top_level_call_after_a_subagents_replaces_the_marker"
+  ]
+}

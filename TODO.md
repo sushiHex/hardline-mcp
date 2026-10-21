@@ -41,7 +41,9 @@ servers run code that records revisions and acks. Against the triggers:
   supplies it. A first design was reviewed and not built; its findings
   (UUIDv7 prefixes collide, subagent results, the identity hook's contract) are
   on #90. A subagent's server holds a lane that attracts mail it never
-  announces (#109); `stalled_wakes.unwatched` lists such servers.
+  announces (#109). One that has called hardline is marked `not_top_level`
+  and listed under `stalled_wakes.never_announced`. One that never calls is
+  still indistinguishable from a session not yet called (`unwatched`).
 
 Record the outcome in `docs/architecture.md` and, if deferring again, a new
 date here.

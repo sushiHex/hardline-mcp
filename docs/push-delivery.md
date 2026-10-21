@@ -39,7 +39,7 @@ The host never acknowledges a notification, and consumption is no proof: a Monit
 
 - **What a receipt proves.** A receipt proves its push and covers every earlier one. Each nonce counts once.
 - **Recorded facts.** Each serving process records facts about itself in `push_delivery` (pid, process key, declared, last push, last receipted push, oldest unreceipted push). It prunes rows of certainly-dead processes.
-- **Derived state.** Readers derive the state: `declared`, `receipted`, `awaiting_receipt` (an unreceipted push younger than 10 minutes), or `unreceipted` (older).
+- **Derived state.** Readers derive the state: `declared`, `receipted`, `awaiting_receipt` (an unreceipted push younger than 10 minutes), or `unreceipted` (older). A Codex server with no push facts whose route row is marked `not_top_level` (a subagent's) reads `never_announced` (see [Codex queue wake](codex-queue-wake.md)).
 - **Where it is reported.** `list_agents().you.delivery`, each `live_sessions[]` entry, and `send`'s `recipient_delivery`. No record is reported as `unknown`, never as "not delivered".
 
 A receipt echoed by a subagent proves the nonce was seen inside the conversation, not by its main thread. That is accepted as a known limit.

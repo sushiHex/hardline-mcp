@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/report.py",
+  "before": "if (pid, key) in not_top else",
+  "after": "if any(pid == p for p, _ in not_top) else",
+  "tests": [
+    "tests/test_report.py::test_mail_no_wake_got_read_is_listed_four_ways"
+  ]
+}

@@ -20,7 +20,7 @@ import os
 import uuid
 from typing import Callable, Optional
 
-from . import adapters, announce, codex_steer
+from . import adapters, announce, codex_steer, delivery
 
 CLIENT = "codex-mcp-client"
 UNDECIDED = "not decided yet"  # queue until steering is known to work
@@ -218,7 +218,14 @@ class CodexWake(announce.Announcer):
         with self._lock:
             if self.address is None:
                 if turn.get("thread_source") != "user":
-                    return  # only a top-level thread is ever the address
+                    # Only a top-level thread is ever the address. Recorded, so a
+                    # sender learns this lane's mail is never announced (#109).
+                    if self.routes.get("last_route") is None:
+                        self.routes["last_route"] = delivery.NOT_TOP_LEVEL
+                        self.routes["last_route_reason"] = f"thread_source {turn.get('thread_source')!r}"
+                        self._routes_dirty = True
+                    return
+                self.routes = {}  # pinned after all: not what the row said
                 self.address = thread
                 self.declare()
                 # The first poll after the pin restores this thread's names

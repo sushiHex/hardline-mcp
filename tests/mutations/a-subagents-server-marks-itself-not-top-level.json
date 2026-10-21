@@ -1,0 +1,9 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "                    if self.routes.get(\"last_route\") is None:\n",
+  "after": "                    if False:\n",
+  "tests": [
+    "tests/test_subagent_lanes.py::test_a_sender_is_told_a_subagents_lane_is_never_announced",
+    "tests/test_codex_route_facts.py::test_a_wake_never_pinned_writes_only_that_it_is_not_top_level"
+  ]
+}

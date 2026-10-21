@@ -1,0 +1,9 @@
+{
+  "file": "hardline_mcp/delivery.py",
+  "before": "    if wanted:\n",
+  "after": "    if False:\n",
+  "tests": [
+    "tests/test_subagent_lanes.py::test_a_sender_is_told_a_subagents_lane_is_never_announced",
+    "tests/test_subagent_lanes.py::test_facts_outrank_a_route_marker"
+  ]
+}

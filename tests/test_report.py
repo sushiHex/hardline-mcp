@@ -332,9 +332,10 @@ def test_unread_mail_is_counted_by_recipient_and_held_or_not(tmp_path, monkeypat
     assert mail["lanes_not_shown"] == mail["bare_not_shown"] == 0
 
 
-def test_mail_no_wake_got_read_is_listed_three_ways(tmp_path, monkeypatch):
-    """Stalled on a receipt, unannounced by a free wake, or unwatched: each
-    past the grace, joined on the creation token, the dead never listed."""
+def test_mail_no_wake_got_read_is_listed_four_ways(tmp_path, monkeypatch):
+    """Stalled on a receipt, unannounced by a free wake, never announced by a
+    subagent's server, or unwatched: each past the grace, joined on the
+    creation token, the dead never listed."""
     from datetime import datetime, timedelta, timezone
 
     now = datetime.now(timezone.utc)
@@ -353,7 +354,13 @@ def test_mail_no_wake_got_read_is_listed_three_ways(tmp_path, monkeypatch):
             " last_seen, claimed_at) VALUES (?, ?, 'codex', ?, 't', 't', 't')",
             [(1, "codex:a", "k1"), (2, "codex:b", "k2"), (3, "codex:quiet", "k3"),
              (4, "codex:c", "k4"), (5, "codex:e", "k5"), (6, "codex:f", "new"),
-             (7, "codex:d", "k7"), (gone, "codex:g", "kg")],
+             (7, "codex:d", "k7"), (8, "codex:h", "k8"), (gone, "codex:g", "kg")],
+        )
+        raw.executemany(
+            "INSERT INTO codex_routes (pid, process_key, last_route) VALUES (?, ?, ?)",
+            [(8, "k8", "not_top_level"),
+             (5, "k5", "steer"),            # a route row, not the marker
+             (6, "old", "not_top_level")],  # an earlier process on pid 6
         )
         raw.executemany(
             "INSERT INTO push_delivery (pid, process_key, declared_at, last_push_at,"
@@ -376,6 +383,7 @@ def test_mail_no_wake_got_read_is_listed_three_ways(tmp_path, monkeypatch):
              ("codex:d", ago(60)),
              ("codex:e", ago(60)), ("codex:e", ago(2)),
              ("codex:f", ago(60)),
+             ("codex:h", ago(60)), ("codex:h", ago(2)),
              ("codex:g", ago(60))],
         )
     raw.close()
@@ -384,9 +392,10 @@ def test_mail_no_wake_got_read_is_listed_three_ways(tmp_path, monkeypatch):
     listed = lambda kind: [(e["pid"], e["unread"]) for e in got.get(kind, [])]  # noqa: E731
     assert listed("stalled") == [(1, {"codex:a": 2})], got
     assert listed("unannounced") == [(4, {"codex:c": 1}), (7, {"codex:d": 1})], got
+    assert listed("never_announced") == [(8, {"codex:h": 1})], got
     assert listed("unwatched") == [(5, {"codex:e": 1}), (6, {"codex:f": 1})], got
     assert got["unannounced"][0]["since"] == ago(20)
-    assert (got.get("servers_with_facts"), got.get("servers_without_facts")) == (5, 2), got
+    assert (got.get("servers_with_facts"), got.get("servers_without_facts")) == (5, 3), got
 
 
 def test_unread_mail_lists_are_bounded_but_totals_are_whole(tmp_path):

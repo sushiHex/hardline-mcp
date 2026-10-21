@@ -3,6 +3,6 @@
   "before": "        p = facts.get((pid, key))\n",
   "after": "        p = next((v for (q, _), v in facts.items() if q == pid), None)\n",
   "tests": [
-    "tests/test_report.py::test_mail_no_wake_got_read_is_listed_three_ways"
+    "tests/test_report.py::test_mail_no_wake_got_read_is_listed_four_ways"
   ]
 }

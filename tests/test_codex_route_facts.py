@@ -91,12 +91,18 @@ def test_a_pinned_wake_writes_its_row_before_any_notice():
     assert (row.get("last_route"), row.get("steered"), row.get("queued")) == (None, None, None)
 
 
-def test_a_wake_never_pinned_writes_no_row():
-    """A subagent's thread is never the address, so its server writes nothing."""
+def test_a_wake_never_pinned_writes_only_that_it_is_not_top_level():
+    """A subagent's thread is never the address: its server writes the marker
+    a sender is told from (#109), and no delivery facts or counts."""
     wake = codex_queue.CodexWake(queue=Queue(), steer=Steer(ACCEPTED))
     wake.observe({"_meta": meta(source="subagent")})
     wake._flush()
-    assert facts() == {}
+    row = facts()
+    assert (row.get("last_route"), row.get("last_route_reason")) == (
+        delivery.NOT_TOP_LEVEL, "thread_source 'subagent'"
+    ), row
+    assert (row.get("steered"), row.get("queued"), row.get("ambiguous")) == (None, None, None)
+    assert wake.address is None and wake.facts == {}
 
 
 def test_a_failed_queue_records_why_and_counts_nothing():

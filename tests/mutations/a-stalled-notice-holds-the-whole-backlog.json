@@ -3,6 +3,6 @@
   "before": "if kind == \"stalled\" or (at <= cutoff",
   "after": "if (at <= cutoff",
   "tests": [
-    "tests/test_report.py::test_mail_no_wake_got_read_is_listed_three_ways"
+    "tests/test_report.py::test_mail_no_wake_got_read_is_listed_four_ways"
   ]
 }

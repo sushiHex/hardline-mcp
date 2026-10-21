@@ -899,6 +899,8 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
         except Exception:  # noqa: BLE001 - never fail a send over reporting
             holders = []
         result["recipient_delivery"] = _delivery_of(holders)
+        if result["recipient_delivery"] == delivery.NEVER_ANNOUNCED:
+            result["recipient_note"] = NEVER_ANNOUNCED_NOTE
     if deliver:
         notice = (
             f"[hardline] new message #{result['message_id']} from {sender}. "
@@ -913,6 +915,14 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
     return result
 
 
+NEVER_ANNOUNCED_NOTE = (
+    "This lane's holder serves a Codex thread that is not top-level (a subagent's), "
+    "so hardline never announces its mail, and the lane ends with that thread. "
+    "The message is stored; to reach the session, address its top-level thread's "
+    "lane or a name it claimed."
+)
+
+
 def _delivery_of(holders: list[dict]) -> str:
     """Push delivery state of a lane's live holders; ``unknown`` without proof.
 
@@ -921,13 +931,12 @@ def _delivery_of(holders: list[dict]) -> str:
     record is not evidence of anything.
     """
     try:
-        facts = delivery.facts_for(
-            [(h["pid"], h["process_key"]) for h in holders]
+        recorded = delivery.states_for(
+            [(h["pid"], h["process_key"]) for h in holders], mailbox._default_now()
         )
     except Exception:  # noqa: BLE001 - reporting must never fail a call
         return "unknown"
-    now = mailbox._default_now()
-    states = {delivery.derive(facts.get((h["pid"], h["process_key"])), now) for h in holders}
+    states = {recorded.get((h["pid"], h["process_key"])) for h in holders}
     states.discard(None)
     return states.pop() if len(states) == 1 else "unknown"
 
@@ -1150,15 +1159,15 @@ async def list_agents() -> dict:
     seen_senders = await _in_thread(mailbox.senders)
     live = await _in_thread(sessions.live)
     try:
-        facts = await _in_thread(
-            delivery.facts_for, [(s["pid"], s["process_key"]) for s in live]
+        states = await _in_thread(
+            delivery.states_for,
+            [(s["pid"], s["process_key"]) for s in live],
+            mailbox._default_now(),
         )
     except Exception:  # noqa: BLE001 - reporting must never fail the listing
-        facts = {}
-    now = mailbox._default_now()
+        states = {}
     for session in live:
-        state = delivery.derive(facts.get((session["pid"], session["process_key"])), now)
-        session["delivery"] = state or "unknown"
+        session["delivery"] = states.get((session["pid"], session["process_key"]), "unknown")
     # EVERY lane each session holds, not just the name it is currently
     # addressed by. A renamed session still consumes its previous lanes, so
     # collapsing to the current name here would mark them dead and count their
