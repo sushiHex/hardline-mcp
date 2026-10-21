@@ -320,9 +320,10 @@ def accept_receipt(nonce: str) -> bool:
 
 def status() -> tuple[Optional[str], Optional[str]]:
     """``(delivery state, transport)`` of the wake serving this connection;
-    ``(None, None)`` until one has an address."""
+    ``(None, None)`` until one has a state. No transport until it has an
+    address: an unpinned Codex wake may say ``not_top_level``, sending nothing."""
     for wake in _installed:
         state = wake.state()
         if state:
-            return state, wake.transport
+            return state, wake.transport if wake.address is not None else None
     return None, None

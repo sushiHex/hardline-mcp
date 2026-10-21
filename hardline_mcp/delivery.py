@@ -126,7 +126,9 @@ def _read(
     instances: Iterable[tuple[int, Optional[str]]], db_path: Optional[Path]
 ) -> tuple[dict[tuple[int, str], dict], set[tuple[int, str]]]:
     """``(push fact rows, identities marked not_top_level)`` for the given
-    instances, read in one snapshot so a pin's two writes are never seen torn."""
+    instances, read in one snapshot. The writer commits the two separately, so
+    a pin can be seen half-written; push facts outranking the mark covers the
+    order it writes them in."""
     wanted = {(pid, key) for pid, key in instances if key}
     if not wanted:
         return {}, set()

@@ -52,10 +52,11 @@ async def test_a_sender_is_told_a_subagents_wake_is_not_armed(lane):
         sent = await server.send(from_agent="claude", to_agent=lane, message="hi")
         assert sent["recipient_delivery"] == "not_top_level"
         note = sent.get("recipient_note") or ""
-        assert "not armed" in note and "can still read it with inbox" in note, note
+        assert "currently unarmed" in note and "can still read it with inbox" in note, note
         listing = await server.list_agents()
         (me,) = [s for s in listing["live_sessions"] if lane in s["lanes"]]
         assert me["delivery"] == listing["you"]["delivery"] == "not_top_level"
+        assert listing["you"]["transport"] is None, "an unarmed wake sends by no transport"
         got = await server.inbox(agent="codex", auto_ack=False)
         assert [m["body"] for m in got["messages"]] == ["hi"], "the holder still reads its mail"
         tg.cancel_scope.cancel()
@@ -119,6 +120,12 @@ def test_a_holder_without_a_record_keeps_the_lane_unknown(tmp_path, monkeypatch)
     monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
     for pid, key in ((1, "k1"), (2, "k2")):
         delivery.record_routes(pid, key, last_route=delivery.NOT_TOP_LEVEL)
+    now = mailbox._default_now()
+    for pid in (4, 5):  # receipted: pushed, nothing owed
+        delivery.record(pid, f"k{pid}", declared_at=now, last_push_at=now, db_path=None)
     holder = lambda pid: {"pid": pid, "process_key": f"k{pid}"}  # noqa: E731
     assert server._delivery_of([holder(1), holder(2)]) == "not_top_level"
     assert server._delivery_of([holder(1), holder(3)]) == "unknown"
+    assert server._delivery_of([holder(4), holder(5)]) == "receipted"
+    assert server._delivery_of([holder(4), holder(3)]) == "unknown", "a silent holder is not receipted"
+    assert server._delivery_of([holder(4), holder(1)]) == "unknown", "disagreeing holders"

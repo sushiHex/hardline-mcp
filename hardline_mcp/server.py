@@ -917,10 +917,10 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
 
 NOT_TOP_LEVEL_NOTE = (
     "This lane's holder has been called only from a Codex thread that is not "
-    "top-level (a subagent's, as Codex names it), so its automatic wake is not "
-    "armed and nothing will announce this message. It is stored, and the holder "
-    "can still read it with inbox; a subagent's server normally exits with the "
-    "subagent, leaving the lane unheld. To reach the session that started it, "
+    "top-level (a subagent's, as Codex names it), so its automatic wake is "
+    "currently unarmed. The message is stored, and the holder can still read it "
+    "with inbox. A subagent's server may exit with the subagent, leaving the "
+    "message on a lane nobody holds. To reach the session that started it, "
     "address that session's lane or a name it claimed."
 )
 
