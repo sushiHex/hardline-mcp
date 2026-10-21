@@ -133,6 +133,13 @@ Restored names form a run below the explicit claims, in durable order. The addre
 
 **What it does not do.** Nothing happens before the session's first hardline call, so an idle resumed thread is not woken. Restored names reach `inbox` after the next eligible poll, not in the pinning call. Two live servers on one thread (a TUI and the desktop app) share the list, and the first eligible one wins a name. A grant by an older revision is invisible to the table. Existing names have no binding until they are claimed once on this revision. Consumption stays process-wide.
 
+**When a Codex server is replaced (researched 2026-10-20 against `rust-v0.163.0`; not all observed).** A Codex server lives as long as its loaded thread, not its client:
+- Resuming a loaded thread rejoins it, with the same MCP servers (`thread_processor.rs`, `resume_running_thread`). The exception: a resume with different settings while no other client is attached and the thread is idle cold-resumes it.
+- A thread is unloaded once no client is attached and it is idle for `thread_unload_delay_secs` (default 1800 s, `thread_lifecycle.rs`). Its servers' job object is then closed, killing the hardline tree.
+- The managed daemon's updater restarts the daemon at each Codex release, ending every server. Observed on 2026-10-15, after which the top-level threads got new servers within 15 s. `codex app-server daemon restart` does the same by hand.
+
+So quitting and resuming a Codex session keeps its old hardline server, and its old code. Seen 2026-10-20: two top-level servers had run 2026-10-15's code for five days through daily use. A restored name returns when the server is replaced this way.
+
 **Design record.** The design took nine review rounds. Two first designs were rejected: restoring from `lane_hints`, which are lossy advice; and a writer-scoped table, where a stale binding survived a takeover. Seven Fable/Astra rounds followed, recorded in `research/codex-names/`. What changed shape along the way:
 - per-request attribution, not the wake's pin;
 - no stored intent to cancel;

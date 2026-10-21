@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/report.py",
+  "before": "            \"host_pids\": sorted({r[\"host_pid\"] for r in rows if r[\"host_pid\"] is not None}),\n",
+  "after": "",
+  "tests": [
+    "tests/test_report.py::test_revisions_are_counted_per_running_process"
+  ]
+}

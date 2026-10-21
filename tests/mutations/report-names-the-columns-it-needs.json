@@ -1,6 +1,6 @@
 {
   "file": "hardline_mcp/report.py",
-  "before": "    \"sessions\": \"SELECT pid, process_key, lane, host_pid, host_key FROM agent_sessions ORDER BY pid, seq\",\n",
+  "before": "    \"sessions\": \"SELECT pid, process_key, lane, host_pid, host_key, cwd, started_at\"\n    \" FROM agent_sessions ORDER BY pid, seq\",\n",
   "after": "    \"sessions\": \"SELECT * FROM agent_sessions ORDER BY pid, seq\",\n",
   "tests": [
     "tests/test_report.py::test_a_registry_missing_a_column_reads_unavailable_even_when_empty"

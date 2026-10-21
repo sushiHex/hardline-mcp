@@ -164,9 +164,9 @@ each of which would otherwise read as a finished review. The preflight and
 the call are separate processes, so the check is of the configuration as it
 stood half a second earlier. Under the elevated, unelevated and `inherit`
 choices there is no preflight, so nothing checks that the excludes hold.
-`tests/test_live_sandbox.py` checks all of this against Codex 0.162.1 with
-dummy secrets only. It runs in CI on Linux and macOS, and on a Windows 11
-host, since GitHub's Windows runners have no native MXC. Real `ask_codex`
+`tests/test_live_sandbox.py` checks all of this with dummy secrets only. It
+runs in CI on Linux and macOS against Codex 0.163.0, and was run on a Windows
+11 host against 0.162.1, since GitHub's Windows runners have no native MXC. Real `ask_codex`
 runs, read-only and `write=True`, were also checked on that host, including
 one whose command saw an ordinary variable but not a dummy `*_TOKEN`.
 

@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/report.py",
+  "before": "            \"cwds\": sorted({r[\"cwd\"] for r in rows if r[\"cwd\"]}),\n",
+  "after": "",
+  "tests": [
+    "tests/test_report.py::test_revisions_are_counted_per_running_process"
+  ]
+}

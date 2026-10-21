@@ -38,8 +38,9 @@ def test_revisions_are_counted_per_running_process(tmp_path, child):
     raw = sqlite3.connect(db)
     with raw:  # a dead registrant, and a stale revision for a reused pid
         raw.execute(
-            "INSERT INTO agent_sessions (pid, lane, agent, process_key, started_at,"
-            " last_seen, claimed_at) VALUES (2147483646, 'codex:gone', 'codex', 'k', 't', 't', 't')"
+            "INSERT INTO agent_sessions (pid, lane, agent, process_key, host_pid, cwd, started_at,"
+            " last_seen, claimed_at) VALUES (2147483646, 'codex:gone', 'codex', 'k', 7, 'C:/bin',"
+            " '2020-01-01T00:00:00Z', 't', 't')"
         )
         raw.execute("INSERT INTO process_revisions VALUES (?, 'earlier', 'zzz')", (pid,))
     raw.close()
@@ -49,6 +50,11 @@ def test_revisions_are_counted_per_running_process(tmp_path, child):
     assert got["states"] == {procid.ALIVE: 2, procid.DEAD: 1}
     mine = next(p for p in got["registered"] if (p["pid"], p["process_key"]) == me)
     assert mine["lanes"] == ["codex:a", "codex:b"]
+    # Where a dead one came from survives in the report, as its row will not.
+    (gone,) = [p for p in got["registered"] if p["pid"] == 2147483646]
+    assert (gone.get("host_pids"), gone.get("cwds"), gone.get("started_at")) == (
+        [7], ["C:/bin"], "2020-01-01T00:00:00Z"
+    )
 
 
 def test_job_notices_are_classified_by_who_acked_them(tmp_path, monkeypatch):
@@ -299,7 +305,9 @@ def test_unread_mail_is_counted_by_recipient_and_held_or_not(tmp_path, monkeypat
                 ("codex:held", "2020-01-08T00:00:00Z", None),
                 ("codex:held", "2020-01-07T00:00:00Z", None),
                 ("codex:held", "2020-01-01T00:00:00Z", "2020-01-03T00:00:00Z"),  # acked
-                ("claude:orphan", "2020-01-05T00:00:00Z", None),
+                ("claude:orphan", "2020-01-02T00:00:00Z", None),
+                ("claude:orphan", "2020-01-07T00:00:00Z", None),
+                ("claude:recent", "2020-01-06T12:00:00Z", None),
                 ("codex:dead", "2020-01-06T00:00:00Z", None),
                 ("codex:twice", "2020-01-09T00:00:00Z", None),
                 ("hermes", "2020-01-04T00:00:00Z", None),  # bare
@@ -312,7 +320,7 @@ def test_unread_mail_is_counted_by_recipient_and_held_or_not(tmp_path, monkeypat
     mail = got["unread_mail"]
     assert "SECRET-BODY" not in str(got)
     totals = ("total_unread", "on_registered_lanes", "on_other_lanes", "on_bare_names")
-    assert tuple(mail[k] for k in totals) == (6, 3, 2, 1)
+    assert tuple(mail[k] for k in totals) == (8, 3, 4, 1)
     by_name = {e["recipient"]: e for e in mail["lanes"]}
     held = by_name["codex:held"]
     assert (held["unread"], held["oldest"], held["holder"]) == (2, "2020-01-07T00:00:00Z", "registered")
@@ -320,11 +328,13 @@ def test_unread_mail_is_counted_by_recipient_and_held_or_not(tmp_path, monkeypat
     holders = {name: e["holder"] for name, e in by_name.items()}
     assert holders == {
         "codex:held": "registered", "codex:twice": "contested",
-        "claude:orphan": "none", "codex:dead": "dead",
+        "claude:orphan": "none", "claude:recent": "none", "codex:dead": "dead",
     }
-    # Live registrations first though newest: a holder not reading is the one to act on.
+    assert by_name["claude:orphan"]["newest"] == "2020-01-07T00:00:00Z"
+    # Live registrations first, oldest first: a holder not reading is the one to
+    # act on. Then newest arrival first, not oldest: fresh strandings lead.
     assert [e["recipient"] for e in mail["lanes"]] == [
-        "codex:held", "codex:twice", "claude:orphan", "codex:dead",
+        "codex:held", "codex:twice", "claude:orphan", "claude:recent", "codex:dead",
     ]
     (bare,) = mail["bare"]
     assert (bare["recipient"], bare["unread"], bare["oldest"]) == ("hermes", 1, "2020-01-04T00:00:00Z")

@@ -337,8 +337,9 @@ label can carry any suffix. `lane_hints` is deliberately not consulted: it holds
 only the current holder, and a conversation that took a lane over writes its own
 hint, so it would make the case under study look benign. It also
 lists the revision each registered server runs (`process_revisions`, keyed by
-lists the revision each registered server runs (`process_revisions`, keyed by
-identity so a reused pid cannot inherit one), beside any live writer of the
+identity so a reused pid cannot inherit one), with each one's host pids,
+working directories and start (kept in a saved report after the row is
+pruned), beside any live writer of the
 legacy `sessions` table. Under `tokenless` it counts records that still act on
 a pid without a creation token, judged as their consumers judge them:
 registered processes whose server or host has none and is not shown dead,
@@ -354,15 +355,17 @@ which initializes the store it is asked about; it also reproduced a crash on a
 notice body with a non-string job id and the held reader, both fixed.
 
 Under `unread_mail` it counts unread messages per recipient (count, oldest
-unread and its age in days at the report's `generated_at`; never a body, and
-nothing is acked or deleted). A lane's `holder` is what `agent_sessions` says:
+unread and its age in days at the report's `generated_at`, newest arrival;
+never a body, and nothing is acked or deleted). A lane's `holder` is what `agent_sessions` says:
 `registered` (one row not shown dead; UNKNOWN counts, as for a claim),
 `contested` (several, so `sessions.granted` grants none), `dead`, or `none`.
 That is a registration, not a consumer known to be reading, so an
 unregistered process is invisible here. Bare names have one shared copy and
-are listed apart, without a holder. Lanes with a live registration sort first
-(a holder not reading is the case to act on), then oldest unread first, and
-each list shows `SAMPLE` entries; the message totals (`on_registered_lanes`,
+are listed apart, without a holder. Lanes with a live registration sort first,
+oldest unread first (a holder not reading is the case to act on). The rest
+follow newest arrival first: sorted oldest first, the 2026-10-20 run showed
+only months-old backlog and hid that week's strandings in `lanes_not_shown`.
+Each list shows `SAMPLE` entries; the message totals (`on_registered_lanes`,
 `on_other_lanes`, `on_bare_names`) are whole. It needs `agent_sessions`, else
 `unavailable`.
 

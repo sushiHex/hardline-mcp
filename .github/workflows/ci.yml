@@ -93,7 +93,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install Codex
-        run: npm install -g @openai/codex@0.162.1
+        run: npm install -g @openai/codex@0.163.0
       - name: Let bubblewrap create user namespaces
         # Ubuntu's AppArmor restricts unprivileged user namespaces, which
         # bubblewrap needs; Codex's Linux sandbox does not start without them.

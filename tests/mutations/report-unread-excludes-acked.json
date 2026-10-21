@@ -1,7 +1,7 @@
 {
   "file": "hardline_mcp/report.py",
-  "before": "    \" WHERE acked_at IS NULL GROUP BY recipient\",\n",
-  "after": "    \" GROUP BY recipient\",\n",
+  "before": "    \" MAX(created_at) AS newest FROM messages WHERE acked_at IS NULL GROUP BY recipient\",\n",
+  "after": "    \" MAX(created_at) AS newest FROM messages GROUP BY recipient\",\n",
   "tests": [
     "tests/test_report.py::test_unread_mail_is_counted_by_recipient_and_held_or_not"
   ]

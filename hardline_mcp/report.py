@@ -76,7 +76,8 @@ NOTES = [
 # Each section's rows, read in the snapshot. None marks a table current code
 # creates on use and this store never had.
 _READS = {
-    "sessions": "SELECT pid, process_key, lane, host_pid, host_key FROM agent_sessions ORDER BY pid, seq",
+    "sessions": "SELECT pid, process_key, lane, host_pid, host_key, cwd, started_at"
+    " FROM agent_sessions ORDER BY pid, seq",
     "revisions": "SELECT pid, process_key, revision FROM process_revisions",
     "legacy": "SELECT DISTINCT pid, process_key FROM sessions",
     "jobs": "SELECT job_id, agent, requester, state, owner_pid, owner_key, child_pid, child_key FROM jobs",
@@ -88,8 +89,8 @@ _READS = {
     " AND NOT EXISTS (SELECT 1 FROM message_acks a WHERE a.message_id = m.id)",
     # Counts only: no body, sender or id leaves the store. MIN works on text
     # because every writer stores UTC ISO-8601 (mailbox._iso of a UTC clock).
-    "unread": "SELECT recipient, COUNT(*) AS n, MIN(created_at) AS oldest FROM messages"
-    " WHERE acked_at IS NULL GROUP BY recipient",
+    "unread": "SELECT recipient, COUNT(*) AS n, MIN(created_at) AS oldest,"
+    " MAX(created_at) AS newest FROM messages WHERE acked_at IS NULL GROUP BY recipient",
     # Every row: a wake writes one when it pins its thread, before any notice.
     "routes": "SELECT pid, process_key, last_route, last_route_reason, steered, queued, ambiguous"
     " FROM codex_routes ORDER BY pid",
@@ -166,7 +167,9 @@ def _section(build: Callable, read: dict, probe: Callable, *names: str) -> dict:
 
 
 def _processes(sessions: list, revisions: Optional[list], *, probe: Callable) -> dict:
-    """Registered server processes, one entry per identity."""
+    """Registered server processes, one entry per identity. Where each came
+    from too - its host, working directory and start - since a row is pruned
+    once its process is gone, and a saved report is then all that is left."""
     by_identity: dict[tuple, list] = {}
     for row in sessions:
         by_identity.setdefault((row["pid"], row["process_key"]), []).append(row)
@@ -179,6 +182,9 @@ def _processes(sessions: list, revisions: Optional[list], *, probe: Callable) ->
             "host_states": sorted({host_state(r, probe) for r in rows}),
             "revision": recorded.get((pid, key)),
             "lanes": [r["lane"] for r in rows],
+            "host_pids": sorted({r["host_pid"] for r in rows if r["host_pid"] is not None}),
+            "cwds": sorted({r["cwd"] for r in rows if r["cwd"]}),
+            "started_at": min((r["started_at"] for r in rows if r["started_at"]), default=None),
         }
         for (pid, key), rows in by_identity.items()
     ]
@@ -449,8 +455,9 @@ def _unread_mail(unread: list, sessions: list, *, now: datetime, probe: Callable
     reading: a process that never registers is invisible. A bare name has no
     lane to hold - one shared copy, consumable by any session - so it is listed
     apart. Lanes with a live registration sort first, being the case to act
-    on, then oldest unread first; each list shows SAMPLE entries, the totals
-    are whole."""
+    on, oldest unread first: the longest wait. The rest follow newest arrival
+    first, so mail stranded this week is not crowded out by a months-old
+    backlog. Each list shows SAMPLE entries; the totals are whole."""
     live: dict[str, int] = {}  # lane -> rows not shown dead
     for row in sessions:
         live[row["lane"]] = live.get(row["lane"], 0) + bool(_is_live(row, probe))
@@ -461,6 +468,7 @@ def _unread_mail(unread: list, sessions: list, *, now: datetime, probe: Callable
             "unread": row["n"],
             "oldest": row["oldest"],
             "oldest_age_days": _age_days(row["oldest"], now),
+            "newest": row["newest"],
         }
 
     lanes, bare = [], []
@@ -474,7 +482,12 @@ def _unread_mail(unread: list, sessions: list, *, now: datetime, probe: Callable
         )
         lanes.append({**entry(row), "holder": holder})
     registered = ("registered", "contested")
-    lanes.sort(key=lambda e: e["holder"] not in registered)  # stable: oldest first within
+    held = [e for e in lanes if e["holder"] in registered]  # stable: oldest first
+    unheld = sorted(
+        (e for e in lanes if e["holder"] not in registered),
+        key=lambda e: (e["newest"] or "", e["recipient"]), reverse=True,
+    )
+    lanes = held + unheld
     on_registered = sum(e["unread"] for e in lanes if e["holder"] in registered)
     other = sum(e["unread"] for e in lanes) - on_registered
     return {
