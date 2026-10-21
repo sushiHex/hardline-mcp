@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "        \"This notice is not a new task: if you were working on something, carry \"\n        \"on with it after reading, and do not end your turn because of this notice.\"\n",
+  "after": "",
+  "tests": [
+    "tests/test_codex_queue.py::test_the_notice_is_exactly_this_text"
+  ]
+}
