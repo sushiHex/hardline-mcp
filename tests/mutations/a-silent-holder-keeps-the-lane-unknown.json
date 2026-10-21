@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "    return states.pop() if len(states) == 1 and None not in states else \"unknown\"\n",
+  "after": "    states.discard(None)\n    return states.pop() if len(states) == 1 else \"unknown\"\n",
+  "tests": [
+    "tests/test_subagent_lanes.py::test_a_holder_without_a_record_keeps_the_lane_unknown"
+  ]
+}

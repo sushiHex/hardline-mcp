@@ -1,7 +1,7 @@
 {
   "file": "hardline_mcp/report.py",
-  "before": "            else \"never_announced\" if (pid, key) in not_top else \"unwatched\"",
-  "after": "            else \"never_announced\" if (pid, key) in not_top else \"unannounced\"",
+  "before": "            else \"not_top_level\" if (pid, key) in not_top else \"unwatched\"",
+  "after": "            else \"not_top_level\" if (pid, key) in not_top else \"unannounced\"",
   "tests": [
     "tests/test_report.py::test_mail_no_wake_got_read_is_listed_four_ways"
   ]

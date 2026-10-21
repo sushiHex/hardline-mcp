@@ -1,8 +1,0 @@
-{
-  "file": "hardline_mcp/delivery.py",
-  "before": "    wanted = {(pid, key) for pid, key in instances if key} - states.keys()\n",
-  "after": "    wanted = {(pid, key) for pid, key in instances if key}\n",
-  "tests": [
-    "tests/test_subagent_lanes.py::test_facts_outrank_a_route_marker"
-  ]
-}

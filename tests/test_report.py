@@ -359,6 +359,7 @@ def test_mail_no_wake_got_read_is_listed_four_ways(tmp_path, monkeypatch):
         raw.executemany(
             "INSERT INTO codex_routes (pid, process_key, last_route) VALUES (?, ?, ?)",
             [(8, "k8", "not_top_level"),
+             (4, "k4", "not_top_level"),    # push facts outrank the mark
              (5, "k5", "steer"),            # a route row, not the marker
              (6, "old", "not_top_level")],  # an earlier process on pid 6
         )
@@ -392,7 +393,7 @@ def test_mail_no_wake_got_read_is_listed_four_ways(tmp_path, monkeypatch):
     listed = lambda kind: [(e["pid"], e["unread"]) for e in got.get(kind, [])]  # noqa: E731
     assert listed("stalled") == [(1, {"codex:a": 2})], got
     assert listed("unannounced") == [(4, {"codex:c": 1}), (7, {"codex:d": 1})], got
-    assert listed("never_announced") == [(8, {"codex:h": 1})], got
+    assert listed("not_top_level") == [(8, {"codex:h": 1})], got
     assert listed("unwatched") == [(5, {"codex:e": 1}), (6, {"codex:f": 1})], got
     assert got["unannounced"][0]["since"] == ago(20)
     assert (got.get("servers_with_facts"), got.get("servers_without_facts")) == (5, 3), got

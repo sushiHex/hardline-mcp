@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "            if not self.facts and self.routes.get(\"last_route\") == delivery.NOT_TOP_LEVEL:\n",
+  "after": "            if False:\n",
+  "tests": [
+    "tests/test_subagent_lanes.py::test_a_sender_is_told_a_subagents_wake_is_not_armed"
+  ]
+}

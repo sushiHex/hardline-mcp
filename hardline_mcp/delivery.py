@@ -18,9 +18,10 @@ state, the way liveness is derived rather than stored:
 No row means unknown - a non-Claude client or older code - never "no push".
 Rows are only read for live sessions, so a dead process's row is inert.
 
-One more state comes from a Codex route row instead: ``never_announced``, a
-server whose thread is not top-level (a subagent's), which never pins and so
-never announces its lanes' mail (#109).
+One more state comes from a Codex route row instead: ``not_top_level``, a
+server called so far only from a thread Codex names as not top-level (a
+subagent's). Its wake is not armed, so nothing announces its lanes' mail,
+though the holder can still read it (#109).
 """
 
 from __future__ import annotations
@@ -36,10 +37,9 @@ from .procid import DEAD, instance_state
 
 GRACE = timedelta(minutes=10)
 ROUTE_KEYS = ("last_route", "last_route_reason", "steered", "queued", "ambiguous")
-# A route row's last_route for a Codex server whose calls come from a thread
-# that is not top-level: it never pins, so it never announces.
+# A route row's last_route, and the delivery state it implies, for a Codex
+# server called only from threads Codex names as not top-level: unarmed.
 NOT_TOP_LEVEL = "not_top_level"
-NEVER_ANNOUNCED = "never_announced"
 
 
 def _ensure(conn: sqlite3.Connection) -> None:
@@ -122,11 +122,28 @@ def derive(row: Optional[dict], now: datetime) -> Optional[str]:
     return "awaiting_receipt" if now - oldest < GRACE else "unreceipted"
 
 
-def _rows(sql: str, args: tuple, db_path: Optional[Path]) -> list[sqlite3.Row]:
+def _read(
+    instances: Iterable[tuple[int, Optional[str]]], db_path: Optional[Path]
+) -> tuple[dict[tuple[int, str], dict], set[tuple[int, str]]]:
+    """``(push fact rows, identities marked not_top_level)`` for the given
+    instances, read in one snapshot so a pin's two writes are never seen torn."""
+    wanted = {(pid, key) for pid, key in instances if key}
+    if not wanted:
+        return {}, set()
+    with closing(_connect(_resolve_db(db_path))) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN")
+        pushes = _select(conn, "SELECT * FROM push_delivery")
+        routes = _select(conn, "SELECT pid, process_key FROM codex_routes WHERE last_route = ?", NOT_TOP_LEVEL)
+        conn.rollback()
+    facts = {(r["pid"], r["process_key"]): dict(r) for r in pushes}
+    marked = {(r["pid"], r["process_key"]) for r in routes}
+    return {i: f for i, f in facts.items() if i in wanted}, marked & wanted
+
+
+def _select(conn: sqlite3.Connection, sql: str, *args) -> list[sqlite3.Row]:
     try:
-        with closing(_connect(_resolve_db(db_path))) as conn:
-            conn.row_factory = sqlite3.Row
-            return conn.execute(sql, args).fetchall()
+        return conn.execute(sql, args).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" not in str(exc):
             raise
@@ -137,26 +154,13 @@ def facts_for(
     instances: Iterable[tuple[int, Optional[str]]], *, db_path: Optional[Path] = None
 ) -> dict[tuple[int, str], dict]:
     """Fact rows for the given (pid, process_key) instances that have one."""
-    wanted = {(pid, key) for pid, key in instances if key}
-    if not wanted:
-        return {}
-    rows = _rows("SELECT * FROM push_delivery", (), db_path)
-    return {
-        (r["pid"], r["process_key"]): dict(r)
-        for r in rows
-        if (r["pid"], r["process_key"]) in wanted
-    }
+    return _read(instances, db_path)[0]
 
 
 def states_for(
     instances: Iterable[tuple[int, Optional[str]]], now: datetime, *, db_path: Optional[Path] = None
 ) -> dict[tuple[int, str], str]:
     """The delivery state of each instance that records one: derived from its
-    facts, else ``never_announced`` for a Codex server that is not top-level."""
-    instances = list(instances)
-    states = {i: derive(f, now) for i, f in facts_for(instances, db_path=db_path).items()}
-    wanted = {(pid, key) for pid, key in instances if key} - states.keys()
-    if wanted:
-        rows = _rows("SELECT pid, process_key FROM codex_routes WHERE last_route = ?", (NOT_TOP_LEVEL,), db_path)
-        states.update({tuple(r): NEVER_ANNOUNCED for r in rows if tuple(r) in wanted})
-    return states
+    push facts, else ``not_top_level`` from its route row's mark."""
+    facts, marked = _read(instances, db_path)
+    return {**{i: NOT_TOP_LEVEL for i in marked}, **{i: derive(f, now) for i, f in facts.items()}}

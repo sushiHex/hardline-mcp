@@ -899,8 +899,8 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
         except Exception:  # noqa: BLE001 - never fail a send over reporting
             holders = []
         result["recipient_delivery"] = _delivery_of(holders)
-        if result["recipient_delivery"] == delivery.NEVER_ANNOUNCED:
-            result["recipient_note"] = NEVER_ANNOUNCED_NOTE
+        if result["recipient_delivery"] == delivery.NOT_TOP_LEVEL:
+            result["recipient_note"] = NOT_TOP_LEVEL_NOTE
     if deliver:
         notice = (
             f"[hardline] new message #{result['message_id']} from {sender}. "
@@ -915,11 +915,13 @@ def _send_impl(from_agent: str, to_agent: str, message: str, deliver: bool) -> d
     return result
 
 
-NEVER_ANNOUNCED_NOTE = (
-    "This lane's holder serves a Codex thread that is not top-level (a subagent's), "
-    "so hardline never announces its mail, and the lane ends with that thread. "
-    "The message is stored; to reach the session, address its top-level thread's "
-    "lane or a name it claimed."
+NOT_TOP_LEVEL_NOTE = (
+    "This lane's holder has been called only from a Codex thread that is not "
+    "top-level (a subagent's, as Codex names it), so its automatic wake is not "
+    "armed and nothing will announce this message. It is stored, and the holder "
+    "can still read it with inbox; a subagent's server normally exits with the "
+    "subagent, leaving the lane unheld. To reach the session that started it, "
+    "address that session's lane or a name it claimed."
 )
 
 
@@ -928,7 +930,8 @@ def _delivery_of(holders: list[dict]) -> str:
 
     Unknown, never "none": a holder with no record may be older code, a client
     without channel support, or a session nobody pushes to - absence of a
-    record is not evidence of anything.
+    record is not evidence of anything. So one state only when every holder
+    records it: a holder without a record keeps the answer unknown.
     """
     try:
         recorded = delivery.states_for(
@@ -937,8 +940,7 @@ def _delivery_of(holders: list[dict]) -> str:
     except Exception:  # noqa: BLE001 - reporting must never fail a call
         return "unknown"
     states = {recorded.get((h["pid"], h["process_key"])) for h in holders}
-    states.discard(None)
-    return states.pop() if len(states) == 1 else "unknown"
+    return states.pop() if len(states) == 1 and None not in states else "unknown"
 
 
 @mcp.tool()

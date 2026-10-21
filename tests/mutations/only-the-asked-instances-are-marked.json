@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/delivery.py",
+  "before": "marked & wanted\n",
+  "after": "marked\n",
+  "tests": [
+    "tests/test_subagent_lanes.py::test_push_facts_outrank_the_mark"
+  ]
+}

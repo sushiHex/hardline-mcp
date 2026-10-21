@@ -267,9 +267,10 @@ read. Four lists:
 - **`stalled`:** a notice has owed its receipt that long.
 - **`unannounced`:** nothing is owed, yet mail arrived after the last notice,
   or no notice was ever sent. A free wake announces new mail within a poll.
-- **`never_announced`:** a server marked `not_top_level`, a subagent's. It
-  never pins a thread, so its lanes' mail is never announced, and it is
-  stranded when the subagent ends.
+- **`not_top_level`:** a server marked `not_top_level`, called only from a
+  thread Codex names as not top-level (a subagent's). Its wake is not armed,
+  so nothing announces its lanes' mail. The subagent can still read it, but
+  what it leaves is stranded when its server exits with it.
 - **`unwatched`:** the server records no wake facts at all, so neither can be
   shown. Older code, or a Codex server never called: a subagent's server that
   never calls hardline cannot be told from a session that has not called yet.
@@ -283,9 +284,11 @@ last receipted push, oldest unreceipted push. So `list_agents().you.delivery`,
 `live_sessions[].delivery` and `send`'s `recipient_delivery` report Codex
 sessions too.
 - **`declared`** means armed (address pinned), not working.
-- **`never_announced`** is a server marked `not_top_level`. `send` adds a
-  `recipient_note` saying that mail there is never announced and ends with
-  the subagent. Push facts outrank the mark.
+- **`not_top_level`** is a server so marked. `send` adds a `recipient_note`:
+  the wake is not armed, so nothing will announce the message, but the
+  holder can still read it. Push facts outrank the mark. Every holder must
+  agree: a holder with no record keeps the lane `unknown`. Only a named
+  `thread_source` marks a server; a missing or malformed one is no evidence.
 - **A receipt proves only its own notice.** There's no cumulative coverage.
 - **Routing.** `inbox(receipt=...)` offers the nonce to both transports. Only
   the one that issued it accepts.

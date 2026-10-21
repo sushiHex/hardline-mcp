@@ -66,8 +66,9 @@ NOTES = [
     "stalled_wakes: live servers with mail waiting past the delivery grace: 'stalled', a "
     "notice's receipt overdue (the notice may have failed, or the session is busy or ignoring "
     "it); 'unannounced', nothing owed yet mail newer than the last notice (the wake is not "
-    "announcing); 'never_announced', a Codex server whose thread is not top-level (a "
-    "subagent's), which announces nothing; 'unwatched', no wake facts at all (older code, a "
+    "announcing); 'not_top_level', a Codex server called only from a thread Codex names as "
+    "not top-level (a subagent's), whose wake is not armed; 'unwatched', no wake facts at all "
+    "(older code, a "
     "Codex server that never pinned a thread and has not been called, or no wake). Evidence, "
     "not proof; since is when it was owed, or the oldest such arrival",
 ]
@@ -357,8 +358,8 @@ def _stalled_wakes(
       ``delivery.derive`` reads ``unreceipted``) while the lanes hold mail;
     - ``unannounced``: nothing is owed, yet mail arrived after the last notice,
       or none was ever sent - a free wake announces new mail within a poll;
-    - ``never_announced``: a Codex server whose thread is not top-level (a
-      subagent's), which by design announces nothing (#109);
+    - ``not_top_level``: a Codex server called only from a thread Codex names
+      as not top-level (a subagent's), whose wake is not armed (#109);
     - ``unwatched``: no wake facts at all, so no notice can be shown either way.
 
     Joined on pid and creation token, against every unread message, not the
@@ -378,7 +379,7 @@ def _stalled_wakes(
             lanes.setdefault((s["pid"], s["process_key"]), []).append(s["lane"])
     facts = {(p["pid"], p["process_key"]): p for p in pushes or ()}
     not_top = {(r["pid"], r["process_key"]) for r in routes or () if r["last_route"] == NOT_TOP_LEVEL}
-    found: dict[str, list] = {"stalled": [], "unannounced": [], "never_announced": [], "unwatched": []}
+    found: dict[str, list] = {"stalled": [], "unannounced": [], "not_top_level": [], "unwatched": []}
     for (pid, key), held in lanes.items():
         p = facts.get((pid, key))
         owed = _parse(p["oldest_unreceipted_at"]) if p else None
@@ -387,7 +388,7 @@ def _stalled_wakes(
             continue  # a notice still within its grace
         kind = (
             "stalled" if owed else "unannounced" if p
-            else "never_announced" if (pid, key) in not_top else "unwatched"
+            else "not_top_level" if (pid, key) in not_top else "unwatched"
         )
         # Stalled, the whole backlog waits on the receipt; otherwise, mail past
         # the grace that arrived after the last notice could have named it.

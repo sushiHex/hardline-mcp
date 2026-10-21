@@ -155,10 +155,12 @@ mail was, and the note says so, so the empty answer is not taken for lost
 mail.
 A lane-qualified `send` reports
 `recipient_delivery`: `receipted`, `awaiting_receipt`, `unreceipted`,
-`declared`, `never_announced`, or `unknown`. `unknown` covers older servers and
-clients without push, so it never means "not delivered". `never_announced` is
-a Codex subagent's server, which never announces mail, and `recipient_note`
-says so: the message waits on a lane that ends with the subagent.
+`declared`, `not_top_level`, or `unknown`. `unknown` covers older servers and
+clients without push, and any lane where one holder records nothing, so it
+never means "not delivered". `not_top_level` is a Codex subagent's server,
+whose wake is not armed; `recipient_note` says so. The holder can still read
+the message, but nothing announces it, and the lane is left unheld when the
+subagent's server exits.
 
 If a consuming response is lost, recover through `history`, which includes
 acknowledged messages and never consumes them. It returns newest first; page

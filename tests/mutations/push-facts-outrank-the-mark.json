@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/delivery.py",
+  "before": "    return {**{i: NOT_TOP_LEVEL for i in marked}, **{i: derive(f, now) for i, f in facts.items()}}\n",
+  "after": "    return {**{i: derive(f, now) for i, f in facts.items()}, **{i: NOT_TOP_LEVEL for i in marked}}\n",
+  "tests": [
+    "tests/test_subagent_lanes.py::test_push_facts_outrank_the_mark"
+  ]
+}

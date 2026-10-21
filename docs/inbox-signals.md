@@ -90,7 +90,7 @@ notice exactly as if you had typed it.
   identifies it. A normal Codex session is one; a subagent, or a thread an
   app-server client started without `threadSource`, is not. Until then, nothing
   can be queued. A subagent's server that calls hardline says so: senders see
-  `recipient_delivery: never_announced`.
+  `recipient_delivery: not_top_level`.
 - **Coalescing.** One notice is outstanding at a time; only its receipt
   releases it. Only mail not yet announced triggers a notice, so deferred mail
   isn't re-announced. If a notice's receipt never comes back, waking pauses
