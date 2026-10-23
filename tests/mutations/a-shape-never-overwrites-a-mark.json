@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "        if self.routes.get(\"last_route\") is not None:\n            return  # marked already\n",
+  "after": "",
+  "tests": [
+    "tests/test_subagent_lanes.py::test_a_mark_is_not_overwritten_by_a_later_shape"
+  ]
+}

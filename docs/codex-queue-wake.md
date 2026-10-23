@@ -59,7 +59,12 @@ after it, for the life of the connection, and the conflict is logged; the
 address never migrates. A notice already reserved when the conflict is seen is
 still queued to the pinned thread. Until the pin
 there is nothing to wake: absence is not evidence. A caller that omits
-`thread_source` (some app-server clients may) is never armed.
+`thread_source` is never armed. Codex Desktop is one: `thread_source` is an
+optional, client-supplied field of `thread/start`, which Desktop leaves out
+and Codex never defaults (#114). Such a server writes a route row with no
+`last_route`, whose reason, `unpinned: ...`, names the keys its call carried,
+their kinds, and which identifiers equal `threadId`, never a value. That is
+the evidence for deciding what marks a Desktop thread as top-level.
 
 The pinned thread is also what this session's claimed names are bound to, and
 what its next server restores them for: the first poll after the pin runs the
@@ -272,7 +277,9 @@ hold a `codex:` lane and wrote no row (older code, a server not yet called, a
 failed write, or a client that is not Codex at all: a lane prefix is not a
 client identity). Their notices are in no total. A server whose first call
 comes from a thread that is not top-level writes a row whose `last_route` is
-`not_top_level`, with the `thread_source` as its reason (#109). A row's zeros mean no
+`not_top_level`, with the `thread_source` as its reason (#109). One whose
+first call pinned nothing for want of a source writes a row with no
+`last_route` and an `unpinned: ...` reason (#114). A row's zeros mean no
 counted route outcome, not no notice: a failed queue, possibly after
 committing, is recorded as `failed` but counted nowhere.
 

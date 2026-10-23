@@ -1,7 +1,7 @@
 {
   "file": "hardline_mcp/codex_queue.py",
-  "before": "                if source != \"user\":\n                    # Only a top-level thread is ever the address.",
-  "after": "                if False:\n                    # Only a top-level thread is ever the address.",
+  "before": "            if self.address is None and (parsed is None or parsed[1].get(\"thread_source\") != \"user\"):\n",
+  "after": "            if self.address is None and parsed is None:\n",
   "tests": [
     "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[subagent]",
     "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[no-source]",

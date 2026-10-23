@@ -54,9 +54,10 @@ NOTES = [
     "codex_routes: facts each Codex wake wrote about itself; 'ambiguous' is a steer that may or may "
     "not have landed, counted apart from steered; a dead process's row stays until pruned",
     "codex_lane_servers_without_row: registered processes not shown dead holding a codex: lane "
-    "with no route row - older code, a wake not yet called (current code records a subagent's "
-    "server as last_route 'not_top_level' at its first call), a failed write, or not a Codex "
-    "client at all; their notices are in no total. A "
+    "with no route row - older code, a wake not yet called (current code writes a row at the "
+    "first call: last_route 'not_top_level' for a subagent's server, or a last_route_reason "
+    "'unpinned: ...' naming the keys of a call that pinned nothing), a failed write, or not a "
+    "Codex client at all; their notices are in no total. A "
     "row's zeros mean no counted route outcome, not no notice: a failed queue is in no count "
     "(current code records it as last_route 'failed'; older code recorded nothing)",
     "unread_mail: counts only, nothing is acked or deleted; a registered holder is a session row "
@@ -91,7 +92,8 @@ _READS = {
     # because every writer stores UTC ISO-8601 (mailbox._iso of a UTC clock).
     "unread": "SELECT recipient, COUNT(*) AS n, MIN(created_at) AS oldest,"
     " MAX(created_at) AS newest FROM messages WHERE acked_at IS NULL GROUP BY recipient",
-    # Every row: a wake writes one when it pins its thread, before any notice.
+    # Every row: a wake writes one when it pins its thread, before any notice,
+    # or at a first call that pinned nothing, saying why.
     "routes": "SELECT pid, process_key, last_route, last_route_reason, steered, queued, ambiguous"
     " FROM codex_routes ORDER BY pid",
     "pushes": "SELECT pid, process_key, last_push_at, oldest_unreceipted_at FROM push_delivery"

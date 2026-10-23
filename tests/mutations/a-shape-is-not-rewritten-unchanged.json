@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "        if self.routes.get(\"last_route_reason\") != reason:\n",
+  "after": "        if True:\n",
+  "tests": [
+    "tests/test_subagent_lanes.py::test_the_same_shape_again_writes_nothing"
+  ]
+}

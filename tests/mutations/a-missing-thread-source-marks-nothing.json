@@ -1,7 +1,7 @@
 {
   "file": "hardline_mcp/codex_queue.py",
-  "before": "if isinstance(source, str) and source and self.routes",
-  "after": "if self.routes",
+  "before": "        if isinstance(source, str) and source:\n",
+  "after": "        if True:\n",
   "tests": [
     "tests/test_subagent_lanes.py::test_only_a_named_source_marks_the_server[missing]",
     "tests/test_subagent_lanes.py::test_only_a_named_source_marks_the_server[empty]",

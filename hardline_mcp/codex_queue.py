@@ -61,6 +61,41 @@ def _parse(meta) -> Optional[tuple[str, dict]]:
     return thread, turn
 
 
+def _names(d: dict) -> str:
+    names = sorted(str(k)[:40] for k in d)
+    return "[" + ", ".join(names[:16]) + (f", +{len(names) - 16} more" if len(names) > 16 else "") + "]"
+
+
+def shape(meta) -> str:
+    """What a call that pinned nothing carried, for a route row's reason
+    (#114): key names, value kinds, and which identifiers equal ``threadId``,
+    never a value. Evidence for deciding what marks a top-level thread whose
+    client sends no ``thread_source`` (Codex Desktop)."""
+    if not isinstance(meta, dict):
+        return f"_meta {type(meta).__name__}"
+    parts = [f"_meta keys {_names(meta)}"]
+    thread = meta.get("threadId")
+    if _uuid(thread) is None:
+        parts.append("threadId not a UUID")
+    turn = meta.get("x-codex-turn-metadata")
+    if isinstance(turn, dict):
+        parts.append(f"turn keys {_names(turn)}")
+        source = turn.get("thread_source", ...)
+        kind = (
+            "absent" if source is ... else "null" if source is None
+            else "empty" if source == "" else type(source).__name__
+        )
+        parts.append(f"thread_source {kind}")
+    elif turn is not None:
+        parts.append(f"turn metadata {type(turn).__name__}")
+    if isinstance(thread, str) and thread:
+        fields = [*((k, v) for k, v in meta.items() if k != "threadId")]
+        if isinstance(turn, dict):
+            fields += [(f"turn.{k}", v) for k, v in turn.items()]
+        parts.append(f"equal to threadId {_names({k: 0 for k, v in fields if v == thread})}")
+    return "; ".join(parts)
+
+
 def thread_of(meta) -> Optional[str]:
     """The top-level Codex thread a request came from, or None.
 
@@ -213,6 +248,25 @@ class CodexWake(announce.Announcer):
         with self._lock:
             return thread if thread is not None and thread == self.address and not self.stopped else None
 
+    def _unpinned(self, meta, parsed) -> None:
+        """A call that pinned nothing, recorded on the route row. Only a
+        top-level thread is ever the address. One Codex names as another kind
+        marks the server, so a sender learns nothing will announce this lane's
+        mail (#109); a missing or malformed source is no evidence of either,
+        so only the call's shape is kept, for why it pinned nothing (#114).
+        Caller holds ``_lock``."""
+        if self.routes.get("last_route") is not None:
+            return  # marked already
+        source = parsed[1].get("thread_source") if parsed else None
+        if isinstance(source, str) and source:
+            self.routes["last_route"] = delivery.NOT_TOP_LEVEL
+            reason = f"thread_source {source!r}"
+        else:
+            reason = f"unpinned: {shape(meta)}"
+        if self.routes.get("last_route_reason") != reason:
+            self.routes["last_route_reason"] = reason
+            self._routes_dirty = True
+
     def observe(self, params) -> None:
         """One ``tools/call``: pin the thread, or detect a conflicting one.
 
@@ -221,23 +275,16 @@ class CodexWake(announce.Announcer):
         its turn id, the candidate a notice is steered into. Called on the
         event loop: memory only, under the lock.
         """
-        parsed = _parse(params.get("_meta") if isinstance(params, dict) else None)
-        if parsed is None:
-            return
-        thread, turn = parsed
+        meta = params.get("_meta") if isinstance(params, dict) else None
+        parsed = _parse(meta)
         with self._lock:
+            if self.address is None and (parsed is None or parsed[1].get("thread_source") != "user"):
+                self._unpinned(meta, parsed)
+                return
+            if parsed is None:
+                return
+            thread, turn = parsed
             if self.address is None:
-                source = turn.get("thread_source")
-                if source != "user":
-                    # Only a top-level thread is ever the address. One Codex
-                    # names as another kind is recorded, so a sender learns
-                    # nothing will announce this lane's mail (#109); a missing
-                    # or malformed source is no evidence of either.
-                    if isinstance(source, str) and source and self.routes.get("last_route") is None:
-                        self.routes["last_route"] = delivery.NOT_TOP_LEVEL
-                        self.routes["last_route_reason"] = f"thread_source {source!r}"
-                        self._routes_dirty = True
-                    return
                 self.routes = {}  # pinned after all: not what the row said
                 self.address = thread
                 self.declare()

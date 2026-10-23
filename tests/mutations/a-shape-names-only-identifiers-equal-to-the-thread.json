@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "for k, v in fields if v == thread",
+  "after": "for k, v in fields if v",
+  "tests": [
+    "tests/test_subagent_lanes.py::test_an_unpinned_call_records_its_shape_never_a_value"
+  ]
+}

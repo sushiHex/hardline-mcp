@@ -68,12 +68,80 @@ async def test_a_sender_is_told_a_subagents_wake_is_not_armed(lane):
     ids=["named-source", "missing", "empty", "malformed"],
 )
 def test_only_a_named_source_marks_the_server(source, marked):
-    """Absence is not evidence: a missing or malformed source marks nothing."""
+    """Absence is not evidence: a missing or malformed source marks nothing,
+    and only the call's shape is kept (#114)."""
     wake = codex_queue.CodexWake(queue=Queue(), steer=Steer())
     wake.observe({"_meta": meta(thread=OTHER, source=source)})
     assert wake.address is None
-    expected = (delivery.NOT_TOP_LEVEL, f"thread_source {source!r}") if marked else (None, None)
-    assert (wake.routes.get("last_route"), wake.routes.get("last_route_reason")) == expected
+    route, reason = wake.routes.get("last_route"), wake.routes.get("last_route_reason") or ""
+    if marked:
+        assert (route, reason) == (delivery.NOT_TOP_LEVEL, f"thread_source {source!r}")
+    else:
+        assert route is None and reason.startswith("unpinned: "), (route, reason)
+
+
+def test_an_unpinned_call_records_its_shape_never_a_value():
+    """Seen 2026-10-23: a Codex Desktop thread's server never pinned, and
+    nothing said what its calls carried."""
+    wake = codex_queue.CodexWake(queue=Queue(), steer=Steer())
+    m = meta(thread=OTHER, turn="01a11615-8a45-7d40-a4d2-000000000099")
+    del m["x-codex-turn-metadata"]["thread_source"]
+    m["x-codex-turn-metadata"]["workspaces"] = "C:/secret/path"
+    wake.observe({"_meta": m})
+    reason = wake.routes.get("last_route_reason") or ""
+    assert reason == (
+        "unpinned: _meta keys [sessionId, threadId, x-codex-turn-metadata]; "
+        "turn keys [thread_id, turn_id, turn_trigger, workspaces]; thread_source absent; "
+        "equal to threadId [sessionId, turn.thread_id]"
+    ), reason
+    assert OTHER not in reason and "secret" not in reason and "user" not in reason
+    assert wake.routes.get("last_route") is None and wake._routes_dirty
+
+
+@pytest.mark.parametrize(
+    "m, says",
+    [
+        ({"threadId": OTHER}, "_meta keys [threadId]; equal to threadId []"),
+        ({"threadId": "nope", "x-codex-turn-metadata": 5}, "threadId not a UUID; turn metadata int"),
+        ("text", "_meta str"),
+    ],
+    ids=["no-turn-metadata", "malformed", "not-a-dict"],
+)
+def test_a_call_codex_hardly_described_is_recorded_too(m, says):
+    wake = codex_queue.CodexWake(queue=Queue(), steer=Steer())
+    wake.observe({"_meta": m})
+    assert says in (wake.routes.get("last_route_reason") or ""), wake.routes
+
+
+def test_a_mark_is_not_overwritten_by_a_later_shape():
+    wake = codex_queue.CodexWake(queue=Queue(), steer=Steer())
+    wake.observe({"_meta": meta(thread=OTHER, source="subagent")})
+    wake.observe({"_meta": meta(thread=OTHER, source=None)})
+    assert wake.routes == {"last_route": delivery.NOT_TOP_LEVEL, "last_route_reason": "thread_source 'subagent'"}
+
+
+def test_the_same_shape_again_writes_nothing():
+    wake = codex_queue.CodexWake(queue=Queue(), steer=Steer())
+    wake.observe({"_meta": meta(thread=OTHER, source=None)})
+    wake._routes_dirty = False
+    wake.observe({"_meta": meta(thread=OTHER, source=None)})
+    assert not wake._routes_dirty, "an unchanged reason is not rewritten on every call"
+
+
+@pytest.mark.anyio
+async def test_an_unpinned_shape_is_stored_and_a_pin_clears_it(lane):
+    queue = Queue()
+    async with anyio.create_task_group() as tg:
+        wire, wake = await codex(tg, queue)
+        await call(wire, thread=OTHER, source=None)
+        await _until(lambda: (_route_row().get("last_route_reason") or "").startswith("unpinned: "))
+        assert _route_row().get("last_route") is None
+        sent = await server.send(from_agent="claude", to_agent=lane, message="hi")
+        assert sent["recipient_delivery"] == "unknown", "a shape is no evidence of either"
+        await call(wire)
+        await queue.wait(1)  # pinned: the waiting mail is announced
+        await _until(lambda: not (_route_row().get("last_route_reason") or "").startswith("unpinned"))
+        tg.cancel_scope.cancel()
 
 
 @pytest.mark.anyio
