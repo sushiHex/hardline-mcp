@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "            _codex_docs_refused_by.add(binary)\n",
+  "after": "",
+  "tests": [
+    "tests/test_codex_agents_md.py::test_the_refusing_binary_is_remembered"
+  ]
+}

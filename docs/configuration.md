@@ -51,6 +51,14 @@ profile that also keeps the reviewer out of your secrets
 command either, so the call's preflight refuses it. Choose `elevated` on such
 a machine.
 
+Codex 0.164.0 cannot load AGENTS.md under such a profile on Windows: it reads
+the files through a helper whose MXC container gets no `SYSTEMROOT`, and every
+thread start fails (openai/codex#56264). A call refused exactly that way runs
+once more with `project_doc_max_bytes=0`, with no AGENTS.md instructions, and
+its result carries an `instructions_note` saying so. The reviewer's shell can
+still read the workdir's AGENTS.md. Each process remembers the binary that
+refused, until Codex is updated.
+
 `elevated`, and `unelevated` (upstream's fallback, whose isolation is weaker,
 especially for the network), are pinned with `--sandbox` and deny nothing.
 Reconnect the MCP server after changing the variable.

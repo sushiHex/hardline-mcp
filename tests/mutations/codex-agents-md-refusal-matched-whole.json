@@ -1,0 +1,9 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "    return not run.get(\"ok\") and all(s in (run.get(\"error\") or \"\") for s in _CODEX_DOCS_REFUSALS)\n",
+  "after": "    return not run.get(\"ok\") and any(s in (run.get(\"error\") or \"\") for s in _CODEX_DOCS_REFUSALS)\n",
+  "tests": [
+    "tests/test_codex_agents_md.py::test_any_other_failure_is_returned_not_retried[other-start-failure]",
+    "tests/test_codex_agents_md.py::test_any_other_failure_is_returned_not_retried[agents-md-after-start]"
+  ]
+}

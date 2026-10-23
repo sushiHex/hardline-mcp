@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "        binary = _binary(exe) if sandbox.profile else None\n",
+  "after": "        binary = _binary(exe)\n",
+  "tests": [
+    "tests/test_codex_agents_md.py::test_a_sandbox_without_a_profile_is_never_retried"
+  ]
+}

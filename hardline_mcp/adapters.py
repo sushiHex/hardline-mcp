@@ -2928,6 +2928,32 @@ def _ask_codex_validated(
 
 _CODEX_GIT_REFUSAL = "--skip-git-repo-check was not specified"
 
+# Codex 0.164.0 reads AGENTS.md through a sandboxed helper once a permission
+# profile denies any path, and on Windows that helper's MXC container is given
+# an environment without SYSTEMROOT: every thread/start fails, before any turn
+# (measured 2026-10-23; no -c override restores it). So a call refused exactly
+# so is run once more without AGENTS.md, and says so; the binary that refused
+# is remembered, so later calls skip the doomed attempt until Codex is updated.
+_CODEX_DOCS_REFUSALS = ("failed to load AGENTS.md instructions", "thread/start failed")
+_CODEX_NO_DOCS = ["-c", "project_doc_max_bytes=0"]
+_CODEX_NO_DOCS_NOTE = (
+    "Codex could not load AGENTS.md under this call's sandbox (a Codex 0.164 defect), "
+    "so it ran without any AGENTS.md instructions"
+)
+_codex_docs_refused_by: set[tuple] = set()  # (exe, mtime_ns) that refused
+
+
+def _binary(exe: str) -> tuple | None:
+    """``exe`` as the binary it is now: a Codex update is a new one."""
+    try:
+        return exe, os.stat(exe).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _refused_docs(run: dict) -> bool:
+    return not run.get("ok") and all(s in (run.get("error") or "") for s in _CODEX_DOCS_REFUSALS)
+
 
 def _ask_codex_structured(
     prompt: str,
@@ -3033,19 +3059,37 @@ def _ask_codex_structured(
         if refusal is not None:
             return refusal
         argv += isolation
-        run = _run_agent_cmd(
-            "codex",
-            argv + ["--", prompt],
-            env=child_env,
-            cwd=run_cwd,
-            streaming=True,  # --json, above
-            capture_failed_output=True,
-            on_spawn=on_spawn,
-            stdin_text=attachment["stdin"] if attachment is not None else None,
-        )
+
+        def spawn(extra: list[str]) -> dict:
+            return _run_agent_cmd(
+                "codex",
+                argv + extra + ["--", prompt],
+                env=child_env,
+                cwd=run_cwd,
+                streaming=True,  # --json, above
+                capture_failed_output=True,
+                on_spawn=on_spawn,
+                stdin_text=attachment["stdin"] if attachment is not None else None,
+            )
+
+        binary = _binary(exe) if sandbox.profile else None
+        no_docs = binary is not None and binary in _codex_docs_refused_by
+        run = spawn(_CODEX_NO_DOCS if no_docs else [])
+        if binary is not None and not no_docs and _refused_docs(run):
+            _codex_docs_refused_by.add(binary)
+            no_docs = True
+            run = spawn(_CODEX_NO_DOCS)
     finally:
         if neutral_root:
             shutil.rmtree(neutral_root, ignore_errors=True)
+    result = _codex_outcome(run, model, effort, subscription_configured)
+    if no_docs:
+        result["instructions_note"] = _CODEX_NO_DOCS_NOTE
+    return result
+
+
+def _codex_outcome(run: dict, model: str | None, effort: str, subscription_configured) -> dict:
+    """One finished ``codex exec --json`` run as the call's result."""
     failed_output = run.pop("_stdout", "")
     if not run.get("ok") and _CODEX_GIT_REFUSAL in (run.get("error") or ""):
         run["hint"] = (
