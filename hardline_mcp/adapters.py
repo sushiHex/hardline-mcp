@@ -2931,28 +2931,51 @@ _CODEX_GIT_REFUSAL = "--skip-git-repo-check was not specified"
 # Codex 0.164.0 reads AGENTS.md through a sandboxed helper once a permission
 # profile denies any path, and on Windows that helper's MXC container is given
 # an environment without SYSTEMROOT: every thread/start fails, before any turn
-# (measured 2026-10-23; no -c override restores it). So a call refused exactly
-# so is run once more without AGENTS.md, and says so; the binary that refused
-# is remembered, so later calls skip the doomed attempt until Codex is updated.
-_CODEX_DOCS_REFUSALS = ("failed to load AGENTS.md instructions", "thread/start failed")
+# (measured 2026-10-23, openai/codex#56264; no -c override restores it). So a
+# call refused exactly so, with nothing on stdout - a started thread's first
+# event is thread.started - runs once more without AGENTS.md, told to read the
+# files itself, and says so. The refusing binary is remembered for a while,
+# so later calls skip the doomed attempt; a Codex update is a new binary.
+_CODEX_DOCS_REFUSALS = ("failed to load AGENTS.md instructions", "thread/start failed", "SYSTEMROOT")
 _CODEX_NO_DOCS = ["-c", "project_doc_max_bytes=0"]
-_CODEX_NO_DOCS_NOTE = (
-    "Codex could not load AGENTS.md under this call's sandbox (a Codex 0.164 defect), "
-    "so it ran without any AGENTS.md instructions"
+_CODEX_NO_DOCS_INTAKE = (
+    "[hardline] Codex could not load AGENTS.md for this run (a Codex defect). Before "
+    "anything else, read with your shell the AGENTS.md files that would have applied - the "
+    "one in your Codex home (CODEX_HOME, default ~/.codex), then each from the repository "
+    "root down to the working directory, an AGENTS.override.md taking its directory's "
+    "place - and follow them as if they had been loaded. The request follows.\n\n"
 )
-_codex_docs_refused_by: set[tuple] = set()  # (exe, mtime_ns) that refused
+_CODEX_NO_DOCS_NOTE = (
+    "Codex could not load AGENTS.md under this call's sandbox (a Codex 0.164 defect): it "
+    "ran without them, told to read them with its shell"
+)
+# A launcher's mtime need not change when Codex updates, so the memory expires.
+_CODEX_NO_DOCS_MEMORY_S = 3600.0
+_codex_docs_refused_by: dict[str, tuple] = {}  # exe -> (mtime_ns or None, monotonic at refusal)
 
 
-def _binary(exe: str) -> tuple | None:
-    """``exe`` as the binary it is now: a Codex update is a new one."""
+def _modified(exe: str) -> int | None:
     try:
-        return exe, os.stat(exe).st_mtime_ns
+        return os.stat(exe).st_mtime_ns
     except OSError:
         return None
 
 
+def _docs_refused_recently(exe: str) -> bool:
+    seen = _codex_docs_refused_by.get(exe)
+    return (
+        seen is not None
+        and seen[0] == _modified(exe)
+        and time.monotonic() - seen[1] < _CODEX_NO_DOCS_MEMORY_S
+    )
+
+
 def _refused_docs(run: dict) -> bool:
-    return not run.get("ok") and all(s in (run.get("error") or "") for s in _CODEX_DOCS_REFUSALS)
+    return (
+        not run.get("ok")
+        and not (run.get("_stdout") or "").strip()  # no thread started
+        and all(s in (run.get("error") or "") for s in _CODEX_DOCS_REFUSALS)
+    )
 
 
 def _ask_codex_structured(
@@ -3060,10 +3083,11 @@ def _ask_codex_structured(
             return refusal
         argv += isolation
 
-        def spawn(extra: list[str]) -> dict:
+        def spawn(no_docs: bool) -> dict:
+            tail = _CODEX_NO_DOCS + ["--", _CODEX_NO_DOCS_INTAKE + prompt] if no_docs else ["--", prompt]
             return _run_agent_cmd(
                 "codex",
-                argv + extra + ["--", prompt],
+                argv + tail,
                 env=child_env,
                 cwd=run_cwd,
                 streaming=True,  # --json, above
@@ -3072,13 +3096,12 @@ def _ask_codex_structured(
                 stdin_text=attachment["stdin"] if attachment is not None else None,
             )
 
-        binary = _binary(exe) if sandbox.profile else None
-        no_docs = binary is not None and binary in _codex_docs_refused_by
-        run = spawn(_CODEX_NO_DOCS if no_docs else [])
-        if binary is not None and not no_docs and _refused_docs(run):
-            _codex_docs_refused_by.add(binary)
+        no_docs = sandbox.profile and _docs_refused_recently(exe)
+        run = spawn(no_docs)
+        if sandbox.profile and not no_docs and _refused_docs(run):
+            _codex_docs_refused_by[exe] = (_modified(exe), time.monotonic())
             no_docs = True
-            run = spawn(_CODEX_NO_DOCS)
+            run = spawn(no_docs)
     finally:
         if neutral_root:
             shutil.rmtree(neutral_root, ignore_errors=True)

@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "            tail = _CODEX_NO_DOCS + [\"--\", _CODEX_NO_DOCS_INTAKE + prompt] if no_docs else [\"--\", prompt]\n",
+  "after": "            tail = _CODEX_NO_DOCS + [\"--\", prompt] if no_docs else [\"--\", prompt]\n",
+  "tests": [
+    "tests/test_codex_agents_md.py::test_the_rerun_is_told_to_read_agents_md_itself"
+  ]
+}

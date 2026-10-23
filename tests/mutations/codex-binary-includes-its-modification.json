@@ -1,8 +1,8 @@
 {
   "file": "hardline_mcp/adapters.py",
-  "before": "        return exe, os.stat(exe).st_mtime_ns\n",
-  "after": "        return exe, os.stat(exe) and 0\n",
+  "before": "        return os.stat(exe).st_mtime_ns\n",
+  "after": "        return os.stat(exe) and 0\n",
   "tests": [
-    "tests/test_codex_agents_md.py::test_a_binary_is_its_path_and_its_modification"
+    "tests/test_codex_agents_md.py::test_modified_is_the_files_modification"
   ]
 }

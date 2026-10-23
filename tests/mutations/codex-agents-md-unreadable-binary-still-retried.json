@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "        if sandbox.profile and not no_docs and _refused_docs(run):\n",
+  "after": "        if sandbox.profile and not no_docs and _refused_docs(run) and _modified(exe) is not None:\n",
+  "tests": [
+    "tests/test_codex_agents_md.py::test_a_binary_that_cannot_be_read_is_still_retried"
+  ]
+}

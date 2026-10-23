@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "        and seen[0] == _modified(exe)\n",
+  "after": "",
+  "tests": [
+    "tests/test_codex_agents_md.py::test_an_updated_binary_is_tried_with_agents_md_again"
+  ]
+}
