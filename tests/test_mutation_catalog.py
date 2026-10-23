@@ -69,11 +69,14 @@ def test_the_old_single_file_catalog_is_not_back():
 
 
 def test_every_anchor_appears_exactly_once():
-    assert stale(CASES) == []
+    # Every name in the message: pytest elides a long list's diff to its first.
+    found = stale(CASES)
+    assert found == [], "\n".join(found)
 
 
 def test_every_case_names_tests_that_exist():
-    assert unselected(CASES) == []
+    found = unselected(CASES)
+    assert found == [], "\n".join(found)
 
 
 def test_the_checks_see_a_stale_anchor_and_a_renamed_test():

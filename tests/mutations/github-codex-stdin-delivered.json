@@ -1,7 +1,7 @@
 {
   "file": "hardline_mcp/adapters.py",
-  "before": "            stdin_text=attachment[\"stdin\"] if attachment is not None else None,\n        )\n    finally:\n        if neutral_root:",
-  "after": "        )\n    finally:\n        if neutral_root:",
+  "before": "                on_spawn=on_spawn,\n                stdin_text=attachment[\"stdin\"] if attachment is not None else None,\n            )\n",
+  "after": "                on_spawn=on_spawn,\n            )\n",
   "tests": [
     "tests/test_github_review.py::test_a_codex_reviewer_gets_the_evidence_on_stdin_and_no_web"
   ]
