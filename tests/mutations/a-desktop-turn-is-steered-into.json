@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "            if thread == self.address:\n                self.turn = _uuid(turn.get(\"turn_id\")) or self.turn\n",
+  "after": "            if thread == self.address and turn.get(\"thread_source\") == \"user\":\n                self.turn = _uuid(turn.get(\"turn_id\")) or self.turn\n",
+  "tests": [
+    "tests/test_thread_names.py::test_a_desktop_thread_pins_and_a_second_one_stops_the_wake"
+  ]
+}

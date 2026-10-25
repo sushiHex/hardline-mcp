@@ -1,10 +1,11 @@
 {
   "file": "hardline_mcp/codex_queue.py",
-  "before": "            if self.address is None and (parsed is None or parsed[1].get(\"thread_source\") != \"user\"):\n",
+  "before": "            if self.address is None and (parsed is None or not _top_level(*parsed)):\n",
   "after": "            if self.address is None and parsed is None:\n",
   "tests": [
     "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[subagent]",
     "tests/test_codex_queue.py::test_only_a_top_level_thread_becomes_the_address[no-source]",
-    "tests/test_codex_route_facts.py::test_a_wake_never_pinned_writes_only_that_it_is_not_top_level"
+    "tests/test_codex_route_facts.py::test_a_wake_never_pinned_writes_only_that_it_is_not_top_level",
+    "tests/test_thread_names.py::test_a_desktop_thread_pins_and_a_second_one_stops_the_wake"
   ]
 }

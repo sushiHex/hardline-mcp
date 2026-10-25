@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "    return turn.get(\"parent_thread_id\") is None and turn.get(\"session_id\") == thread\n",
+  "after": "    return turn.get(\"session_id\") == thread\n",
+  "tests": [
+    "tests/test_thread_names.py::test_a_thread_without_a_source_is_top_level_only_as_its_own_root[parent]"
+  ]
+}

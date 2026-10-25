@@ -1,0 +1,9 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "    if parsed is None or not _top_level(*parsed):\n        return None\n",
+  "after": "    if parsed is None or parsed[1].get(\"thread_source\") != \"user\":\n        return None\n",
+  "tests": [
+    "tests/test_thread_names.py::test_a_thread_without_a_source_is_top_level_only_as_its_own_root[desktop]",
+    "tests/test_thread_names.py::test_a_thread_without_a_source_is_top_level_only_as_its_own_root[fork]"
+  ]
+}

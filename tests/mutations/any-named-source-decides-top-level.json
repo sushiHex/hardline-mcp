@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "    if source is not None:\n        return source == \"user\"\n",
+  "after": "    if source:\n        return source == \"user\"\n",
+  "tests": [
+    "tests/test_thread_names.py::test_a_thread_without_a_source_is_top_level_only_as_its_own_root[empty-source]"
+  ]
+}

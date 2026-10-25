@@ -61,6 +61,18 @@ def _parse(meta) -> Optional[tuple[str, dict]]:
     return thread, turn
 
 
+def _top_level(thread: str, turn: dict) -> bool:
+    """Whether Codex names ``thread`` a top-level thread: a ``user`` source, or
+    no source from a client that sends none (Codex Desktop, #114) with the
+    root's own session. Codex gives every child its root's ``session_id``,
+    never its own thread's, and sets a ``parent_thread_id`` or a source on
+    the children it spawns (``core/src/session/session.rs``, rust-v0.164.0)."""
+    source = turn.get("thread_source")
+    if source is not None:
+        return source == "user"
+    return turn.get("parent_thread_id") is None and turn.get("session_id") == thread
+
+
 def _names(d: dict) -> str:
     names = sorted(str(k)[:40] for k in d)
     return "[" + ", ".join(names[:16]) + (f", +{len(names) - 16} more" if len(names) > 16 else "") + "]"
@@ -100,10 +112,10 @@ def thread_of(meta) -> Optional[str]:
     """The top-level Codex thread a request came from, or None.
 
     What a claim is attributed to: ``_meta`` as ``_parse`` accepts it, from a
-    ``user`` thread. A subagent's request names its own thread, never the one
+    top-level thread. A subagent's request names its own thread, never the one
     its parent's names belong to."""
     parsed = _parse(meta)
-    if parsed is None or parsed[1].get("thread_source") != "user":
+    if parsed is None or not _top_level(*parsed):
         return None
     return parsed[0]
 
@@ -278,7 +290,7 @@ class CodexWake(announce.Announcer):
         meta = params.get("_meta") if isinstance(params, dict) else None
         parsed = _parse(meta)
         with self._lock:
-            if self.address is None and (parsed is None or parsed[1].get("thread_source") != "user"):
+            if self.address is None and (parsed is None or not _top_level(*parsed)):
                 self._unpinned(meta, parsed)
                 return
             if parsed is None:
@@ -291,7 +303,7 @@ class CodexWake(announce.Announcer):
                 # The first poll after the pin restores this thread's names
                 # (server._restore_pending), not the one FULFIL_S later.
                 self._last_fulfil = None
-            elif thread != self.address and turn.get("thread_source") == "user" and not self.stopped:
+            elif thread != self.address and _top_level(thread, turn) and not self.stopped:
                 self.stopped = True
                 self._notes.append(
                     f"codex wake stopped: a second top-level thread {thread} called "

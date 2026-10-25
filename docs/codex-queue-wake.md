@@ -51,20 +51,30 @@ content.
 `channel.tap` gains one generic hook: every `tools/call`'s params go to
 `client["on_call"]` if a transport set one. The tap knows nothing about Codex.
 `CodexWake.observe` pins the address to the first `_meta.threadId` that:
-- comes with `x-codex-turn-metadata.thread_source == "user"`;
+- comes from a top-level thread, as its `x-codex-turn-metadata` says;
 - parses as a UUID.
+
+A thread is top-level when its `thread_source` is `user`. When no
+`thread_source` is sent at all (Codex Desktop, #114), it is top-level when it
+has no `parent_thread_id` and its `session_id` equals its own `thread_id`.
+Codex gives every child thread its root's `session_id`, never its own
+(`core/src/session/session.rs:959-980`, rust-v0.164.0). A top-level fork gets
+a fresh one, so it is a root of its own, as a TUI fork is. Any other source,
+including an empty one, is not top-level. Names a Desktop thread claimed
+before this rule have no binding, so they come back on their own only after
+the thread claims them once more.
 
 A different qualifying UUID later is a **conflict**. No notice is reserved
 after it, for the life of the connection, and the conflict is logged; the
 address never migrates. A notice already reserved when the conflict is seen is
 still queued to the pinned thread. Until the pin
-there is nothing to wake: absence is not evidence. A caller that omits
-`thread_source` is never armed. Codex Desktop is one: `thread_source` is an
-optional, client-supplied field of `thread/start`, which Desktop leaves out
-and Codex never defaults (#114). Such a server writes a route row with no
-`last_route`, whose reason, `unpinned: ...`, names the keys its call carried,
-their kinds, and which identifiers equal `threadId`, never a value. That is
-the evidence for deciding what marks a Desktop thread as top-level.
+there is nothing to wake: absence is not evidence. A caller with neither a
+`user` source nor its root's own session is never armed. Such a server writes
+a route row with no `last_route`, whose reason, `unpinned: ...`, names the
+keys its call carried, their kinds, and which identifiers equal `threadId`,
+never a value. That row is the evidence the Desktop rule was built from:
+`thread_source` is an optional, client-supplied field of `thread/start`,
+which Desktop leaves out and Codex never defaults.
 
 The pinned thread is also what this session's claimed names are bound to, and
 what its next server restores them for: the first poll after the pin runs the
@@ -250,7 +260,12 @@ either needs a hardline restart.
 **Reach.** Only threads hosted by the shared daemon, which the TUI uses by
 default. A session the TUI runs embedded (`--no-daemon`, `--profile`, a `-c`
 override and others) is not loaded in the daemon. Its steer is refused with
-`thread not found`, and the notice is queued.
+`thread not found`, and the notice is queued. When no daemon runs at all, as
+when every session is embedded, the proxy cannot connect to the control
+socket: the steer is unreached (`the proxy closed the connection`), and the
+notice is queued just the same. A queued notice waits for the thread's turn
+to end, so `report` can list a busy embedded session as `stalled` for as long
+as that turn runs.
 
 **One side effect, from review and not verified here:** a steer without
 `additionalContext` replaces the session's shared map of deduplicated
@@ -278,7 +293,7 @@ failed write, or a client that is not Codex at all: a lane prefix is not a
 client identity). Their notices are in no total. A server whose first call
 comes from a thread that is not top-level writes a row whose `last_route` is
 `not_top_level`, with the `thread_source` as its reason (#109). One whose
-first call pinned nothing for want of a source writes a row with no
+first call pinned nothing, with neither source nor its root's own session, writes a row with no
 `last_route` and an `unpinned: ...` reason (#114). A row's zeros mean no
 counted route outcome, not no notice: a failed queue, possibly after
 committing, is recorded as `failed` but counted nowhere.
@@ -350,9 +365,10 @@ sessions too.
 ## Tests (each guard gets a mutation case)
 
 - **Address:**
-  - pinned from `_meta.threadId` with `thread_source == "user"`;
-  - ignored from a subagent, a missing source, a non-UUID, or a non-Codex
-    client;
+  - pinned from `_meta.threadId` with `thread_source == "user"`, or with no
+    source, no parent and the thread's own session (Desktop, a fork);
+  - ignored from a subagent, a child's session, a parent, an empty source, a
+    missing source without a session, a non-UUID, or a non-Codex client;
   - a second UUID is a conflict that stops waking;
   - nothing is queued before the pin.
 - **Notice:**

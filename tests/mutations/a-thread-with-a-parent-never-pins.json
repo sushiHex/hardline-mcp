@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "            if self.address is None and (parsed is None or not _top_level(*parsed)):\n",
+  "after": "            if self.address is None and (parsed is None or not _top_level(parsed[0], {**parsed[1], \"parent_thread_id\": None})):\n",
+  "tests": [
+    "tests/test_thread_names.py::test_a_desktop_thread_pins_and_a_second_one_stops_the_wake"
+  ]
+}

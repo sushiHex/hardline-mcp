@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from hardline_mcp import adapters, bindings, codex_queue, jobs, mailbox, procid, server, sessions
-from test_codex_queue import OTHER, THREAD, meta
+from test_codex_queue import OTHER, THREAD, TURN, meta
 
 GONE = 0x7FFFFFFE  # well-formed and reliably absent: a dead previous server
 
@@ -852,6 +852,50 @@ def test_restored_names_go_in_by_durable_place_below_explicit_ones():
 )
 def test_a_request_is_attributed_only_to_its_own_top_level_thread(data, expected):
     assert codex_queue.thread_of(data) == expected
+
+
+def desktop(thread=THREAD, session=None, **turn):
+    """A call as Codex Desktop makes it (#114): no ``thread_source``, the
+    session id beside the thread id. ``session`` stands for a child's root."""
+    m = meta(thread=thread)
+    m["sessionId"] = session or thread  # the outer id is the same session's
+    t = m["x-codex-turn-metadata"]
+    del t["thread_source"]
+    t.update({"session_id": session or thread, **turn})
+    return m
+
+
+@pytest.mark.parametrize(
+    "data, expected",
+    [
+        (desktop(), THREAD),
+        (desktop(thread_source=None), THREAD),
+        (desktop(forked_from_thread_id=OTHER), THREAD),  # a fork is its own root
+        (desktop(session=OTHER), None),  # a child: its root's session
+        (desktop(parent_thread_id=OTHER), None),
+        (desktop(thread_source="subagent"), None),
+        (desktop(thread_source=""), None),
+        (desktop(session_id=None), None),
+    ],
+    ids=["desktop", "null-source", "fork", "child", "parent", "subagent", "empty-source", "no-session"],
+)
+def test_a_thread_without_a_source_is_top_level_only_as_its_own_root(data, expected):
+    assert codex_queue.thread_of(data) == expected
+
+
+def test_a_desktop_thread_pins_and_a_second_one_stops_the_wake():
+    w = codex_queue.CodexWake(queue=lambda thread, text: {"ok": True})
+    w.observe({"_meta": desktop(session=OTHER)})  # a child calls first
+    w.observe({"_meta": desktop(parent_thread_id=OTHER)})
+    assert w.pinned() is None
+    w.observe({"_meta": desktop(turn_id=TURN)})
+    assert w.pinned() == THREAD and w.attribution(THREAD) == THREAD
+    assert w.turn == TURN  # the turn a notice is steered into
+    w.observe({"_meta": desktop(thread=OTHER, session=THREAD)})  # its child
+    w.observe({"_meta": desktop(thread=OTHER, parent_thread_id=THREAD)})
+    assert w.stopped is False
+    w.observe({"_meta": desktop(thread=OTHER)})
+    assert w.stopped is True and w.attribution(THREAD) is None
 
 
 def test_a_subagent_call_does_not_stop_the_wake(wake):

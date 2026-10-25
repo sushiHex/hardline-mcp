@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "            elif thread != self.address and _top_level(thread, turn) and not self.stopped:\n",
+  "after": "            elif thread != self.address and turn.get(\"thread_source\") == \"user\" and not self.stopped:\n",
+  "tests": [
+    "tests/test_thread_names.py::test_a_desktop_thread_pins_and_a_second_one_stops_the_wake"
+  ]
+}

@@ -1,7 +1,7 @@
 {
   "file": "hardline_mcp/codex_queue.py",
-  "before": "            if self.address is None and (parsed is None or parsed[1].get(\"thread_source\") != \"user\"):\n",
-  "after": "            if self.address is None and (parsed is not None and parsed[1].get(\"thread_source\") != \"user\"):\n",
+  "before": "            if self.address is None and (parsed is None or not _top_level(*parsed)):\n",
+  "after": "            if self.address is None and (parsed is not None and not _top_level(*parsed)):\n",
   "tests": [
     "tests/test_subagent_lanes.py::test_a_call_codex_hardly_described_is_recorded_too[no-turn-metadata]",
     "tests/test_subagent_lanes.py::test_a_call_codex_hardly_described_is_recorded_too[malformed]",
