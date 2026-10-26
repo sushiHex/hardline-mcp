@@ -1,6 +1,6 @@
 {
   "file": "hardline_mcp/codex_queue.py",
-  "before": "        return \"codex queue\" if self.unsteered else \"codex steer\"\n",
+  "before": "        if self.unsteered or self.routes.get(\"last_route\") in (\"queue\", \"failed\"):\n            return \"codex queue\"\n        return \"codex steer\"\n",
   "after": "        return \"codex queue\"\n",
   "tests": [
     "tests/test_codex_queue.py::test_the_transport_says_whether_notices_are_steered"

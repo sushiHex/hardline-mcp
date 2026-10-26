@@ -251,7 +251,7 @@ queued.
 **Steering needs `websockets`**, the `codex-watch` extra. Without it, or with
 `HARDLINE_CODEX_STEER=0`, every notice is queued as in rev 2, and
 `list_agents().you.transport` says so: `codex steer` when notices are steered
-first, `codex queue` when they never are. That is decided at the wake's first
+first, `codex queue` when they never are, or when the last one was queued. That is decided at the wake's first
 poll: off the event loop, after arming, and only for a Codex client, so no
 other client imports `websockets`. It is an actual import, not a lookup. The
 reason is logged then. Until it is decided, notices are queued. Changing
@@ -263,9 +263,13 @@ override and others) is not loaded in the daemon. Its steer is refused with
 `thread not found`, and the notice is queued. When no daemon runs at all, as
 when every session is embedded, the proxy cannot connect to the control
 socket: the steer is unreached (`the proxy closed the connection`), and the
-notice is queued just the same. A queued notice waits for the thread's turn
-to end, so `report` can list a busy embedded session as `stalled` for as long
-as that turn runs.
+notice is queued just the same, and `transport` reads `codex queue`: it
+follows the route the last notice took. A queued notice waits for the thread's
+turn to end, so `report` can list a busy embedded session as `stalled` for as
+long as that turn runs; its entry carries the route row's `last_route` and
+`last_route_reason`, since the report cannot see the turn. Seen 2026-10-26
+(0.164.0, embedded TUIs): one notice waited out a 6 h 15 min turn and started
+0.04 s after it ended: there, at least, nothing waited for the 10 s poll.
 
 **One side effect, from review and not verified here:** a steer without
 `additionalContext` replaces the session's shared map of deduplicated

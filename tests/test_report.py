@@ -409,6 +409,47 @@ def test_mail_no_wake_got_read_is_listed_four_ways(tmp_path, monkeypatch):
     assert (got.get("servers_with_facts"), got.get("servers_without_facts")) == (5, 3), got
 
 
+def test_a_stalled_codex_wake_shows_the_route_its_notice_took(tmp_path, monkeypatch):
+    """A notice queued behind a running turn read as a failed wake: the entry
+    names the last route and why, joined on the creation token."""
+    from datetime import datetime, timedelta, timezone
+
+    hour_ago = mailbox._iso(datetime.now(timezone.utc) - timedelta(minutes=60))
+    db = tmp_path / "mb.db"
+    mailbox.send("x", "nobody", "creates the store", db_path=db)
+    monkeypatch.setattr(report, "instance_state", lambda *_a, **_k: procid.ALIVE)
+    raw = sqlite3.connect(db)
+    with raw:
+        raw.execute("DELETE FROM messages")
+        raw.executemany(
+            "INSERT INTO agent_sessions (pid, lane, agent, process_key, started_at,"
+            " last_seen, claimed_at) VALUES (?, ?, 'codex', ?, 't', 't', 't')",
+            [(1, "codex:a", "k1"), (2, "codex:b", "k2")],
+        )
+        raw.executemany(
+            "INSERT INTO codex_routes (pid, process_key, last_route, last_route_reason)"
+            " VALUES (?, ?, ?, ?)",
+            [(1, "k1", "queue", "steer unreached: no proxy"),
+             (2, "old", "steer", None)],  # an earlier process on pid 2
+        )
+        raw.executemany(
+            "INSERT INTO push_delivery (pid, process_key, declared_at, last_push_at,"
+            " oldest_unreceipted_at) VALUES (?, ?, 't', ?, ?)",
+            [(1, "k1", hour_ago, hour_ago), (2, "k2", hour_ago, hour_ago)],
+        )
+        raw.executemany(
+            "INSERT INTO messages (sender, recipient, body, created_at) VALUES ('x', ?, 'b', ?)",
+            [("codex:a", hour_ago), ("codex:b", hour_ago)],
+        )
+    raw.close()
+
+    by_pid = {e["pid"]: e for e in report.report(db)["stalled_wakes"]["stalled"]}
+    assert (by_pid[1].get("last_route"), by_pid[1].get("last_route_reason")) == (
+        "queue", "steer unreached: no proxy"
+    )
+    assert "last_route" not in by_pid[2], "another process's row"
+
+
 def test_unread_mail_lists_are_bounded_but_totals_are_whole(tmp_path):
     db = tmp_path / "mb.db"
     for i in range(report.SAMPLE + 3):

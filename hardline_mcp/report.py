@@ -71,7 +71,9 @@ NOTES = [
     "not top-level (a subagent's), whose wake is not armed; 'unwatched', no wake facts at all "
     "(older code, a "
     "Codex server that never pinned a thread and has not been called, or no wake). Evidence, "
-    "not proof; since is when it was owed, or the oldest such arrival",
+    "not proof; since is when it was owed, or the oldest such arrival; a Codex server's entry "
+    "carries its route row's last_route and last_route_reason: a queued notice waits for the "
+    "thread's running turn to end, which this report cannot see",
 ]
 
 # Each section's rows, read in the snapshot. None marks a table current code
@@ -386,7 +388,8 @@ def _stalled_wakes(
         if _is_live(s, probe):
             lanes.setdefault((s["pid"], s["process_key"]), []).append(s["lane"])
     facts = {(p["pid"], p["process_key"]): p for p in pushes or ()}
-    not_top = {(r["pid"], r["process_key"]) for r in routes or () if r["last_route"] == NOT_TOP_LEVEL}
+    route_of = {(r["pid"], r["process_key"]): r for r in routes or ()}
+    not_top = {identity for identity, r in route_of.items() if r["last_route"] == NOT_TOP_LEVEL}
     found: dict[str, list] = {"stalled": [], "unannounced": [], "not_top_level": [], "unwatched": []}
     for (pid, key), held in lanes.items():
         p = facts.get((pid, key))
@@ -411,13 +414,19 @@ def _stalled_wakes(
         if not unread:
             continue
         oldest = owed if kind == "stalled" else min(min(ats) for ats in unread.values())
-        found[kind].append({
+        entry = {
             "pid": pid,
             "process_key": key,
             "since": _iso(oldest),  # owed since, or the oldest such mail's arrival
             "overdue_minutes": int((now - oldest).total_seconds() // 60),
             "unread": {lane: len(ats) for lane, ats in unread.items()},
-        })
+        }
+        # A Codex wake's last route: a notice queued behind a running turn
+        # waits for that turn to end, which this report cannot see.
+        if (route := route_of.get((pid, key))) is not None:
+            entry["last_route"] = route["last_route"]
+            entry["last_route_reason"] = route["last_route_reason"]
+        found[kind].append(entry)
     with_facts = sum(1 for identity in lanes if identity in facts)
     return {
         "table": pushes is not None,

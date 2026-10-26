@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/report.py",
+  "before": "    route_of = {(r[\"pid\"], r[\"process_key\"]): r for r in routes or ()}\n",
+  "after": "    route_of = {(r[\"pid\"], k): r for r in routes or () for k in {s[\"process_key\"] for s in sessions if s[\"pid\"] == r[\"pid\"]}}\n",
+  "tests": [
+    "tests/test_report.py::test_a_stalled_codex_wake_shows_the_route_its_notice_took"
+  ]
+}

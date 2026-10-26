@@ -163,7 +163,13 @@ class CodexWake(announce.Announcer):
 
     @property
     def transport(self) -> str:
-        return "codex queue" if self.unsteered else "codex steer"
+        """The way the last notice went, or the way the next is tried first.
+        Steering that imports still queues every notice when no daemon answers
+        (every TUI under ``--no-daemon``), and this said ``codex steer`` for
+        each one. Read without the lock: ``unsettled`` holds it here."""
+        if self.unsteered or self.routes.get("last_route") in ("queue", "failed"):
+            return "codex queue"
+        return "codex steer"
 
     def notice(self, nonce: str) -> str:
         return notice(nonce)

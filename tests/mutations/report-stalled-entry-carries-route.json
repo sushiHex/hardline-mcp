@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/report.py",
+  "before": "        if (route := route_of.get((pid, key))) is not None:\n",
+  "after": "        if False and (route := route_of.get((pid, key))) is not None:\n",
+  "tests": [
+    "tests/test_report.py::test_a_stalled_codex_wake_shows_the_route_its_notice_took"
+  ]
+}

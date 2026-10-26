@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "        if self.unsteered or self.routes.get(\"last_route\") in (\"queue\", \"failed\"):\n",
+  "after": "        if self.unsteered or self.routes.get(\"last_route\") == \"queue\":\n",
+  "tests": [
+    "tests/test_codex_queue.py::test_a_failed_queue_reports_the_queue_transport"
+  ]
+}

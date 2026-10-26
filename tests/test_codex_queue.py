@@ -696,6 +696,24 @@ def test_notices_are_queued_until_steering_is_decided():
     assert (steer.calls, wake.transport) == ([], "codex queue")
 
 
+def test_the_transport_follows_the_route_the_last_notice_took():
+    """With no daemon running, steering imports but every notice is queued:
+    the transport said ``codex steer`` for all of them."""
+    wake = armed(Steer(codex_steer.Unreached("no proxy"), ACCEPTED))
+    assert wake.transport == "codex steer", "nothing sent yet: a steer is tried first"
+    wake.send(THREAD, "notice")
+    assert wake.transport == "codex queue"
+    wake.send(THREAD, "notice")
+    assert wake.transport == "codex steer"
+
+
+def test_a_failed_queue_reports_the_queue_transport():
+    wake = armed(Steer(codex_steer.Unreached("no proxy")), Queue(ok=False))
+    with pytest.raises(RuntimeError):
+        wake.send(THREAD, "notice")
+    assert wake.transport == "codex queue"
+
+
 def test_the_transport_says_whether_notices_are_steered(monkeypatch):
     monkeypatch.delenv("HARDLINE_CODEX_STEER", raising=False)
     wake = codex_queue.CodexWake(queue=Queue())
