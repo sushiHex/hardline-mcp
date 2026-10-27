@@ -140,6 +140,8 @@ Restored names form a run below the explicit claims, in durable order. The addre
 
 So quitting and resuming a Codex session keeps its old hardline server, and its old code. Seen 2026-10-20: two top-level servers had run 2026-10-15's code for five days through daily use. A restored name returns when the server is replaced this way.
 
+**Embedded sessions (`--no-daemon`) are replaced at every relaunch.** Reloaded has launched every Codex tab with `--no-daemon` since 2026-10-24, so the TUI hosts its own servers and none of the above applies: each relaunch ends every top-level server and starts a new one, on the working tree's current code. On 2026-10-27 all 34 live servers had started on or after 2026-10-25. An idle resumed thread's names then wait for its first hardline call ("What it does not do", above). One thing often makes that call: a notice the old server queued is durable in Codex's queue, so it starts on the resumed, idle thread, and its `inbox` call pins the new server, which then restores the names. Seen 2026-10-25T23:02Z: retro's resumed thread received the old server's notice 1 s after the new server started, and that call pinned it. Not otherwise mitigated. Evidence of it costing anything would be `unread_mail` listing a name bound in `thread_names` with no holder past the grace; on 2026-10-27 both bound names were held, with nothing unread.
+
 **Design record.** The design took nine review rounds. Two first designs were rejected: restoring from `lane_hints`, which are lossy advice; and a writer-scoped table, where a stale binding survived a takeover. Seven Fable/Astra rounds followed, recorded in `research/codex-names/`. What changed shape along the way:
 - per-request attribution, not the wake's pin;
 - no stored intent to cancel;

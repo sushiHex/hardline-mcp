@@ -274,6 +274,42 @@ Revisit when any of these holds:
   (see "Retiring the legacy registry" below), so this decision is due for
   review; `TODO.md` dates it.
 
+**Reviewed 2026-10-27: deferred again, on an event, not a date.** Against the
+2026-10-27 report (saved in `research/2026-10-27-stable-address-review/`, with
+the brief): no trigger fired. `other_instance` is still the 20 baselined on
+2026-10-15, all `suffix_equal`, with `same_instance` up from 125 to 166; no
+contested names; no legacy writers; nothing stalled. The candidate was the #90
+design, a Codex thread as the address. Fable (claude-fable-5-1) and Astra
+(gpt-6-astra) both advised deferring:
+- A thread address is reproducible, not immutable: an unheld name can still be
+  acquired by another process, and a thread can be loaded in two live servers
+  at once (an embedded TUI and Desktop), which would share one address.
+- The #90 review findings still hold in source: `channel.tap`'s `on_call` hook
+  is synchronous and suppresses exceptions; a second top-level thread stops
+  notices while consumption continues; an address must be the whole thread
+  UUID, independent of cwd.
+- The brief's premise flipped on 2026-10-24. It assumed top-level Codex
+  servers are long-lived because the daemon hosts them. Under `--no-daemon`
+  (Reloaded) every relaunch replaces every top-level server, so churn is no
+  longer only subagents. That churn already has an answer short of a
+  migration: claimed names are bound to the thread and restored by its next
+  server (#100). See "Embedded sessions" in `docs/session-continuity.md`.
+
+Reopen on either event:
+- an unread job notice on an unheld parent-derived `codex:` lane whose job
+  owner died in a relaunch;
+- one thread loaded in two live servers at once, seen in a report.
+
+Building it then needs, proven in wire-level tests (Astra): registration
+complete before the first call can dispatch work; subagent dispatch;
+overlapping servers and retries; refusal of a conflicting thread.
+
+The narrower piece that needs no format change, registering a parent-derived
+lane at its first call rather than at startup (#109), was reviewed the same
+day and not built: it widens the absence gap, lets POSIX siblings take a
+top-level session's lane, and loses mail to bare-name fallback. See
+`docs/first-call-registration.md`.
+
 Review record (gpt-6-astra), adopted:
 - **"The instance address already exists" was rejected.** A reproducible,
   reclaimable name is not one.

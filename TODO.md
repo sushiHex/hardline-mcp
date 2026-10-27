@@ -12,8 +12,15 @@ absence made insufficient rather than replaced: a claim needs evidence. A
 criteria and recorded when to revisit; see "Stable instance addresses" under
 [Decisions](docs/architecture.md#decisions-and-what-was-rejected).
 
-**Review it on or after 2026-10-27, with `hardline-mcp report`.** By then most
-servers run code that records revisions and acks. Against the triggers:
+**Reviewed 2026-10-27: deferred again, on an event, not a date** (see the
+same section of `docs/architecture.md`). Reopen when a report shows an unread
+job notice on an unheld parent-derived `codex:` lane whose job owner died in a
+relaunch, or one thread loaded in two live servers at once. Until then, read
+each `hardline-mcp report` against the triggers below. First-call
+registration of parent-derived lanes (#109) was reviewed and not built:
+`docs/first-call-registration.md`.
+
+The triggers, as read at each review:
 - *Misdelivery.* Read `job_notices.other_instance_by_suffix`. `suffix_equal`
   is consistent with a relaunch of the conversation the lane was derived from,
   not proof of one (an explicit label can carry any suffix); trace every
@@ -45,8 +52,9 @@ servers run code that records revisions and acks. Against the triggers:
   and listed under `stalled_wakes.not_top_level`. One that never calls is
   still indistinguishable from a session not yet called (`unwatched`).
 
-Record the outcome in `docs/architecture.md` and, if deferring again, a new
-date here.
+2026-10-27: `other_instance` 20 (unchanged, all `suffix_equal`),
+`same_instance` 166, nothing contested, no legacy writers, routes 83 queued
+and 0 steered (every TUI is embedded), nothing stalled.
 
 ## Known limits, each a deliberate trade
 
