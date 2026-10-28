@@ -275,6 +275,48 @@ def test_after_id_pages_past_mail_left_unacked(tmp_path):
     assert [m["body"] for m in last] == ["m9"], "strictly after: m8 is skipped"
 
 
+def test_more_says_when_paging_past_deferred_mail_is_done(tmp_path):
+    """Deferred mail keeps ``remaining`` positive, so only ``more`` ends the
+    drain; without it the last read of every wake was an empty one."""
+    db = tmp_path / "mb.db"
+    for i in range(3):
+        mailbox.send("codex", "hermes", f"m{i}", db_path=db)
+    first, _, more = mailbox.read_batch("hermes", limit=2, auto_ack=False, db_path=db)
+    assert more is True
+    last, remaining, more = mailbox.read_batch(
+        "hermes", auto_ack=False, after_id=first[-1]["message_id"], db_path=db
+    )
+    assert ([m["body"] for m in last], remaining, more) == (["m2"], 3, False)
+    past, remaining, more = mailbox.read_batch(
+        "hermes", auto_ack=False, after_id=last[-1]["message_id"], db_path=db
+    )
+    assert (past, remaining, more) == ([], 3, False)
+
+
+def test_more_after_a_consuming_read(tmp_path):
+    db = tmp_path / "mb.db"
+    for i in range(2):
+        mailbox.send("codex", "hermes", f"m{i}", db_path=db)
+    assert mailbox.read_batch("hermes", limit=1, db_path=db)[1:] == (1, True)
+    assert mailbox.read_batch("hermes", limit=1, db_path=db)[1:] == (0, False)
+
+
+def test_more_counts_only_mail_this_reader_can_consume(tmp_path):
+    """Another session's lane is shown but never consumable: counting it would
+    keep a reader paging after its own mail is done. Its own lane counts."""
+    db = tmp_path / "mb.db"
+    lanes = ["claude", "claude:other", "claude:mine"]
+    mailbox.send("codex", "claude", "shared", db_path=db)
+    mailbox.send("codex", "claude:other", "not yours", db_path=db)
+    read = lambda: mailbox.read_batch(  # noqa: E731
+        lanes, limit=1, auto_ack=False, owned=("claude:mine",), db_path=db
+    )
+    got, _, more = read()
+    assert ([m["body"] for m in got], more) == (["shared"], False)
+    mailbox.send("codex", "claude:mine", "yours", db_path=db)
+    assert read()[2] is True
+
+
 def test_a_consuming_read_past_the_last_message_still_counts_what_is_unread(tmp_path):
     """The look-before-reserving probe honoured after_id, so a consuming read
     past every unread message answered ([], 0) and hid the mail before it."""

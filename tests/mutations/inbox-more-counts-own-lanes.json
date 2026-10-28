@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/mailbox.py",
+  "before": "f\"SELECT EXISTS(SELECT 1 {unread} AND id > ?)\",",
+  "after": "f\"SELECT EXISTS(SELECT 1 {unread} AND instr(recipient, ':') = 0 AND id > ?)\",",
+  "tests": [
+    "tests/test_mailbox.py::test_more_counts_only_mail_this_reader_can_consume"
+  ]
+}

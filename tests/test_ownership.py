@@ -56,7 +56,7 @@ async def test_refused_registration_cannot_consume(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("operation", ["ack", "inbox"])
+@pytest.mark.parametrize("operation", ["ack", "read_batch"])
 async def test_consumption_rechecks_conflict_after_preflight(
     monkeypatch, tmp_path, operation
 ):

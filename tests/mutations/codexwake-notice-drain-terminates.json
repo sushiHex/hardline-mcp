@@ -1,7 +1,7 @@
 {
   "file": "hardline_mcp/codex_queue.py",
-  "before": "\"handle, and keep reading with after_id set to the last message id until a \"",
-  "after": "\"handle, and read again until remaining is 0, until a \"",
+  "before": "\"while more is true, read on with after_id=last_message_id. \"",
+  "after": "\"read again until remaining is 0. \"",
   "tests": [
     "tests/test_codex_queue.py::test_the_notice_is_exactly_this_text"
   ]

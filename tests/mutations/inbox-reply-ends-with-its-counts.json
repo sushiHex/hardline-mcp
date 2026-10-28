@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "response = {\"messages\": msgs, \"truncated\": truncated}",
+  "after": "response = {\"messages\": msgs, \"count\": 0, \"remaining\": 0, \"more\": 0, \"truncated\": truncated}",
+  "tests": [
+    "tests/test_channel.py::test_an_inbox_reply_ends_with_its_counts"
+  ]
+}

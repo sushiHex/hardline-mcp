@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/mailbox.py",
+  "before": "more = bool(remaining) and conn.execute(",
+  "after": "more = bool(remaining) or conn.execute(",
+  "tests": [
+    "tests/test_mailbox.py::test_more_says_when_paging_past_deferred_mail_is_done"
+  ]
+}

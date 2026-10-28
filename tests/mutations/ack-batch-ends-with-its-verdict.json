@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "return {\"results\": results, \"ok\": all(r.get(\"ok\") for r in results.values())}",
+  "after": "return {\"ok\": all(r.get(\"ok\") for r in results.values()), \"results\": results}",
+  "tests": [
+    "tests/test_channel.py::test_ack_accepts_a_batch"
+  ]
+}

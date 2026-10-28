@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "response.update(count=len(msgs), remaining=remaining, more=more)",
+  "after": "response.update(count=len(msgs), remaining=remaining, more=False)",
+  "tests": [
+    "tests/test_channel.py::test_an_inbox_reply_ends_with_its_counts"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/mailbox.py",
+  "before": "more = bool(remaining) and conn.execute(",
+  "after": "more = not consuming and bool(remaining) and conn.execute(",
+  "tests": [
+    "tests/test_mailbox.py::test_more_after_a_consuming_read"
+  ]
+}

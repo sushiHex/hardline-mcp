@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/mailbox.py",
+  "before": "f\"SELECT EXISTS(SELECT 1 {unread} AND id > ?)\",\n                (*agents, *lane_params, cursor),",
+  "after": "f\"SELECT EXISTS(SELECT 1 FROM messages WHERE recipient IN ({placeholders})\"\n                \" AND acked_at IS NULL AND id > ?)\",\n                (*agents, cursor),",
+  "tests": [
+    "tests/test_mailbox.py::test_more_counts_only_mail_this_reader_can_consume"
+  ]
+}

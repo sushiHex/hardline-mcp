@@ -1055,12 +1055,12 @@ async def inbox(
 
     ``after_id`` returns only later messages. With ``auto_ack=false``, pass
     the previous reply's ``last_message_id`` to read past mail you are leaving
-    unacked; stop when a read returns nothing.
+    unacked, while ``more`` says unread mail lies past this batch.
 
     Bodies over ``_MAX_BODY_CHARS`` are truncated with a marker — call
     ``peek(message_id)`` for one message in full.
 
-    Returns ``{"messages", "count", "remaining", "truncated"}``.
+    Returns ``{"messages", "truncated", "count", "remaining", "more"}``.
     """
     # An explicit lane means exactly that lane. Previously this still unioned
     # in the caller's OWN lane (lane_for strips the qualifier and re-adds this
@@ -1096,9 +1096,9 @@ async def inbox(
     # session's lane is immediately claimable by somebody else. Polling is the
     # one thing they all keep doing.
     await _in_thread(_heartbeat)
-    msgs, remaining = await _in_thread(
+    msgs, remaining, more = await _in_thread(
         _consume,
-        mailbox.inbox,
+        mailbox.read_batch,
         agents,
         unread_only=unread_only,
         limit=limit,
@@ -1106,12 +1106,7 @@ async def inbox(
         after_id=after_id,
     )
     msgs, truncated, _ = _fit_response(msgs, allow_drop=False)
-    response = {
-        "messages": msgs,
-        "count": len(msgs),
-        "remaining": remaining,
-        "truncated": truncated,
-    }
+    response = {"messages": msgs, "truncated": truncated}
     if msgs:
         # Recovery cursor. A consuming read commits the ack before this
         # response can reach the caller, so if the enclosing response is lost
@@ -1138,6 +1133,8 @@ async def inbox(
         response["receipt_note"] = ALREADY_READ_NOTE
     if revision_note := await _in_thread(_new_revision_note):
         response["revision_note"] = revision_note
+    # Last, because a client that folds a result shows only its final lines.
+    response.update(count=len(msgs), remaining=remaining, more=more)
     return response
 
 
@@ -2022,7 +2019,7 @@ async def ack(
     Returns ``{"ok": true}`` only if a still-unread message with that id
     existed and was ackable by this session (idempotent — a second ack
     returns false). ``message_ids`` acks a batch, each under the same rule,
-    and returns ``{"ok": <all acked>, "results": {id: {...}}}``.
+    and returns ``{"results": {id: {...}}, "ok": <all acked>}``.
     """
     if (message_id is None) == (message_ids is None):
         return {"ok": False, "error": "pass exactly one of message_id, message_ids"}
@@ -2032,7 +2029,8 @@ async def ack(
     results = {}
     for mid in dict.fromkeys(message_ids):
         results[mid] = await _in_thread(_consume, mailbox.ack, mid)
-    return {"ok": all(r.get("ok") for r in results.values()), "results": results}
+    # The verdict last, where a client that folds a result still shows it.
+    return {"results": results, "ok": all(r.get("ok") for r in results.values())}
 
 
 @mcp.tool()

@@ -583,7 +583,12 @@ def send(
         return {"message_id": cur.lastrowid, "created_at": created}
 
 
-def inbox(
+def inbox(agent, **kwargs) -> tuple[list[dict], int]:
+    """``read_batch`` without ``more``: ``(messages, remaining)``."""
+    return read_batch(agent, **kwargs)[:2]
+
+
+def read_batch(
     agent,
     *,
     unread_only: bool = True,
@@ -594,7 +599,7 @@ def inbox(
     conversation: Optional[str] = None,
     db_path: Optional[Path] = None,
     now_fn: Callable[[], datetime] = _default_now,
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, bool]:
     """Messages addressed TO ``agent``, oldest first (read in arrival order).
 
     ``after_id`` returns only messages with a larger id: how a reader that
@@ -602,9 +607,12 @@ def inbox(
     what came later, instead of re-reading the same first batch. It does not
     change ``remaining``.
 
-    Returns ``(messages, remaining)`` where ``remaining`` counts the messages
-    still unacked for these recipients AFTER this call - a caller polls again
-    while it is non-zero.
+    Returns ``(messages, remaining, more)`` where ``remaining`` counts the
+    messages still unacked for these recipients AFTER this call - a caller
+    polls again while it is non-zero - and ``more`` says whether any of them
+    lie past this batch. ``remaining`` includes mail a reader is deferring, so
+    only ``more`` tells a reader paging with ``after_id`` that it is done,
+    without the empty read that used to be the only way to find out.
 
     ``agent`` may be one name or several. Several is how a session reads its
     own lane AND the shared unqualified one in a single ordered pass, rather
@@ -640,7 +648,7 @@ def inbox(
     db_path = _resolve_db(db_path)
     agents = [agent] if isinstance(agent, str) else list(agent)
     if not agents:
-        return [], 0
+        return [], 0, False
     # ONCE, here. Ownership is consulted per message and again for the
     # remaining count, so normalizing at each use would exhaust a one-shot
     # iterator after the first message - and a bare string would be iterated
@@ -689,7 +697,7 @@ def inbox(
                 tuple(agents),
             ).fetchone()
             if probe is None:
-                return [], 0
+                return [], 0, False
         # BEGIN IMMEDIATE for a CONSUMING read only. Python's legacy
         # transaction mode opens a transaction only on DML, so a bare
         # `with conn:` leaves the SELECT outside it entirely: two pollers both
@@ -751,19 +759,24 @@ def inbox(
             # while remaining" loop would never terminate - head-of-line
             # blocking behind mail that is not yours to take.
             lane_clause, lane_params = _lane_clause(owned)
-            remaining_sql = (
-                f"SELECT COUNT(*) FROM messages WHERE recipient IN ({placeholders})"
+            unread = (
+                f"FROM messages WHERE recipient IN ({placeholders})"
                 " AND acked_at IS NULL" + lane_clause
             )
             remaining = conn.execute(
-                remaining_sql, tuple(agents) + lane_params
+                f"SELECT COUNT(*) {unread}", tuple(agents) + lane_params
             ).fetchone()[0]
+            cursor = messages[-1]["message_id"] if messages else after_id
+            more = bool(remaining) and conn.execute(
+                f"SELECT EXISTS(SELECT 1 {unread} AND id > ?)",
+                (*agents, *lane_params, cursor),
+            ).fetchone()[0] == 1
             if consuming:
                 conn.commit()
         except BaseException:
             conn.rollback()
             raise
-        return messages, remaining
+        return messages, remaining, more
 
 
 def recipients(*, db_path: Optional[Path] = None) -> list[dict]:

@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/mailbox.py",
+  "before": "cursor = messages[-1][\"message_id\"] if messages else after_id",
+  "after": "cursor = after_id",
+  "tests": [
+    "tests/test_mailbox.py::test_more_says_when_paging_past_deferred_mail_is_done"
+  ]
+}

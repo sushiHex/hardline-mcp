@@ -595,6 +595,23 @@ def test_reading_delivery_state_never_waits_on_a_fact_write(store, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_an_inbox_reply_ends_with_its_counts(store):
+    """Codex folds a tool result to its last lines: those should say whether
+    anything is left, not show a recovery hint or closing braces."""
+    from hardline_mcp import server
+
+    mailbox.send("codex", LANE, "a", db_path=store)
+    mailbox.send("codex", LANE, "b", db_path=store)
+    got = await server.inbox(agent="claude", limit=1, auto_ack=False)
+    assert list(got)[-3:] == ["count", "remaining", "more"]
+    assert (got["count"], got["remaining"], got["more"]) == (1, 2, True)
+    rest = await server.inbox(
+        agent="claude", auto_ack=False, after_id=got["last_message_id"]
+    )
+    assert (rest["count"], rest["remaining"], rest["more"]) == (1, 2, False)
+
+
+@pytest.mark.anyio
 async def test_ack_accepts_a_batch(store):
     from hardline_mcp import server
 
@@ -602,6 +619,7 @@ async def test_ack_accepts_a_batch(store):
     b = mailbox.send("codex", LANE, "b", db_path=store)["message_id"]
     result = await server.ack(message_ids=[a, b])
     assert result["ok"] is True
+    assert list(result)[-1] == "ok", "a client folding the result shows its tail"
     assert set(result["results"]) == {a, b}
     assert _acked(store, a) and _acked(store, b)
     assert (await server.ack())["ok"] is False, "exactly one of the two arguments"
