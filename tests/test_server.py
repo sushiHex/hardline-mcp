@@ -1911,20 +1911,25 @@ from hardline_mcp import jobs, server
 db = Path(sys.argv[1])
 running = jobs.create(agent="codex", requester="claude:r", label="a", request={}, db_path=db)
 queued = jobs.create(agent="codex", requester="claude:r", label="b", request={}, db_path=db)
-started, shutting_down = threading.Event(), threading.Event()
-threading._register_atexit(shutting_down.set)  # LIFO: runs after the drain
+started, futures = threading.Event(), {}
 slots = threading.BoundedSemaphore(2)
 
 def dispatch(job):
     jobs.mark_running(job, db_path=db)
     started.set()
-    assert shutting_down.wait(60)
+    # Hold the only worker until the drain has cancelled the queued job, so
+    # the worker cannot claim it first.
+    for _ in range(600):
+        if futures[queued].cancelled():
+            break
+        threading.Event().wait(0.1)
     jobs.finish(job, result={"ok": True}, db_path=db)
 
 def serving(_serve_stdio):
     for job in (running, queued):
         slots.acquire()
-        server._track_job(db, job, server._async_executor.submit(dispatch, job), slots)
+        futures[job] = server._async_executor.submit(dispatch, job)
+        server._track_job(db, job, futures[job], slots)
     started.wait(30)
 
 server.anyio.run = serving
@@ -1956,22 +1961,49 @@ def test_a_clean_exit_records_the_jobs_it_never_started(tmp_path):
     assert [b["state"] for b in bodies if b.get("job_id") == queued] == ["failed"]
 
 
-def test_the_exit_records_only_futures_it_cancelled(monkeypatch):
-    """A worker that claimed its future before the cancel runs it as usual:
-    recording it failed would race its real result."""
-    recorded = []
-    monkeypatch.setattr(server, "_fail_unstarted", lambda db, job, result: recorded.append(job))
-    won, lost = Future(), Future()
-    assert won.set_running_or_notify_cancel()
+def _drain(monkeypatch, pending, debts):
+    """Run the drain over ``pending`` futures, cancelling each not yet running."""
 
     class Executor:
         def shutdown(self, wait, cancel_futures):
-            won.cancel(), lost.cancel()
+            for future in pending.values():
+                future.cancel()
 
     monkeypatch.setattr(server, "_async_executor", Executor())
-    monkeypatch.setattr(server, "_pending_jobs", {("db", "won"): won, ("db", "lost"): lost})
+    monkeypatch.setattr(server, "_pending_jobs", dict(pending))
+    monkeypatch.setattr(server, "_debts", debts)
     server._drain_async_executor_at_exit()
-    assert recorded == ["lost"]
+
+
+def test_the_exit_owes_only_futures_it_cancelled(monkeypatch):
+    """A worker that claimed its future before the cancel runs it as usual:
+    recording it failed would race its real result."""
+    won, lost = Future(), Future()
+    assert won.set_running_or_notify_cancel()
+    debts = {}
+    _drain(monkeypatch, {("db", "won"): won, ("db", "lost"): lost}, debts)
+    assert list(debts) == [("db", "lost")]
+
+
+def test_the_exit_writes_nothing_before_the_join(monkeypatch):
+    """The drain runs before the executor's join and outside any budget: a
+    write there waits on a locked store per job. It only owes; the budgeted
+    _settle_at_exit pays."""
+    touched = []
+    monkeypatch.setattr(server.jobs, "mark_running", lambda *a, **k: touched.append(a))
+    monkeypatch.setattr(server.jobs, "finish", lambda *a, **k: touched.append(a))
+    debts = {}
+    _drain(monkeypatch, {("db", "queued"): Future()}, debts)
+    assert touched == [] and list(debts) == [("db", "queued")]
+
+
+def test_the_exit_keeps_a_cancellation_already_owed(monkeypatch):
+    """A cancellation by request that could not be written is still owed with
+    its own result; the exit's "server exited" must not replace it."""
+    cancellation = lambda: None  # noqa: E731
+    debts = {("db", "job"): cancellation}
+    _drain(monkeypatch, {("db", "job"): Future()}, debts)
+    assert debts[("db", "job")] is cancellation
 
 
 def test_a_clean_exit_pays_past_the_rest(owed, monkeypatch):

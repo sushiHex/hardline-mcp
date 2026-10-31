@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "            with _debts_lock:\n                _debts.setdefault((db_path, job_id), write)",
+  "after": "            _owe(db_path, job_id, write)",
+  "tests": [
+    "tests/test_server.py::test_the_exit_writes_nothing_before_the_join"
+  ]
+}

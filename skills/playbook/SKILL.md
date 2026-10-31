@@ -60,8 +60,9 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<round>-<lane>", mod
   units (hardline refuses longer ones). Put long material in `.playbook/`
   inside the workdir and give the paths; a lane may not be able to read
   outside its workdir. Shared input may go there before round 1; a lane's
-  output only after its blind round. Add `.playbook/` to
-  `.git/info/exclude`, and delete it when the play ends. A Claude lane in
+  output only after its blind round. Add `.playbook/` to the file
+  `git rev-parse --git-path info/exclude` names (a worktree's `.git` is a
+  file), and delete it when the play ends. A Claude lane in
   advisory mode, or with `github=` and no `github_tools`, has no tools: pass
   its material inline.
 
