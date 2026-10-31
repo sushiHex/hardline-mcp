@@ -5,10 +5,10 @@ finish and merge.
 
 ## Run it
 
-1. Write one task. Give each lane its own brief for it: a different model, a
-   different effort, or a different lens (correctness against source, the
-   user who must follow it, security). An adversarial brief here is how to
-   red-team.
+1. Write one brief and send it to every lane unchanged; the lanes differ by
+   model. To red-team, make the shared brief adversarial ("break this").
+   Several concerns (feasibility, security, cost) go into the one brief as
+   numbered questions every lane answers, never one concern per lane.
 2. Run one round with every lane (see "Running a round").
 3. Merge:
    - findings more than one lane reached: still verify them; shared material

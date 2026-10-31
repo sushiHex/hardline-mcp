@@ -5,7 +5,7 @@ resolution and decide.
 
 ## Run it
 
-1. **Round 1, blind.** Same material to every lane, each with its own brief.
+1. **Round 1, blind.** The same material and brief to every lane.
    If you were handed reviews already written, they are round 1; say that you
    cannot vouch for their blindness.
 2. **Draft a resolution:** for each finding, adopt, reject (with the reason) or

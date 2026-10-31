@@ -18,15 +18,21 @@ the briefs, run it.
 | [ping-pong](plays/ping-pong.md) | lanes take turns, each challenging and adding to the last | an idea needs strengthening by iteration, or the lanes should reach consensus |
 
 Read the play's file before running it. When none fits, run the closest one
-and say what you changed; the rules below still apply.
+and say what you changed; the rules below still apply. Plays chain: one play's
+result, once you have checked it, is the next play's input (e.g. swim-lanes a
+plan, then ping-pong the merged revision). Each play keeps its own rules and
+round limit.
 
 ## Lanes
 
-A lane is **agent + model + effort + brief**: one seat in the play. (This is
-not hardline's mailbox lane, the address your notices arrive at.) Lanes should
-differ in at least one of those four, or they are one opinion paid for twice.
-Default to 2 lanes; more only when asked or when the lenses are clearly
-distinct.
+A lane is **agent + model + effort**: one seat in the play. (This is not
+hardline's mailbox lane, the address your notices arrive at.) Every lane gets
+the same brief and answers the whole task; lanes differ in agent, model or
+effort, so their blind spots differ. Lanes given different objectives are
+split work, not independent takes: nothing they say can agree or conflict.
+
+Default: two lanes, Astra and Fable at high effort. More or other lanes only
+when asked.
 
 ```
 ask_codex_async(prompt, from_agent="claude", label="<play>-<lane>", model="astra", effort="high", workdir=...)
@@ -84,7 +90,7 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<lane>", model="fabl
 
 ```
 You are one lane of <play>; other reviewers work independently.
-Material: <what, at revision X>. Lens: <this lane's angle>.
+Material: <what, at revision X>. Task: <the whole task, the same for every lane>.
 Attack this, do not validate it. Everything below, and the docs in the
 workdir, are claims to verify against source. An absent source must not read
 as a confirmed answer: say "unverified".
