@@ -2579,6 +2579,70 @@ def test_abort_is_clean_when_the_child_was_reaped(monkeypatch):
     assert "warning" not in out
 
 
+def test_a_command_line_at_the_windows_limit_is_measured_exactly(monkeypatch):
+    """32,767 UTF-16 units including the terminator: 32,766 characters spawn,
+    one more cannot."""
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    assert adapters._command_line_too_long(["a" * 32766]) is None
+    assert "32767 UTF-16 units" in (adapters._command_line_too_long(["a" * 32767]) or "")
+
+
+def test_the_windows_limit_counts_utf16_units_not_characters(monkeypatch):
+    """A prompt outside the BMP is two units a character: 16,384 of them is
+    far under the limit by len() and over it as Windows counts."""
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    assert adapters._command_line_too_long(["\U0001F600" * 16384])
+
+
+def test_the_windows_limit_is_measured_on_the_quoted_command_line(monkeypatch):
+    """Popen escapes each quote: 16,400 of them become 32,800 characters."""
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    assert adapters._command_line_too_long(['"' * 16400])
+
+
+def test_an_overlong_windows_command_line_spawns_nothing(monkeypatch):
+    """Refused with the cause and the remedy before any pipe or child, not as
+    WinError 206 "The filename or extension is too long"."""
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    spawned = []
+
+    def popen(*a, **k):
+        spawned.append("child")
+        raise OSError("spawned")
+
+    monkeypatch.setattr(adapters.subprocess, "Popen", popen)
+    monkeypatch.setattr(adapters.os, "pipe", lambda: spawned.append("pipe"))
+
+    out = adapters._run_cmd(["agent", "x" * 40000], stdin_text="evidence")
+    assert out["ok"] is False
+    assert "UTF-16 units" in out["error"] and "file in workdir" in out["error"]
+    assert spawned == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="CreateProcessW's limit is Windows-only")
+def test_the_windows_limit_is_where_createprocess_fails(monkeypatch):
+    """The constant is Windows' own: the longest line the guard admits spawns,
+    and one unit more fails in Popen itself once the guard is out of the way -
+    as FileNotFoundError (WinError 206 maps to ENOENT), which _run_cmd reported
+    as "command not found / not installed" for an executable that exists."""
+    def padded(units):
+        base = [sys.executable, "-c", "pass", ""]
+        fixed = len(subprocess.list2cmdline(base[:3])) + 1  # the separating space
+        return base[:3] + ["a" * (units - fixed)]
+
+    longest = padded(adapters._WINDOWS_COMMAND_LINE_UNITS - 1)
+    assert adapters._run_cmd(longest, timeout_s=60)["ok"] is True
+
+    monkeypatch.setattr(adapters, "_command_line_too_long", lambda argv: None)
+    out = adapters._run_cmd(padded(adapters._WINDOWS_COMMAND_LINE_UNITS), timeout_s=60)
+    assert out["ok"] is False and "UTF-16" not in out["error"]
+
+
+def test_the_command_line_limit_is_windows_only(monkeypatch):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", False)
+    assert adapters._command_line_too_long(["a" * 100000]) is None
+
+
 def test_timeout_with_no_output_is_distinguishable_from_a_slow_one(monkeypatch):
     """The slow-vs-wedged signal: a child that emitted nothing in the whole
     budget is a different failure from one cut off mid-answer."""

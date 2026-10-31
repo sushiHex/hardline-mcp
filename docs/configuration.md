@@ -295,8 +295,10 @@ running, and the result says `capture_incomplete: true`.
 
 These values must be positive integers. Worker limits are read at startup;
 invalid timeout values fail the call before spawning an agent. Hermes uses a
-fixed 180-second budget. Queued dispatches are dropped at shutdown; calls already
-in flight are awaited. See [job receipts and cancellation](messaging.md#track-background-work)
+fixed 180-second budget. Queued dispatches are dropped at a clean shutdown and
+recorded `failed` ("server exited before the job started"), with their notice;
+calls already in flight are awaited. On Windows a command line over 32,767
+UTF-16 units is refused before spawning, with its length in the error. See [job receipts and cancellation](messaging.md#track-background-work)
 for admission and recovery behavior.
 
 **A client's own deadline is separate.** A sync `ask_claude` or `ask_codex`

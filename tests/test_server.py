@@ -2,11 +2,13 @@
 
 import collections
 from concurrent.futures import Future
+from contextlib import closing
 import itertools
 
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -1899,6 +1901,77 @@ def test_a_clean_exit_pays_what_a_running_dispatch_still_owes(tmp_path):
     assert "store refused" in run.stderr, "the dispatch never owed anything"
     job = server.jobs.get(run.stdout.strip(), db_path=db)
     assert job["state"] == server.jobs.COMPLETED
+
+
+_QUEUED_AT_EXIT = """
+import sys, threading
+from pathlib import Path
+from hardline_mcp import jobs, server
+
+db = Path(sys.argv[1])
+running = jobs.create(agent="codex", requester="claude:r", label="a", request={}, db_path=db)
+queued = jobs.create(agent="codex", requester="claude:r", label="b", request={}, db_path=db)
+started, shutting_down = threading.Event(), threading.Event()
+threading._register_atexit(shutting_down.set)  # LIFO: runs after the drain
+slots = threading.BoundedSemaphore(2)
+
+def dispatch(job):
+    jobs.mark_running(job, db_path=db)
+    started.set()
+    assert shutting_down.wait(60)
+    jobs.finish(job, result={"ok": True}, db_path=db)
+
+def serving(_serve_stdio):
+    for job in (running, queued):
+        slots.acquire()
+        server._track_job(db, job, server._async_executor.submit(dispatch, job), slots)
+    started.wait(30)
+
+server.anyio.run = serving
+server.serve()
+print(running, queued)
+"""
+
+
+def test_a_clean_exit_records_the_jobs_it_never_started(tmp_path):
+    """One worker, two accepted jobs: the exit cancels the queued one, and its
+    requester is told so - failed, with a notice - instead of a row that sits
+    queued until someone reads it as lost."""
+    db = tmp_path / "mb.db"
+    run = subprocess.run(
+        [sys.executable, "-c", _QUEUED_AT_EXIT, str(db)],
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
+        env={**os.environ, "HARDLINE_DB": str(db), "HARDLINE_ASYNC_MAX_WORKERS": "1"},
+    )
+    assert run.returncode == 0, run.stderr
+    running, queued = run.stdout.split()
+    assert server.jobs.get(running, db_path=db)["state"] == server.jobs.COMPLETED
+    job = server.jobs.get(queued, db_path=db)
+    assert job["state"] == server.jobs.FAILED
+    assert job["error"] == "server exited before the job started"
+    with closing(sqlite3.connect(db)) as conn:
+        bodies = [json.loads(b) for (b,) in conn.execute(
+            "SELECT body FROM messages WHERE recipient = 'claude:r'"
+        )]
+    assert [b["state"] for b in bodies if b.get("job_id") == queued] == ["failed"]
+
+
+def test_the_exit_records_only_futures_it_cancelled(monkeypatch):
+    """A worker that claimed its future before the cancel runs it as usual:
+    recording it failed would race its real result."""
+    recorded = []
+    monkeypatch.setattr(server, "_fail_unstarted", lambda db, job, result: recorded.append(job))
+    won, lost = Future(), Future()
+    assert won.set_running_or_notify_cancel()
+
+    class Executor:
+        def shutdown(self, wait, cancel_futures):
+            won.cancel(), lost.cancel()
+
+    monkeypatch.setattr(server, "_async_executor", Executor())
+    monkeypatch.setattr(server, "_pending_jobs", {("db", "won"): won, ("db", "lost"): lost})
+    server._drain_async_executor_at_exit()
+    assert recorded == ["lost"]
 
 
 def test_a_clean_exit_pays_past_the_rest(owed, monkeypatch):

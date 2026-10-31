@@ -56,11 +56,14 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<round>-<lane>", mod
   revision. Name the revision in the brief.
 - Every call is a fresh session. A brief carries everything the lane needs:
   the task, the material, and whatever the play says a later round carries.
-- Prompts travel on the command line, which fails past about 32k characters
-  on Windows. Put long material in `.playbook/<round>/` inside the workdir
-  and give the paths; a lane may not be able to read outside its workdir.
-  Write nothing there before round 1, so it can't break blindness, and delete
-  it when the play ends.
+- Prompts travel on the command line, which Windows caps at 32,767 UTF-16
+  units (hardline refuses longer ones). Put long material in `.playbook/`
+  inside the workdir and give the paths; a lane may not be able to read
+  outside its workdir. Shared input may go there before round 1; a lane's
+  output only after its blind round. Add `.playbook/` to
+  `.git/info/exclude`, and delete it when the play ends. A Claude lane in
+  advisory mode, or with `github=` and no `github_tools`, has no tools: pass
+  its material inline.
 
 ## Running a round
 
@@ -75,11 +78,15 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<round>-<lane>", mod
    its `job_status` now and then, backing off: a `lost` job never sends a
    notice, and a cancelled one may not. A terminal state is enough to read
    the result without a notice.
-3. **Check what came back.** The outer `ok` is true for failed and lost jobs
-   too. Read `state`, `error`, `result.ok`, `result.partial_reply` and
-   `result.actual_model`; for Codex it is null, so report the receipt's
-   `model_resolution` instead. Rerun a failed lane once, otherwise drop it
-   and say so.
+3. **Check what came back.** `state: completed` (the notice's `ok`) is the
+   only success; `job_result`'s outer `ok` means only that the job was found
+   and has finished. Then check who answered: Claude's `result.actual_model`
+   and `result.fallback`; Codex reports no served model, so give the
+   receipt's `model_resolution` as requested, not observed.
+4. **Handle the rest by state.** `failed`: read `error` (and any
+   `result.partial_reply`), fix what it names, and rerun once. `cancelled`:
+   someone stopped it; don't rerun. `lost`: its agent may still be running
+   (hardline can't cancel it), so report it rather than rerun.
 
 ## Rules every play keeps
 

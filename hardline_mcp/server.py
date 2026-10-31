@@ -388,8 +388,12 @@ def _drain_async_executor_at_exit() -> None:
     regression this restores: teardown is now bounded by the longest
     *already-running* call rather than by everything still queued behind
     it. A running dispatch is deliberately still awaited - its subprocess
-    can't be interrupted safely mid-call. A queued one never started, so
-    the mailbox result it would have written isn't owed to anyone.
+    can't be interrupted safely mid-call. A queued one never started, but its
+    requester holds an accepted receipt, so each future this cancels is
+    recorded failed, with its notice, rather than left to read ``lost``. A
+    worker that claimed its future first runs it as usual; a future cancelled
+    by request has already left ``_pending_jobs``. A refused write is a debt
+    ``_settle_at_exit`` retries.
 
     Registered through threading's registry, not ``atexit``: verified
     empirically that ``threading._shutdown()`` (where ThreadPoolExecutor's
@@ -400,7 +404,16 @@ def _drain_async_executor_at_exit() -> None:
     The API is private, so treat its absence on some future Python as
     merely losing this optimization rather than an import-time crash.
     """
+    with _pending_jobs_lock:
+        pending = list(_pending_jobs.items())
     _async_executor.shutdown(wait=False, cancel_futures=True)
+    for (db_path, job_id), future in pending:
+        if future.cancelled():
+            _fail_unstarted(
+                db_path,
+                job_id,
+                {"ok": False, "error": "server exited before the job started", "job_id": job_id},
+            )
 
 
 _register_threading_atexit = getattr(threading, "_register_atexit", None)

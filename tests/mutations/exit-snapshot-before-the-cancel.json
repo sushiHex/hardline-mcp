@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "    with _pending_jobs_lock:\n        pending = list(_pending_jobs.items())\n    _async_executor.shutdown(wait=False, cancel_futures=True)\n",
+  "after": "    _async_executor.shutdown(wait=False, cancel_futures=True)\n    with _pending_jobs_lock:\n        pending = list(_pending_jobs.items())\n",
+  "tests": [
+    "tests/test_server.py::test_a_clean_exit_records_the_jobs_it_never_started"
+  ]
+}
