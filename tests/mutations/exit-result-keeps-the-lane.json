@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "            label=job.get(\"label\"),\n            routing=request.get(\"routing\"),\n            model_resolution=request.get(\"model_resolution\"),\n        )\n        if job.get(\"state\") != jobs.CANCELLED:",
+  "after": "            label=None,\n            routing=None,\n            model_resolution=None,\n        )\n        if job.get(\"state\") != jobs.CANCELLED:",
+  "tests": [
+    "tests/test_server.py::test_the_exit_result_keeps_the_lane_and_its_model"
+  ]
+}

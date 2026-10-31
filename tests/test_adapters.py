@@ -2626,9 +2626,9 @@ def test_the_windows_limit_is_where_createprocess_fails(monkeypatch):
     as FileNotFoundError (WinError 206 maps to ENOENT), which _run_cmd reported
     as "command not found / not installed" for an executable that exists."""
     def padded(units):
-        base = [sys.executable, "-c", "pass", ""]
-        fixed = len(subprocess.list2cmdline(base[:3])) + 1  # the separating space
-        return base[:3] + ["a" * (units - fixed)]
+        base = [sys.executable, "-c", "pass"]
+        fixed = len(subprocess.list2cmdline(base)) + 1  # the separating space
+        return base + ["a" * (units - fixed)]
 
     longest = padded(adapters._WINDOWS_COMMAND_LINE_UNITS - 1)
     assert adapters._run_cmd(longest, timeout_s=60)["ok"] is True
@@ -2636,6 +2636,26 @@ def test_the_windows_limit_is_where_createprocess_fails(monkeypatch):
     monkeypatch.setattr(adapters, "_command_line_too_long", lambda argv: None)
     out = adapters._run_cmd(padded(adapters._WINDOWS_COMMAND_LINE_UNITS), timeout_s=60)
     assert out["ok"] is False and "UTF-16" not in out["error"]
+
+
+def test_a_cmd_shim_is_held_to_cmd_exes_limit(monkeypatch):
+    """`shutil.which("codex")` finds an npm install's codex.CMD, which runs
+    through cmd.exe: 8,191 characters, not CreateProcess's 32,767."""
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    assert "cmd.exe" in (adapters._command_line_too_long(["C:/npm/codex.CMD", "a" * 8200]) or "")
+    assert adapters._command_line_too_long(["C:/bin/codex.exe", "a" * 8200]) is None
+
+
+def test_a_spawn_too_long_for_windows_is_not_reported_missing(monkeypatch):
+    """WinError 206 arrives as FileNotFoundError; the executable exists."""
+    def popen(*a, **k):
+        error = FileNotFoundError(2, "The filename or extension is too long")
+        error.winerror = 206
+        raise error
+
+    monkeypatch.setattr(adapters.subprocess, "Popen", popen)
+    out = adapters._run_cmd(["agent"])
+    assert out["ok"] is False and out["error"].startswith("spawn failed")
 
 
 def test_the_command_line_limit_is_windows_only(monkeypatch):

@@ -1256,8 +1256,10 @@ def _idle_for(agent: str) -> int:
 # CreateProcessW takes at most 32,767 UTF-16 units of command line, its
 # terminating NUL included. Past it Popen raises WinError 206 as
 # FileNotFoundError, which read as "command not found / not installed" for an
-# executable that exists.
+# executable that exists. A .cmd or .bat (an npm shim, as ``shutil.which`` can
+# resolve ``codex``) runs through cmd.exe, which takes 8,191.
 _WINDOWS_COMMAND_LINE_UNITS = 32767
+_CMD_EXE_COMMAND_LINE_CHARS = 8191
 
 
 def _command_line_too_long(argv: list[str]) -> str | None:
@@ -1267,12 +1269,14 @@ def _command_line_too_long(argv: list[str]) -> str | None:
     if not _ON_WINDOWS:
         return None
     units = len(subprocess.list2cmdline(argv).encode("utf-16-le", "surrogatepass")) // 2
-    if units < _WINDOWS_COMMAND_LINE_UNITS:
+    batch = os.path.splitext(argv[0])[1].lower() in (".cmd", ".bat")
+    limit = _CMD_EXE_COMMAND_LINE_CHARS if batch else _WINDOWS_COMMAND_LINE_UNITS
+    if units < limit:
         return None
+    via = f"{os.path.basename(argv[0])} runs through cmd.exe, which" if batch else "Windows"
     return (
-        f"command line is {units} UTF-16 units; Windows allows "
-        f"{_WINDOWS_COMMAND_LINE_UNITS - 1} plus its terminator. Shorten the "
-        "prompt, or put long material in a file in workdir the agent can read."
+        f"command line is {units} UTF-16 units; {via} allows {limit - 1}. Shorten "
+        "the prompt, or put long material in a file in workdir the agent can read."
     )
 
 
@@ -1332,8 +1336,10 @@ def _run_cmd(
             cwd=cwd,
             start_new_session=True,
         )
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         _close_fds(stdin_pipe)
+        if getattr(e, "winerror", None) == 206:  # ERROR_FILENAME_EXCED_RANGE, mapped to ENOENT
+            return {"ok": False, "error": f"spawn failed: {e}"}
         return {"ok": False, "error": f"command not found / not installed: {argv[0]!r}"}
     except (OSError, ValueError) as e:  # ValueError: e.g. a NUL in an argument
         _close_fds(stdin_pipe)

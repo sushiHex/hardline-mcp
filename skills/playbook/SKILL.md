@@ -56,8 +56,9 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<round>-<lane>", mod
   revision. Name the revision in the brief.
 - Every call is a fresh session. A brief carries everything the lane needs:
   the task, the material, and whatever the play says a later round carries.
-- Prompts travel on the command line, which Windows caps at 32,767 UTF-16
-  units (hardline refuses longer ones). Put long material in `.playbook/`
+- Prompts travel on the command line, which Windows caps at 32,766 UTF-16
+  units, or 8,190 for an agent installed as a `.cmd` shim (hardline refuses
+  longer ones). Put long material in `.playbook/`
   inside the workdir and give the paths; a lane may not be able to read
   outside its workdir. Shared input may go there before round 1; a lane's
   output only after its blind round. Add `.playbook/` to the file

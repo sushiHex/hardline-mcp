@@ -1,7 +1,7 @@
 {
   "file": "hardline_mcp/server.py",
-  "before": "                _debts.setdefault((db_path, job_id), write)",
-  "after": "                _debts[(db_path, job_id)] = write",
+  "before": "                _debts.setdefault((db_path, job_id), _exit_write(db_path, job_id))",
+  "after": "                _debts[(db_path, job_id)] = _exit_write(db_path, job_id)",
   "tests": [
     "tests/test_server.py::test_the_exit_keeps_a_cancellation_already_owed"
   ]

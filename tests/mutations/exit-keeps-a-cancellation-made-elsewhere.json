@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "        if job.get(\"state\") != jobs.CANCELLED:\n            del result[\"cancelled_before_start\"]",
+  "after": "        if True:\n            del result[\"cancelled_before_start\"]",
+  "tests": [
+    "tests/test_server.py::test_the_exit_keeps_a_cancellation_made_elsewhere"
+  ]
+}

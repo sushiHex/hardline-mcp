@@ -1990,11 +1990,40 @@ def test_the_exit_writes_nothing_before_the_join(monkeypatch):
     write there waits on a locked store per job. It only owes; the budgeted
     _settle_at_exit pays."""
     touched = []
+    monkeypatch.setattr(server.jobs, "get", lambda *a, **k: touched.append(a) or {})
     monkeypatch.setattr(server.jobs, "mark_running", lambda *a, **k: touched.append(a))
     monkeypatch.setattr(server.jobs, "finish", lambda *a, **k: touched.append(a))
     debts = {}
     _drain(monkeypatch, {("db", "queued"): Future()}, debts)
     assert touched == [] and list(debts) == [("db", "queued")]
+
+
+def _pay_exit_write(db, cancel_first):
+    job = server.jobs.create(
+        agent="codex", requester="claude:r", label="lane-a",
+        request={"model_resolution": {"requested": "astra"}}, db_path=db,
+    )
+    if cancel_first:  # another process cancelled it; this one never retired it
+        server.jobs.request_cancel(job, db_path=db)
+    server._exit_write(db, job)()
+    return server.jobs.get(job, db_path=db)
+
+
+def test_the_exit_result_keeps_the_lane_and_its_model(tmp_path):
+    """The orchestrator reports which lane failed and the model it asked for."""
+    job = _pay_exit_write(tmp_path / "mb.db", cancel_first=False)
+    assert job["state"] == server.jobs.FAILED
+    assert job["result"]["error"] == "server exited before the job started"
+    assert job["result"].get("label") == "lane-a"
+    assert job["result"].get("model_resolution") == {"requested": "astra"}
+
+
+def test_the_exit_keeps_a_cancellation_made_elsewhere(tmp_path):
+    """Cancelled by request from another process, before this one retired it:
+    the requester is told it was cancelled, not that the server exited."""
+    job = _pay_exit_write(tmp_path / "mb.db", cancel_first=True)
+    assert job["state"] == server.jobs.CANCELLED
+    assert job["result"].get("cancelled_before_start") is True
 
 
 def test_the_exit_keeps_a_cancellation_already_owed(monkeypatch):

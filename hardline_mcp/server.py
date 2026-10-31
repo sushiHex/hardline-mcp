@@ -397,7 +397,8 @@ def _drain_async_executor_at_exit() -> None:
     requester holds an accepted receipt, so each future this cancels is owed
     a failed result, with its notice, rather than left to read ``lost``. Owed,
     not written: a write here waits on the store before the join, outside any
-    budget, so ``_settle_at_exit`` pays them within its own. A debt already
+    budget, so ``_settle_at_exit`` (registered by ``serve``) pays them within
+    its own. A debt already
     owed for the job (a cancellation by request) is kept. A worker that
     claimed its future first runs it as usual; a future cancelled by request
     has already left ``_pending_jobs``.
@@ -414,12 +415,32 @@ def _drain_async_executor_at_exit() -> None:
     with _pending_jobs_lock:
         pending = list(_pending_jobs.items())
     _async_executor.shutdown(wait=False, cancel_futures=True)
-    exited = "server exited before the job started"
     for (db_path, job_id), future in pending:
         if future.cancelled():
-            write = _unstarted_write(db_path, job_id, {"ok": False, "error": exited, "job_id": job_id})
             with _debts_lock:
-                _debts.setdefault((db_path, job_id), write)
+                _debts.setdefault((db_path, job_id), _exit_write(db_path, job_id))
+
+
+def _exit_write(db_path: Path, job_id: str) -> Callable[[], None]:
+    """The write owed a job the exit cancelled, built when paid: the row then
+    says whether someone cancelled it first (from another process, before this
+    one retired it), and that cancellation keeps its own result."""
+
+    def write() -> None:
+        job = jobs.get(job_id, db_path=db_path) or {}
+        request = job.get("request") or {}
+        result = _cancelled_result(
+            job_id,
+            label=job.get("label"),
+            routing=request.get("routing"),
+            model_resolution=request.get("model_resolution"),
+        )
+        if job.get("state") != jobs.CANCELLED:
+            del result["cancelled_before_start"]
+            result["error"] = "server exited before the job started"
+        _unstarted_write(db_path, job_id, result)()
+
+    return write
 
 
 _register_threading_atexit = getattr(threading, "_register_atexit", None)
