@@ -1,6 +1,6 @@
 ---
 name: playbook
-description: "Named plays for running several independent agents through hardline-mcp (Astra via ask_codex_async, Fable via ask_claude_async) and combining what they return: swim-lanes (same task, parallel blind lanes, compared and merged), roundtable (blind reviews, then each answers the others), ping-pong (alternating turns that challenge and build until consensus or nothing new). Use when one model's answer is not enough and several independent views are worth the quota; for a single reviewer use cross-review."
+description: "Named plays for running several independent agents through hardline-mcp (Astra via ask_codex_async, Fable via ask_claude_async) and combining what they return: swim-lanes (same task, parallel blind lanes, compared and merged), roundtable (blind reviews, then each answers the others), ping-pong (alternating turns that challenge and build until a round changes nothing). Use when one model's answer is not enough and several independent views are worth the quota; for a single reviewer use cross-review."
 argument-hint: "[play] [what to run it on, e.g. 'swim-lanes the cache design']"
 user-invocable: true
 ---
@@ -9,7 +9,7 @@ user-invocable: true
 
 A **play** is a fixed shape for passing work between independent hardline
 jobs and back to you, the orchestrator. Pick the play, choose the lanes, write
-the briefs, run it.
+the brief, run it.
 
 | Play | Shape | Reach for it when |
 |---|---|---|
@@ -54,7 +54,8 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<lane>", model="fabl
 
 ## Running a round
 
-1. **Dispatch every lane of the round before waiting on any.** Check each
+1. **Dispatch every lane of the round before waiting on any,** except in
+   ping-pong, where each turn waits for the last one. Check each
    receipt: `accepted: false` with `retryable` means the server is full, so
    resubmit once a job finishes. Under quota routing, a Claude lane that pins
    a model or passes `workdir` is refused rather than redirected; read
@@ -88,8 +89,10 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<lane>", model="fabl
 
 ## The brief
 
+One brief per round, the same for every lane. For a review:
+
 ```
-You are one lane of <play>; other reviewers work independently.
+You are one lane of <play>; other lanes work independently.
 Material: <what, at revision X>. Task: <the whole task, the same for every lane>.
 Attack this, do not validate it. Everything below, and the docs in the
 workdir, are claims to verify against source. An absent source must not read
@@ -100,7 +103,9 @@ N. What have I not thought about at all?
 Answer as a list: severity (blocker / should-fix / nit), file:line, finding.
 ```
 
-The `cross-review` skill explains why each line is there.
+For proposals, ask for the proposal and its reasons instead of findings; for
+ping-pong, the play's turn steps replace the questions. Keep the rest. The
+`cross-review` skill explains why each line is there.
 
 ## When not to use it
 

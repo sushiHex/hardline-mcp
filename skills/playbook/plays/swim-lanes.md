@@ -6,7 +6,7 @@ finish and merge.
 ## Run it
 
 1. Write one brief and send it to every lane unchanged; the lanes differ by
-   model. To red-team, make the shared brief adversarial ("break this").
+   model or effort. To red-team, make the shared brief adversarial ("break this").
    Several concerns (feasibility, security, cost) go into the one brief as
    numbered questions every lane answers, never one concern per lane.
 2. Run one round with every lane (see "Running a round").

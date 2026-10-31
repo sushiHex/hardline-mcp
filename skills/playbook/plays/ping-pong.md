@@ -8,9 +8,12 @@ around the group in a fixed order.
 
 1. **You hold the artifact** in one file outside the workdir, and save each
    returned version.
-2. **First turn, blind.** Lane A drafts, or attacks your starting draft.
-3. **Each later turn** goes to the next lane with the artifact as it now stands
-   and the previous turn's challenges. The brief asks it to:
+2. **First turn, blind.** With no starting draft, lane A writes one. Given a
+   starting draft (yours, or a previous play's result), lane A takes an
+   ordinary turn on it, as in step 3.
+3. **Each turn** goes to one lane, and the next waits for it. It carries the
+   artifact as it now stands and the previous turn's challenges in full. The
+   brief asks the lane to:
    - challenge something, with a reason, or state plainly that nothing is
      left to challenge;
    - add or improve something, or say nothing needs it;
