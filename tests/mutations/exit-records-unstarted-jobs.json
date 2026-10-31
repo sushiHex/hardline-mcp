@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "    for (db_path, job_id), future in pending:\n        if future.cancelled():\n            with _debts_lock:",
+  "after": "    for (db_path, job_id), future in ():\n        if future.cancelled():\n            with _debts_lock:",
+  "tests": [
+    "tests/test_server.py::test_a_clean_exit_records_the_jobs_it_never_started"
+  ]
+}

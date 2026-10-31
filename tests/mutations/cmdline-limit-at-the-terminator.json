@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "    if units < limit:\n        return None",
+  "after": "    if units <= limit:\n        return None",
+  "tests": [
+    "tests/test_adapters.py::test_a_command_line_at_the_windows_limit_is_measured_exactly"
+  ]
+}

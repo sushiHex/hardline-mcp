@@ -1253,6 +1253,33 @@ def _idle_for(agent: str) -> int:
     return positive_int_env(f"HARDLINE_{agent.upper()}_IDLE_S", _IDLE_S, unit="seconds")
 
 
+# CreateProcessW takes at most 32,767 UTF-16 units of command line, its
+# terminating NUL included. Past it Popen raises WinError 206 as
+# FileNotFoundError, which read as "command not found / not installed" for an
+# executable that exists. A .cmd or .bat (an npm shim, as ``shutil.which`` can
+# resolve ``codex``) runs through cmd.exe, which takes 8,191.
+_WINDOWS_COMMAND_LINE_UNITS = 32767
+_CMD_EXE_COMMAND_LINE_CHARS = 8191
+
+
+def _command_line_too_long(argv: list[str]) -> str | None:
+    """Why ``argv`` cannot be spawned on Windows, or None. Measured on the
+    string Popen itself builds (``list2cmdline``), in UTF-16 units: a prompt
+    outside the BMP takes two per character."""
+    if not _ON_WINDOWS:
+        return None
+    units = len(subprocess.list2cmdline(argv).encode("utf-16-le", "surrogatepass")) // 2
+    batch = os.path.splitext(argv[0])[1].lower() in (".cmd", ".bat")
+    limit = _CMD_EXE_COMMAND_LINE_CHARS if batch else _WINDOWS_COMMAND_LINE_UNITS
+    if units < limit:
+        return None
+    via = f"{os.path.basename(argv[0])} runs through cmd.exe, which" if batch else "Windows"
+    return (
+        f"command line is {units} UTF-16 units; {via} allows {limit - 1}. Shorten "
+        "the prompt, or put long material in a file in workdir the agent can read."
+    )
+
+
 def _run_cmd(
     argv: list[str],
     *,
@@ -1285,6 +1312,9 @@ def _run_cmd(
     (emoji, box-drawing); decode as UTF-8 and replace undecodable bytes rather
     than crash on the platform default codec (cp1252 on Windows)."""
     started = time.monotonic()
+    too_long = _command_line_too_long(argv)
+    if too_long:
+        return {"ok": False, "error": too_long}
     # Encoded before anything is spawned, so it cannot fail with a child alive.
     stdin_bytes = None if stdin_text is None else stdin_text.encode("utf-8", "replace")
     stdin_pipe = os.pipe() if stdin_bytes is not None else None
@@ -1306,8 +1336,10 @@ def _run_cmd(
             cwd=cwd,
             start_new_session=True,
         )
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         _close_fds(stdin_pipe)
+        if getattr(e, "winerror", None) == 206:  # ERROR_FILENAME_EXCED_RANGE, mapped to ENOENT
+            return {"ok": False, "error": f"spawn failed: {e}"}
         return {"ok": False, "error": f"command not found / not installed: {argv[0]!r}"}
     except (OSError, ValueError) as e:  # ValueError: e.g. a NUL in an argument
         _close_fds(stdin_pipe)

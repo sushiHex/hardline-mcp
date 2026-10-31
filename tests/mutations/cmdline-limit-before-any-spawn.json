@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "    too_long = _command_line_too_long(argv)\n    if too_long:\n        return {\"ok\": False, \"error\": too_long}\n",
+  "after": "",
+  "tests": [
+    "tests/test_adapters.py::test_an_overlong_windows_command_line_spawns_nothing"
+  ]
+}

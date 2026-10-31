@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "units = len(subprocess.list2cmdline(argv).encode(\"utf-16-le\", \"surrogatepass\")) // 2",
+  "after": "units = len(\" \".join(argv).encode(\"utf-16-le\", \"surrogatepass\")) // 2",
+  "tests": [
+    "tests/test_adapters.py::test_the_windows_limit_is_measured_on_the_quoted_command_line"
+  ]
+}
