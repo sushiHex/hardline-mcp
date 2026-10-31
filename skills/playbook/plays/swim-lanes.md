@@ -21,8 +21,8 @@ finish and merge.
 
 ## Proposals
 
-When the lanes each propose something (a design, a fix, a name), add a judging
-round: send each proposal in full, unattributed, to a lane that did not write
-it (with two lanes, they swap; prefer a judge on a different model, since a
+When the task asks for competing proposals (a design, a name), not a review
+(a review that suggests fixes is still a review), add a judging round: send
+each proposal in full, unattributed, to a lane that did not write it (with two lanes, they swap; prefer a judge on a different model, since a
 model may recognise its own prose). Pick one or merge the best parts; the
 judges advise.

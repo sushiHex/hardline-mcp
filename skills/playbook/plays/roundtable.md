@@ -6,15 +6,19 @@ resolution and decide.
 ## Run it
 
 1. **Round 1, blind.** The same material and brief to every lane.
-   If you were handed reviews already written, they are round 1; say that you
-   cannot vouch for their blindness.
-2. **Draft a resolution:** for each finding, adopt, reject (with the reason) or
-   leave open.
-3. **Next round, answers.** Send each lane the original material, its own last
-   answer, the other lanes' last answers in full, and your current resolution.
-   Ask it to:
+   - Handed reviews already written? They are round 1, labelled as external
+     unless you know which model wrote each; don't assign them to your lanes.
+     Find the material and revision they reviewed. If you can't, limit the
+     roundtable to the reviews themselves and mark source-dependent
+     conclusions unverified. You cannot vouch for their blindness.
+2. **Number every finding** (A1, A2, B1, ...) and draft a resolution: adopt,
+   reject (with the reason) or leave open, by number.
+3. **Next round, answers.** Send each lane the original material, all round-1
+   reviews, every lane's latest answer, and your current resolution, so a
+   fresh session can follow what is being argued. Ask it, by finding number,
+   to:
    - concede, rebut or sharpen each of the others' findings. A rebuttal
-     without `file:line` is an opinion;
+     without evidence is an opinion;
    - say what your resolution rejected wrongly, or adopted without evidence,
      if anything;
    - name anything every lane missed.

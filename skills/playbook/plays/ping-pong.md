@@ -21,8 +21,11 @@ around the group in a fixed order.
 4. Between turns you may correct factual errors against source. Say so in the
    next brief; don't silently edit.
 5. **Stop at the first of:**
-   - a full round that leaves the artifact unchanged. That is consensus if
-     every lane said it agrees with this version; record what is unsettled;
+   - a full round in which every turn returned its input unchanged, with no
+     corrections from you. That is consensus if every lane said it agrees
+     with this version; record what is unsettled. A round that only changes
+     the artifact back to an earlier version is a cycle, not agreement:
+     record the disagreement and stop;
    - the round limit.
 6. **Decide.** Report how it stopped.
 

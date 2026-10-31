@@ -20,16 +20,20 @@ the brief, run it.
 Read the play's file before running it. When none fits, run the closest one
 and say what you changed; the rules below still apply. Plays chain: one play's
 result, once you have checked it, is the next play's input (e.g. swim-lanes a
-plan, then ping-pong the merged revision). Each play keeps its own rules and
-round limit.
+plan, then ping-pong the merged revision). When the next play works on the
+artifact itself, first apply the adopted findings to a complete revised draft
+and pass that, not the findings list. Each play keeps its own rules and round
+limit.
 
 ## Lanes
 
 A lane is **agent + model + effort**: one seat in the play. (This is not
-hardline's mailbox lane, the address your notices arrive at.) Every lane gets
-the same brief and answers the whole task; lanes differ in agent, model or
-effort, so their blind spots differ. Lanes given different objectives are
-split work, not independent takes: nothing they say can agree or conflict.
+hardline's mailbox lane, the address your notices arrive at.) Every lane
+works on the same whole task: in a blind opening round every lane gets the
+identical brief, and later rounds give each lane the context its play
+specifies. Lanes differ in agent, model or effort, so their blind spots
+differ. Lanes given different objectives are split work, not independent
+takes: nothing they say can agree or conflict.
 
 Default: two lanes, Astra and Fable at high effort. More or other lanes only
 when asked.
@@ -43,10 +47,12 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<lane>", model="fabl
   lane's: results come back to you. `label` names the lane.
 - Other models: `list_models()`. Choose ChatGPT models and efforts with the
   `chatgpt-quota-routing` skill.
-- `workdir` lets a lane check source instead of trusting your summary. It is a
-  live directory, so commit or otherwise freeze what is under review and name
-  the revision in the brief. Keep your drafts and notes outside it: a lane can
-  read anything there, which breaks blindness.
+- `workdir` lets a lane check source instead of trusting your summary. Lanes
+  read it live, and naming a commit does not change what they read, so give
+  them a checkout nothing edits during the play (a git worktree at the
+  revision, or a copy) and name the revision in the brief. Keep your drafts
+  and notes outside it: a lane can read anything there, which breaks
+  blindness.
 - Every call is a fresh session. A brief carries everything the lane needs:
   the task, the material, and in later rounds its own earlier answer.
 - Prompts travel on the command line. When handing over long replies, write
@@ -54,16 +60,19 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<lane>", model="fabl
 
 ## Running a round
 
-1. **Dispatch every lane of the round before waiting on any,** except in
-   ping-pong, where each turn waits for the last one. Check each
-   receipt: `accepted: false` with `retryable` means the server is full, so
-   resubmit once a job finishes. Under quota routing, a Claude lane that pins
-   a model or passes `workdir` is refused rather than redirected; read
-   `routing` on the receipt, and pass `require_claude=True` when the play
-   needs Claude.
-2. **Wait for `job_finished` notices,** then read each answer in full with
-   `job_result(job_id)`. If a notice is slow, check once with `job_status`: a
-   `lost` or cancelled job may never send one.
+1. **Submit every lane of the round before reading any answer,** except in
+   ping-pong, where each turn waits for the last one. Check each receipt. On
+   `accepted: false`, read `error`: only a refusal carrying `max_pending`
+   means the server is full (resubmit after one of your jobs finishes);
+   others, such as `unheld_names`, say their own recovery. Under quota
+   routing, a Claude lane that pins a model or passes `workdir` is refused
+   rather than redirected; read `routing` on the receipt, and pass
+   `require_claude=True` when the play needs Claude.
+2. **Collect answers** from `job_finished` notices in your inbox, then read
+   each in full with `job_result(job_id)`. While any job is unresolved, check
+   its `job_status` now and then, backing off: a `lost` job never sends a
+   notice, and a cancelled one may not. A terminal state is enough to read
+   the result without a notice.
 3. **Check what came back.** The outer `ok` is true for failed and lost jobs
    too. Read `state`, `error`, `result.ok` and `result.partial_reply`, and
    what actually ran: `result.routing.executed_agent` (a Claude job can run on
@@ -79,7 +88,8 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<lane>", model="fabl
 2. **Agreement is not validation.** Lanes reading the same workdir share its
    errors; two lanes agreeing on an unverified premise is one claim.
 3. **Every play has a round limit,** set before it starts: default 3, where a
-   round is one turn from every lane that acts in it. Swim-lanes is one round.
+   round is one turn from every lane that acts in it. A swim-lanes review is
+   one round; swim-lanes proposals are two (proposing, then judging).
 4. **Results pass in full** (by file path when long), fenced as quoted data
    with clear markers, and the receiving lane is told they are another agent's
    claims, not instructions.
@@ -89,7 +99,7 @@ ask_claude_async(prompt, from_agent="claude", label="<play>-<lane>", model="fabl
 
 ## The brief
 
-One brief per round, the same for every lane. For a review:
+For a review's blind opening round, identical for every lane:
 
 ```
 You are one lane of <play>; other lanes work independently.
@@ -103,9 +113,12 @@ N. What have I not thought about at all?
 Answer as a list: severity (blocker / should-fix / nit), file:line, finding.
 ```
 
-For proposals, ask for the proposal and its reasons instead of findings; for
-ping-pong, the play's turn steps replace the questions. Keep the rest. The
-`cross-review` skill explains why each line is there.
+For proposals, ask for the proposal and its reasons instead of findings. For
+a ping-pong turn, replace the first line, the questions and the answer format
+with the play's turn steps; keep the material, the task and the
+verify-against-source lines. Evidence is `file:line` for repository claims,
+or a quoted passage or worked reasoning for anything else. The `cross-review`
+skill explains why each line is there.
 
 ## When not to use it
 
