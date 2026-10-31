@@ -6,8 +6,7 @@ around the group in a fixed order.
 
 ## Run it
 
-1. **You hold the artifact** in one file outside the workdir, and save each
-   returned version.
+1. **You hold the artifact** in one file, and save each returned version.
 2. **First turn, blind.** With no starting draft, lane A writes one. Given a
    starting draft (yours, or a previous play's result), lane A takes an
    ordinary turn on it, as in step 3.
@@ -17,12 +16,13 @@ around the group in a fixed order.
    - challenge something, with a reason, or state plainly that nothing is
      left to challenge;
    - add or improve something, or say nothing needs it;
-   - return the revised artifact, and say whether it agrees with that version.
+   - return the revised artifact, or the single word UNCHANGED, and say
+     whether it agrees with that version.
 4. Between turns you may correct factual errors against source. Say so in the
    next brief; don't silently edit.
 5. **Stop at the first of:**
-   - a full round in which every turn returned its input unchanged, with no
-     corrections from you. That is consensus if every lane said it agrees
+   - a full round in which every turn returned UNCHANGED, with no corrections
+     from you. That is consensus if every lane said it agrees
      with this version; record what is unsettled. A round that only changes
      the artifact back to an earlier version is a cycle, not agreement:
      record the disagreement and stop;

@@ -19,8 +19,8 @@ resolution and decide.
    to:
    - concede, rebut or sharpen each of the others' findings. A rebuttal
      without evidence is an opinion;
-   - say what your resolution rejected wrongly, or adopted without evidence,
-     if anything;
+   - say what the orchestrator's resolution rejected wrongly, or adopted
+     without evidence, if anything;
    - name anything every lane missed.
 4. Revise the resolution. Run another round only while a round changes it, up
    to the round limit (round 1 counts).
