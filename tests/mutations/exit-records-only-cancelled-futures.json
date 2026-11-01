@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "    for (db_path, job_id), future in pending:\n        if future.cancelled():",
+  "after": "    for (db_path, job_id), future in pending:\n        if True:",
+  "tests": [
+    "tests/test_server.py::test_the_exit_owes_only_futures_it_cancelled"
+  ]
+}

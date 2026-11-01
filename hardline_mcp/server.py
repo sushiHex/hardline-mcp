@@ -178,15 +178,20 @@ def _owe(db_path: Path, job_id: str, write: Callable[[], object]) -> None:
 
 def _fail_unstarted(db_path: Path, job_id: str, result: dict) -> None:
     """Record ``result`` for a job whose agent never ran: queued -> running ->
-    terminal, or onto the cancellation that got there first. Neither step runs
-    the agent, and ``finish`` follows whatever ``mark_running`` answered,
-    because an earlier attempt may have committed the claim and then raised."""
+    terminal, or onto the cancellation that got there first."""
+    _owe(db_path, job_id, _unstarted_write(db_path, job_id, result))
+
+
+def _unstarted_write(db_path: Path, job_id: str, result: dict) -> Callable[[], None]:
+    """Neither step runs the agent, and ``finish`` follows whatever
+    ``mark_running`` answered, because an earlier attempt may have committed
+    the claim and then raised."""
 
     def write() -> None:
         jobs.mark_running(job_id, db_path=db_path)
         jobs.finish(job_id, result=result, db_path=db_path)
 
-    _owe(db_path, job_id, write)
+    return write
 
 
 def _settle_debts() -> None:
@@ -388,8 +393,15 @@ def _drain_async_executor_at_exit() -> None:
     regression this restores: teardown is now bounded by the longest
     *already-running* call rather than by everything still queued behind
     it. A running dispatch is deliberately still awaited - its subprocess
-    can't be interrupted safely mid-call. A queued one never started, so
-    the mailbox result it would have written isn't owed to anyone.
+    can't be interrupted safely mid-call. A queued one never started, but its
+    requester holds an accepted receipt, so each future this cancels is owed
+    a failed result, with its notice, rather than left to read ``lost``. Owed,
+    not written: a write here waits on the store before the join, outside any
+    budget, so ``_settle_at_exit`` (registered by ``serve``) pays them within
+    its own. A debt already
+    owed for the job (a cancellation by request) is kept. A worker that
+    claimed its future first runs it as usual; a future cancelled by request
+    has already left ``_pending_jobs``.
 
     Registered through threading's registry, not ``atexit``: verified
     empirically that ``threading._shutdown()`` (where ThreadPoolExecutor's
@@ -400,7 +412,35 @@ def _drain_async_executor_at_exit() -> None:
     The API is private, so treat its absence on some future Python as
     merely losing this optimization rather than an import-time crash.
     """
+    with _pending_jobs_lock:
+        pending = list(_pending_jobs.items())
     _async_executor.shutdown(wait=False, cancel_futures=True)
+    for (db_path, job_id), future in pending:
+        if future.cancelled():
+            with _debts_lock:
+                _debts.setdefault((db_path, job_id), _exit_write(db_path, job_id))
+
+
+def _exit_write(db_path: Path, job_id: str) -> Callable[[], None]:
+    """The write owed a job the exit cancelled, built when paid: the row then
+    says whether someone cancelled it first (from another process, before this
+    one retired it), and that cancellation keeps its own result."""
+
+    def write() -> None:
+        job = jobs.get(job_id, db_path=db_path) or {}
+        request = job.get("request") or {}
+        result = _cancelled_result(
+            job_id,
+            label=job.get("label"),
+            routing=request.get("routing"),
+            model_resolution=request.get("model_resolution"),
+        )
+        if job.get("state") != jobs.CANCELLED:
+            del result["cancelled_before_start"]
+            result["error"] = "server exited before the job started"
+        _unstarted_write(db_path, job_id, result)()
+
+    return write
 
 
 _register_threading_atexit = getattr(threading, "_register_atexit", None)

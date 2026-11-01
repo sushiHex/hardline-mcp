@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "    limit = _CMD_EXE_COMMAND_LINE_CHARS if batch else _WINDOWS_COMMAND_LINE_UNITS",
+  "after": "    limit = _WINDOWS_COMMAND_LINE_UNITS",
+  "tests": [
+    "tests/test_adapters.py::test_a_cmd_shim_is_held_to_cmd_exes_limit"
+  ]
+}

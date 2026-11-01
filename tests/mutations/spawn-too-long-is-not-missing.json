@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "        if getattr(e, \"winerror\", None) == 206:  # ERROR_FILENAME_EXCED_RANGE, mapped to ENOENT\n            return {\"ok\": False, \"error\": f\"spawn failed: {e}\"}\n",
+  "after": "",
+  "tests": [
+    "tests/test_adapters.py::test_a_spawn_too_long_for_windows_is_not_reported_missing"
+  ]
+}

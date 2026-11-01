@@ -126,8 +126,9 @@ job_result(job_id="job_...")
 Check `accepted` in the receipt and save its `job_id`. An accepted job may still
 be queued. Completion stores the full result and a small `job_finished` inbox
 notice together. Retrieve the answer with `job_result`; use `job_cancel` to
-cancel queued or running work. Jobs interrupted by owner exit become `lost`
-and are not automatically resumed.
+cancel queued or running work. A clean exit records the jobs it never started
+as `failed`; jobs whose owner exits without recording a terminal state become
+`lost` and are not automatically resumed.
 
 A spawned reviewer cannot reach GitHub itself. Pass `github="owner/repo#123"`
 and Hardline collects the pull request with its own `gh` and hands it over; see
