@@ -300,7 +300,12 @@ recorded `failed` ("server exited before the job started"), with their notice;
 calls already in flight are awaited. On Windows a command line longer than
 32,766 UTF-16 units (32,767 with its terminator), or than 8,190 when the agent
 is a `.cmd`/`.bat` shim run through cmd.exe, is refused before spawning, with
-its length in the error. See [job receipts and cancellation](messaging.md#track-background-work)
+its length in the error. A shim also refuses any argument holding a character
+cmd.exe acts on (`"` `%` `!` `&` `|` `<` `>` `^` or a line break), which a
+prompt nearly always does: Popen does not quote for cmd.exe, so such a prompt
+could run a command on the host or be cut to its first line. Point
+`HARDLINE_CODEX_CMD` (or the matching `HARDLINE_*_CMD`) at the native
+executable instead of npm's shim. See [job receipts and cancellation](messaging.md#track-background-work)
 for admission and recovery behavior.
 
 **A client's own deadline is separate.** A sync `ask_claude` or `ask_codex`

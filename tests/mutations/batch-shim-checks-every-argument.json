@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "    for index, arg in enumerate(argv[1:], 1):\n        active = sorted({c for c in arg if c in _CMD_EXE_ACTIVE})",
+  "after": "    for index, arg in enumerate(argv[1:2], 1):\n        active = sorted({c for c in arg if c in _CMD_EXE_ACTIVE})",
+  "tests": [
+    "tests/test_adapters.py::test_a_batch_shim_refuses_what_cmd_exe_would_act_on"
+  ]
+}

@@ -1269,7 +1269,7 @@ def _command_line_too_long(argv: list[str]) -> str | None:
     if not _ON_WINDOWS:
         return None
     units = len(subprocess.list2cmdline(argv).encode("utf-16-le", "surrogatepass")) // 2
-    batch = os.path.splitext(argv[0])[1].lower() in (".cmd", ".bat")
+    batch = _is_batch(argv[0])
     limit = _CMD_EXE_COMMAND_LINE_CHARS if batch else _WINDOWS_COMMAND_LINE_UNITS
     if units < limit:
         return None
@@ -1278,6 +1278,39 @@ def _command_line_too_long(argv: list[str]) -> str | None:
         f"command line is {units} UTF-16 units; {via} allows {limit - 1}. Shorten "
         "the prompt, or put long material in a file in workdir the agent can read."
     )
+
+
+# Characters cmd.exe acts on in a batch file's command line. Popen quotes for the
+# C runtime (``list2cmdline``), not for cmd.exe, so in an argument to a .cmd or
+# .bat a `"` flips cmd's quoting, `&` then starts a second command on the host,
+# `%VAR%` expands, and a newline ends the command line: a prompt became code, or
+# was cut to its first line with exit 0. Measured with a shim forwarding `%*`.
+# Parentheses break a `%*` expanded inside a block.
+_CMD_EXE_ACTIVE = '"%!&|<>^()\r\n'
+
+
+def _is_batch(program: str) -> bool:
+    """Whether Windows runs ``program`` through cmd.exe. It drops trailing dots
+    and spaces from a path, so `agent.cmd.` and `agent.cmd ` are batch files too."""
+    return os.path.splitext(program.rstrip(". "))[1].lower() in (".cmd", ".bat")
+
+
+def _batch_argument_refused(argv: list[str]) -> str | None:
+    """Why ``argv`` cannot be passed safely to a batch file, or None. Refused,
+    not escaped: no quoting survives every route through ``%*``."""
+    if not _ON_WINDOWS or not _is_batch(argv[0]):
+        return None
+    for index, arg in enumerate(argv[1:], 1):
+        active = sorted({c for c in arg if c in _CMD_EXE_ACTIVE})
+        if active:
+            shown = ", ".join(repr(c) for c in active)
+            return (
+                f"{os.path.basename(argv[0])} is a batch file run through cmd.exe, and "
+                f"argument {index} contains {shown}, which cmd.exe would act on instead "
+                "of passing through. Point HARDLINE_CODEX_CMD (or the matching "
+                "HARDLINE_*_CMD) at the agent's native executable."
+            )
+    return None
 
 
 def _run_cmd(
@@ -1312,9 +1345,9 @@ def _run_cmd(
     (emoji, box-drawing); decode as UTF-8 and replace undecodable bytes rather
     than crash on the platform default codec (cp1252 on Windows)."""
     started = time.monotonic()
-    too_long = _command_line_too_long(argv)
-    if too_long:
-        return {"ok": False, "error": too_long}
+    refused = _batch_argument_refused(argv) or _command_line_too_long(argv)
+    if refused:
+        return {"ok": False, "error": refused}
     # Encoded before anything is spawned, so it cannot fail with a child alive.
     stdin_bytes = None if stdin_text is None else stdin_text.encode("utf-8", "replace")
     stdin_pipe = os.pipe() if stdin_bytes is not None else None
