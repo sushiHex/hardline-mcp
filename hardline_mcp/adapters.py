@@ -1280,6 +1280,32 @@ def _command_line_too_long(argv: list[str]) -> str | None:
     )
 
 
+# Characters cmd.exe acts on in a batch file's command line. Popen quotes for the
+# C runtime (``list2cmdline``), not for cmd.exe, so in an argument to a .cmd or
+# .bat a `"` flips cmd's quoting, `&` then starts a second command on the host,
+# `%VAR%` expands, and a newline ends the command line: a prompt became code, or
+# was cut to its first line with exit 0. Measured with a shim forwarding `%*`.
+_CMD_EXE_ACTIVE = '"%!&|<>^\r\n'
+
+
+def _batch_argument_refused(argv: list[str]) -> str | None:
+    """Why ``argv`` cannot be passed safely to a batch file, or None. Refused,
+    not escaped: no quoting survives every route through ``%*``."""
+    if not _ON_WINDOWS or os.path.splitext(argv[0])[1].lower() not in (".cmd", ".bat"):
+        return None
+    for index, arg in enumerate(argv[1:], 1):
+        active = sorted({c for c in arg if c in _CMD_EXE_ACTIVE})
+        if active:
+            shown = ", ".join(repr(c) for c in active)
+            return (
+                f"{os.path.basename(argv[0])} is a batch file run through cmd.exe, and "
+                f"argument {index} contains {shown}, which cmd.exe would act on instead "
+                "of passing through. Point HARDLINE_CODEX_CMD (or the matching "
+                "HARDLINE_*_CMD) at the agent's native executable."
+            )
+    return None
+
+
 def _run_cmd(
     argv: list[str],
     *,
@@ -1312,9 +1338,9 @@ def _run_cmd(
     (emoji, box-drawing); decode as UTF-8 and replace undecodable bytes rather
     than crash on the platform default codec (cp1252 on Windows)."""
     started = time.monotonic()
-    too_long = _command_line_too_long(argv)
-    if too_long:
-        return {"ok": False, "error": too_long}
+    refused = _batch_argument_refused(argv) or _command_line_too_long(argv)
+    if refused:
+        return {"ok": False, "error": refused}
     # Encoded before anything is spawned, so it cannot fail with a child alive.
     stdin_bytes = None if stdin_text is None else stdin_text.encode("utf-8", "replace")
     stdin_pipe = os.pipe() if stdin_bytes is not None else None

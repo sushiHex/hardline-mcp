@@ -2646,6 +2646,58 @@ def test_a_cmd_shim_is_held_to_cmd_exes_limit(monkeypatch):
     assert adapters._command_line_too_long(["C:/bin/codex.exe", "a" * 8200]) is None
 
 
+@pytest.mark.parametrize("active", ['"', "&", "%", "\n", "|", "^"])
+def test_a_batch_shim_refuses_what_cmd_exe_would_act_on(monkeypatch, active):
+    """npm's codex.CMD runs through cmd.exe, which Popen does not quote for."""
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    error = adapters._batch_argument_refused(["C:/npm/codex.CMD", "exec", f"a{active}b"])
+    assert repr(active) in (error or "") and "HARDLINE_CODEX_CMD" in error
+
+
+def test_a_batch_shim_takes_plain_arguments(monkeypatch):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    assert adapters._batch_argument_refused(["C:/npm/codex.cmd", "exec", "--json", "plain words"]) is None
+
+
+def test_a_native_executable_takes_any_argument(monkeypatch):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    assert adapters._batch_argument_refused(["C:/bin/codex.exe", 'a "b" & %c%\nd']) is None
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", False)
+    assert adapters._batch_argument_refused(["/usr/bin/codex.cmd", "a & b"]) is None
+
+
+def test_a_refused_batch_argument_spawns_nothing(monkeypatch):
+    monkeypatch.setattr(adapters, "_ON_WINDOWS", True)
+    spawned = []
+
+    def popen(*a, **k):
+        spawned.append("child")
+        raise OSError("spawned")
+
+    monkeypatch.setattr(adapters.subprocess, "Popen", popen)
+    out = adapters._run_cmd(["C:/npm/codex.cmd", "exec", "--", "a & b"])
+    assert out["ok"] is False and "cmd.exe" in out["error"] and spawned == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe runs batch files on Windows only")
+def test_a_prompt_cannot_run_a_command_through_a_batch_shim(tmp_path, monkeypatch):
+    """A real shim forwarding %*, as npm's does. The control proves the probe
+    can see an injection: with the guard out of the way, the prompt's `&` runs
+    a second command that creates the marker."""
+    shim = tmp_path / "agent.cmd"
+    shim.write_text(f'@"{sys.executable}" -c "pass" %*\r\n', encoding="utf-8")
+    marker = tmp_path / "injected"
+    assert " " not in str(marker)  # unquoted in the injected command
+    prompt = f'Quote: "a & type nul > {marker} & rem'
+
+    out = adapters._run_cmd([str(shim), "exec", "--", prompt], timeout_s=60)
+    assert out["ok"] is False and not marker.exists()
+
+    monkeypatch.setattr(adapters, "_batch_argument_refused", lambda argv: None)
+    adapters._run_cmd([str(shim), "exec", "--", prompt], timeout_s=60)
+    assert marker.exists(), "control: the probe never saw an injection"
+
+
 def test_a_spawn_too_long_for_windows_is_not_reported_missing(monkeypatch):
     """WinError 206 arrives as FileNotFoundError; the executable exists."""
     def popen(*a, **k):
