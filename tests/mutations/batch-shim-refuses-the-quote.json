@@ -1,7 +1,7 @@
 {
   "file": "hardline_mcp/adapters.py",
-  "before": "_CMD_EXE_ACTIVE = '\"%!&|<>^\\r\\n'",
-  "after": "_CMD_EXE_ACTIVE = '%!&|<>^\\r\\n'",
+  "before": "_CMD_EXE_ACTIVE = '\"%!&|<>^()\\r\\n'",
+  "after": "_CMD_EXE_ACTIVE = '%!&|<>^()\\r\\n'",
   "tests": [
     "tests/test_adapters.py::test_a_batch_shim_refuses_what_cmd_exe_would_act_on"
   ]

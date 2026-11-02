@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "    return os.path.splitext(program.rstrip(\". \"))[1].lower() in (\".cmd\", \".bat\")",
+  "after": "    return os.path.splitext(program)[1].lower() in (\".cmd\", \".bat\")",
+  "tests": [
+    "tests/test_adapters.py::test_a_batch_file_with_trailing_dots_or_spaces_is_still_one"
+  ]
+}

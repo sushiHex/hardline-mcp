@@ -1269,7 +1269,7 @@ def _command_line_too_long(argv: list[str]) -> str | None:
     if not _ON_WINDOWS:
         return None
     units = len(subprocess.list2cmdline(argv).encode("utf-16-le", "surrogatepass")) // 2
-    batch = os.path.splitext(argv[0])[1].lower() in (".cmd", ".bat")
+    batch = _is_batch(argv[0])
     limit = _CMD_EXE_COMMAND_LINE_CHARS if batch else _WINDOWS_COMMAND_LINE_UNITS
     if units < limit:
         return None
@@ -1285,13 +1285,20 @@ def _command_line_too_long(argv: list[str]) -> str | None:
 # .bat a `"` flips cmd's quoting, `&` then starts a second command on the host,
 # `%VAR%` expands, and a newline ends the command line: a prompt became code, or
 # was cut to its first line with exit 0. Measured with a shim forwarding `%*`.
-_CMD_EXE_ACTIVE = '"%!&|<>^\r\n'
+# Parentheses break a `%*` expanded inside a block.
+_CMD_EXE_ACTIVE = '"%!&|<>^()\r\n'
+
+
+def _is_batch(program: str) -> bool:
+    """Whether Windows runs ``program`` through cmd.exe. It drops trailing dots
+    and spaces from a path, so `agent.cmd.` and `agent.cmd ` are batch files too."""
+    return os.path.splitext(program.rstrip(". "))[1].lower() in (".cmd", ".bat")
 
 
 def _batch_argument_refused(argv: list[str]) -> str | None:
     """Why ``argv`` cannot be passed safely to a batch file, or None. Refused,
     not escaped: no quoting survives every route through ``%*``."""
-    if not _ON_WINDOWS or os.path.splitext(argv[0])[1].lower() not in (".cmd", ".bat"):
+    if not _ON_WINDOWS or not _is_batch(argv[0]):
         return None
     for index, arg in enumerate(argv[1:], 1):
         active = sorted({c for c in arg if c in _CMD_EXE_ACTIVE})
