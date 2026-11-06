@@ -1,0 +1,9 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "    try:\n        _retire_cancelled_jobs()\n        job = jobs.get(job_id, db_path=db_path)\n    except Exception as exc:  # noqa: BLE001 - the job is already admitted\n        read_error = f\"{type(exc).__name__}: {exc}\"\n",
+  "after": "    _retire_cancelled_jobs()\n    job = jobs.get(job_id, db_path=db_path)\n",
+  "tests": [
+    "tests/test_server.py::test_a_store_read_after_admission_does_not_hide_the_accepted_job[retire]",
+    "tests/test_server.py::test_a_store_read_after_admission_does_not_hide_the_accepted_job[get]"
+  ]
+}

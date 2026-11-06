@@ -1495,6 +1495,7 @@ async def test_an_async_result_dispatched_before_a_rename_still_arrives(
         server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
     )
 
+    assert server._announce_self() == f"claude:{in_session}"
     dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
     assert dispatched["lane"] == f"claude:{in_session}"
 

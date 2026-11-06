@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "    if sessions.granted([recipient]):\n        return None\n    # A grant can be missing",
+  "after": "    if True:\n        return None\n    # A grant can be missing",
+  "tests": [
+    "tests/test_server.py::test_async_dispatch_is_refused_when_this_server_does_not_hold_the_result_lane"
+  ]
+}

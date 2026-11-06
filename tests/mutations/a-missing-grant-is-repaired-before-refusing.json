@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "    if agent := adapters.self_agent():\n        _announce_locked(agent, adapters.lane_for(agent))\n        if sessions.granted([recipient]):\n            return None\n    return {\n",
+  "after": "    return {\n",
+  "tests": [
+    "tests/test_server.py::test_a_missing_grant_is_repaired_before_dispatch_is_refused"
+  ]
+}
