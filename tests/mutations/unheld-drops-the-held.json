@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/bindings.py",
+  "before": "        if lane not in held",
+  "after": "        if True",
+  "tests": [
+    "tests/test_scoping.py::test_unheld_names_are_the_threads_own_under_the_prefix_and_not_held"
+  ]
+}

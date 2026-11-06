@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/channel.py",
+  "before": "            if version <= self._written:\n                return\n",
+  "after": "",
+  "tests": [
+    "tests/test_guards.py::test_an_older_fact_snapshot_never_overwrites_a_newer_one"
+  ]
+}

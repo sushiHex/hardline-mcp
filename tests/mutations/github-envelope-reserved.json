@@ -6,7 +6,6 @@
     "tests/test_github_context.py::test_the_whole_text_fits_the_budget[9000]",
     "tests/test_github_context.py::test_the_whole_text_fits_the_budget[12000]",
     "tests/test_github_context.py::test_the_whole_text_fits_the_budget[30000]",
-    "tests/test_github_context.py::test_the_whole_text_fits_the_budget[60000]",
-    "tests/test_github_context.py::test_the_whole_text_fits_the_budget[400000]"
+    "tests/test_github_context.py::test_the_whole_text_fits_the_budget[60000]"
   ]
 }

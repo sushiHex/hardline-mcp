@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/cli.py",
+  "before": "from .watch import main as watch",
+  "after": "from .wake_codex import main as watch",
+  "tests": [
+    "tests/test_cli_routing.py::test_each_subcommand_reaches_its_own_module[watch-watch]"
+  ]
+}

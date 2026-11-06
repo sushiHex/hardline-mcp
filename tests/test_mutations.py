@@ -59,6 +59,25 @@ def test_mutation_verdict_requires_real_regression(tmp_path, body, after, expect
         check(tmp_path, case)
 
 
+def test_every_listed_test_must_fail_not_just_one(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_sample.py").write_text(
+        "value = 1\n"
+        "def test_catches():\n    assert value == 1\n"
+        "def test_blind():\n    assert True\n",
+        encoding="utf-8",
+    )
+    case = dict(
+        file="tests/test_sample.py",
+        before="value = 1",
+        after="value = 2",
+        tests=["tests/test_sample.py::test_catches", "tests/test_sample.py::test_blind"],
+    )
+    with pytest.raises(RuntimeError, match="still passing.*test_blind"):
+        check(tmp_path, case)
+    check(tmp_path, {**case, "tests": case["tests"][:1]})
+
+
 def test_stale_anchor_is_an_error(tmp_path):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_sample.py").write_text("value = 1", encoding="utf-8")

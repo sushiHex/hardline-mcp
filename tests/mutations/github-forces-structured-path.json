@@ -3,7 +3,6 @@
   "before": "        and github is None\n",
   "after": "",
   "tests": [
-    "tests/test_github_review.py::test_a_claude_reviewer_has_no_tools_at_all",
-    "tests/test_github_review.py::test_a_codex_reviewer_gets_the_evidence_on_stdin_and_no_web"
+    "tests/test_github_review.py::test_a_claude_reviewer_has_no_tools_at_all"
   ]
 }

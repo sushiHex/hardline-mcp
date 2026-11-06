@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/cli.py",
+  "before": "        raise SystemExit(2)",
+  "after": "        raise SystemExit(0)",
+  "tests": [
+    "tests/test_cli_routing.py::test_an_unknown_command_exits_2"
+  ]
+}

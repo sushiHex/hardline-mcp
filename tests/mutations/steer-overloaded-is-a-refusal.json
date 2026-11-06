@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_steer.py",
+  "before": "frozenset({-32600, -32601, -32602, -32001})",
+  "after": "frozenset({-32600, -32601, -32602})",
+  "tests": [
+    "tests/test_codex_steer.py::test_an_error_raised_before_admission_is_a_refusal[-32001]"
+  ]
+}
