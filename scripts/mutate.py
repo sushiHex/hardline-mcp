@@ -4,7 +4,8 @@
 
 Every anchor is checked first. One baseline run over every selected test must
 execute and pass each case's selection; then each mutation runs its tests in a
-worker's own copy of the tree, and must turn them into assertion failures.
+worker's own copy of the tree, and must turn every listed test into an
+assertion failure (a selector whose tests all still pass is an error).
 Stale anchors, empty/skipped selections, collection failures, and broken
 imports are errors.
 """
@@ -180,13 +181,21 @@ def _mutate(root: Path, case: dict, expected: set) -> None:
     finally:
         path.write_text(original, encoding="utf-8")
     outcomes = [item for items in mutated.values() for item in items]
+    # Every listed test must fail: a selector whose tests all still pass is a
+    # test the mutation does not touch, however many others fail.
+    passing = [
+        s for s in case["tests"]
+        if not any(mutated.get(key) for key in mutated if _selects(s, key))
+    ]
     if (
         code != 1
         or mutated.keys() != expected
         or not outcomes
+        or passing
         or any(tag != "failure" or not message.startswith(_CAUGHT) for tag, message in outcomes)
     ):
-        raise RuntimeError(f"mutation was not caught by an assertion\n{output}")
+        detail = f" (still passing: {passing})" if passing else ""
+        raise RuntimeError(f"mutation was not caught by an assertion{detail}\n{output}")
 
 
 def check(source: Path, case: dict) -> None:

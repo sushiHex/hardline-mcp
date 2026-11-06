@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/watch.py",
+  "before": "                failed_since = None\n                if once:",
+  "after": "                if once:",
+  "tests": [
+    "tests/test_guards.py::test_a_second_outage_after_recovery_gets_its_own_grace"
+  ]
+}

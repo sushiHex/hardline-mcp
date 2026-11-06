@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/announce.py",
+  "before": "        if start == 0 and self._cursor == 0:\n            self.announced &=",
+  "after": "        if self._cursor == 0:\n            self.announced &=",
+  "tests": [
+    "tests/test_guards.py::test_a_sweep_that_resumed_mid_backlog_does_not_forget_announced_mail"
+  ]
+}
