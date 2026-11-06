@@ -462,15 +462,19 @@ def test_a_stopped_wake_stops_reading_as_receipted(monkeypatch):
 def test_cancelling_a_reservation_on_a_stopped_wake_keeps_it_unreceipted(monkeypatch):
     rows = [{"id": 1, "recipient": "codex:a"}]
     wake = _armed(monkeypatch, rows, ["codex:a"])
+    from datetime import timedelta
+
     now = wake.clock()
     wake.clock = lambda: now
     _, nonce, _ = wake.poll()
     assert wake.accept_receipt(nonce)
+    now += timedelta(minutes=20)
     rows.append({"id": 2, "recipient": "codex:a"})
     _, nonce_b, ids_b = wake.poll()  # B is reserved
     wake.observe({"_meta": meta(thread=OTHER)})  # then the wake is stopped
     wake.take_back(nonce_b, ids_b)  # and B is cancelled unsent
-    assert wake.state() != "receipted"
+    # The last actual push is A, 20 minutes old: as if cancelled before the stop.
+    assert wake.state() == "unreceipted"
 
 
 def test_a_receipt_before_and_after_the_stop_read_alike(monkeypatch):
