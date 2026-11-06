@@ -1,0 +1,9 @@
+{
+  "file": "hardline_mcp/channel.py",
+  "before": "        else:\n            # A notice-only push is recorded as awaiting a receipt like any\n",
+  "after": "        elif False:\n            # A notice-only push is recorded as awaiting a receipt like any\n",
+  "tests": [
+    "tests/test_hints.py::test_a_notice_only_push_can_be_receipted_by_the_text_it_sent",
+    "tests/test_hints.py::test_a_push_names_the_lane_once_and_never_shows_the_mail"
+  ]
+}

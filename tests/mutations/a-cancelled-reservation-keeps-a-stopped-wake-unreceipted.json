@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/announce.py",
+  "before": "            self.facts[\"oldest_unreceipted_at\"] = self._previous_push if self.stopped else None\n",
+  "after": "            self.facts[\"oldest_unreceipted_at\"] = None\n",
+  "tests": [
+    "tests/test_codex_queue.py::test_cancelling_a_reservation_on_a_stopped_wake_keeps_it_unreceipted"
+  ]
+}

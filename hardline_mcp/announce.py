@@ -114,7 +114,8 @@ class Announcer:
             if self.outstanding is None or self.outstanding[0] != nonce:
                 return False
             self.facts["last_receipted_push_at"] = self.outstanding[1]
-            self.facts["oldest_unreceipted_at"] = None
+            if not self.stopped:  # a stopped wake never reads as receipted again
+                self.facts["oldest_unreceipted_at"] = None
             self.outstanding = None
             self._retry_at, self._failures = None, 0  # settled, by any copy that landed
             self._dirty = True
@@ -260,7 +261,9 @@ class Announcer:
             self.announced -= ids
             self.pointed = self._previous_pointed
             self.facts["last_push_at"] = self._previous_push
-            self.facts["oldest_unreceipted_at"] = None
+            # A stopped wake keeps its unanswered mark, dated from the push
+            # restored above (as the stop itself dates it).
+            self.facts["oldest_unreceipted_at"] = self._previous_push if self.stopped else None
             self._dirty = True
         self._flush()
 

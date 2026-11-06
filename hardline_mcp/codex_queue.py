@@ -310,6 +310,14 @@ class CodexWake(announce.Announcer):
                 self._last_fulfil = None
             elif thread != self.address and _top_level(thread, turn) and not self.stopped:
                 self.stopped = True
+                if self.facts.get("last_push_at"):
+                    # Nothing will announce again: stop reading as receipted.
+                    # Dated from the push, as an unanswered one always is, so a
+                    # receipt before the stop and after it read alike.
+                    self.facts["oldest_unreceipted_at"] = (
+                        self.facts.get("oldest_unreceipted_at") or self.facts["last_push_at"]
+                    )
+                    self._dirty = True
                 self._notes.append(
                     f"codex wake stopped: a second top-level thread {thread} called "
                     f"this connection, pinned to {self.address}"

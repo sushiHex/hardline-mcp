@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/announce.py",
+  "before": "            if not self.stopped:  # a stopped wake never reads as receipted again\n",
+  "after": "            if True:  # a stopped wake never reads as receipted again\n",
+  "tests": [
+    "tests/test_codex_queue.py::test_a_receipt_after_the_stop_does_not_restore_receipted"
+  ]
+}
