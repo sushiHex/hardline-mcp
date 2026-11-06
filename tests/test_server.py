@@ -62,6 +62,7 @@ async def test_async_result_goes_to_this_sessions_lane(
         server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
     )
 
+    assert server._announce_self() == f"claude:{in_session}"
     dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
     assert dispatched["lane"] == f"claude:{in_session}"
 
@@ -79,6 +80,130 @@ async def test_async_result_goes_to_this_sessions_lane(
     # already makes - no new convention to learn.
     inb = await server.inbox(agent="claude")
     assert inb["count"] == 1
+
+
+@pytest.mark.anyio
+async def test_async_dispatch_is_refused_when_this_server_does_not_hold_the_result_lane(
+    monkeypatch, tmp_path, in_session
+):
+    """_result_lane falls back to a lane without checking the grant; a notice
+    addressed to a lane this process cannot consume is never read by the
+    dispatcher. No job may be created for it (docs/first-call-registration.md)."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setenv("HARDLINE_DB", str(db))
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+    # Registration cannot win the lane (as when a sibling holds it).
+    monkeypatch.setattr(server, "_announce_locked", lambda agent, lane: None)
+    assert not server.sessions.granted([f"claude:{in_session}"])
+
+    out = await server.ask_codex_async(prompt="go", from_agent="claude")
+
+    assert out["accepted"] is False and out["retryable"] is True
+    assert "does not hold" in out["error"]
+    assert server.jobs.listing(db_path=db) == []
+
+
+@pytest.mark.anyio
+async def test_a_missing_grant_is_repaired_before_dispatch_is_refused(
+    monkeypatch, tmp_path, in_session
+):
+    """A rebuilt store or a late-readable process key leaves a live session
+    ungranted with nobody else holding its lane; admission re-registers, as a
+    consuming read does, rather than refusing."""
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+    assert not server.sessions.granted([f"claude:{in_session}"])  # never registered
+
+    out = await server.ask_codex_async(prompt="go", from_agent="claude")
+
+    assert out["accepted"] is True and out["lane"] == f"claude:{in_session}"
+
+
+@pytest.mark.anyio
+async def test_an_anonymous_session_may_dispatch_async_to_the_shared_name(
+    monkeypatch, tmp_path
+):
+    """No lane means the shared mailbox, which no process holds by grant; the
+    holding rule must not refuse what it cannot apply to."""
+    monkeypatch.setenv("HARDLINE_DB", str(tmp_path / "mb.db"))
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+
+    out = await server.ask_codex_async(prompt="go", from_agent="claude")
+
+    assert out["accepted"] is True and out["lane"] == "claude"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failing", ["retire", "get"])
+async def test_a_store_read_after_admission_does_not_hide_the_accepted_job(
+    monkeypatch, tmp_path, in_session, failing
+):
+    """The job is queued and will run; a refused read must not become a tool
+    error with no job_id, which invites dispatching the task again."""
+    db = tmp_path / "mb.db"
+    monkeypatch.setenv("HARDLINE_DB", str(db))
+    monkeypatch.setattr(server._async_executor, "submit", _immediate_submit)
+    monkeypatch.setattr(
+        server.adapters, "ask_codex", lambda prompt, **k: {"ok": True, "reply": "done"}
+    )
+    assert server._announce_self() == f"claude:{in_session}"
+    real_get = server.jobs.get
+    calls = []
+
+    def locked_after_submit(*args, **kwargs):
+        # For the retire, the first call is the one before admission; the
+        # second follows the submit.
+        calls.append(1)
+        if failing == "get" or len(calls) > 1:
+            raise sqlite3.OperationalError("database is locked")
+
+    if failing == "retire":
+        monkeypatch.setattr(server, "_retire_cancelled_jobs", locked_after_submit)
+    else:
+        monkeypatch.setattr(server.jobs, "get", locked_after_submit)
+    try:
+        out = await server.ask_codex_async(prompt="go", from_agent="claude")
+    except Exception as exc:  # noqa: BLE001 - must fail by assertion, not crash
+        raise AssertionError(f"an accepted job surfaced as a tool error: {exc}")
+
+    assert out["accepted"] is True and out["job_id"]
+    assert "do not dispatch it again" in out["warning"]
+    assert real_get(out["job_id"], db_path=db) is not None
+
+
+@pytest.mark.anyio
+async def test_a_store_read_after_cancel_does_not_hide_the_kill_report(
+    monkeypatch, tmp_path
+):
+    db = tmp_path / "mb.db"
+    monkeypatch.setenv("HARDLINE_DB", str(db))
+    job_id = server.jobs.create(
+        agent="codex", requester="claude", label=None, request={}, db_path=db
+    )
+    server.jobs.mark_running(job_id, child_pid=31337, db_path=db)
+    monkeypatch.setattr(
+        server.jobs, "kill_process_tree", lambda pid, expect_key=None: (False, "boom")
+    )
+
+    def locked():
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(server, "_retire_cancelled_jobs", locked)
+    try:
+        out = await server.job_cancel(job_id=job_id)
+    except Exception as exc:  # noqa: BLE001 - must fail by assertion, not crash
+        raise AssertionError(f"the committed cancel surfaced as a tool error: {exc}")
+
+    assert out["child_killed"] is False and "may still be running" in out["warning"]
 
 
 @pytest.mark.anyio
@@ -120,7 +245,7 @@ async def test_a_result_skips_a_derived_lane_another_process_took(
         server.sessions.register(agent="claude", lanes=server.adapters.owned_recipients("claude"),
                                  db_path=db)  # this session's heartbeat
         dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
-        assert dispatched["lane"] == "claude:construction"
+        assert dispatched.get("lane") == "claude:construction", dispatched
     finally:
         other.kill()
         other.wait()

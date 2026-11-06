@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "        if inner is exc:\n            raise\n        raise inner from None\n",
+  "after": "        raise\n",
+  "tests": [
+    "tests/test_sync_agent.py::test_a_raising_worker_reaches_the_caller_with_its_own_message"
+  ]
+}

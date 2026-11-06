@@ -483,6 +483,10 @@ def kill_process_tree(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True,
                 text=True,
+                # Only the exit code decides success. taskkill speaks the
+                # console codepage; an undecodable byte in its message must
+                # not turn a successful kill into "may still be running".
+                errors="replace",
                 stdin=subprocess.DEVNULL,
                 timeout=30,
             )

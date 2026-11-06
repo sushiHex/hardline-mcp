@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "        _idle_for(\"codex\")  # every call streams, so this is read too\n",
+  "after": "",
+  "tests": [
+    "tests/test_codex_isolation.py::test_an_invalid_idle_limit_fails_before_any_probe"
+  ]
+}

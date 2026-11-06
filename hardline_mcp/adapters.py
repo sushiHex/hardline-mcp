@@ -3084,6 +3084,7 @@ def _ask_codex_validated(
     # has run.
     try:
         _timeout_for("codex")
+        _idle_for("codex")  # every call streams, so this is read too
         sandbox = _codex_sandbox()
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
@@ -3677,6 +3678,10 @@ def _fetch_subscription_quota() -> dict:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            # The collector is the owner's JSON emitter; name the encoding
+            # rather than inherit the Windows locale codepage (cp1252).
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
             close_fds=True,
@@ -3953,6 +3958,7 @@ def ask_claude(
         )
     try:
         _timeout_for("claude")  # a configuration error, reported before gh runs
+        _idle_for("claude")
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     attachment = None

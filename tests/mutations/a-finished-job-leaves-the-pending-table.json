@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "            _pending_jobs.pop(key, None)\n        # A result the store",
+  "after": "            pass\n        # A result the store",
+  "tests": [
+    "tests/test_guards_server.py::test_a_finished_job_leaves_the_pending_table"
+  ]
+}

@@ -512,6 +512,20 @@ async def _sync_agent(ctx: Context | None, fn, prompt: str, **kwargs) -> dict:
             for pid, key in list(children):
                 await _in_thread(jobs.kill_process_tree, pid, expect_key=key)
         raise
+    except Exception as exc:
+        # The task group wraps a worker's own error in an ExceptionGroup whose
+        # message ("unhandled errors in a TaskGroup") hides what went wrong.
+        # By name, since the builtin does not exist on Python 3.10.
+        inner = exc
+        while (
+            type(inner).__name__.endswith("ExceptionGroup")
+            and len(getattr(inner, "exceptions", ())) == 1
+            and isinstance(inner.exceptions[0], Exception)
+        ):
+            inner = inner.exceptions[0]
+        if inner is exc:
+            raise
+        raise inner from None
     return result
 
 
@@ -2201,7 +2215,11 @@ async def job_cancel(job_id: str) -> dict:
     def cancel():
         db_path = mailbox._resolve_db(None).resolve()
         result = jobs.request_cancel(job_id, db_path=db_path)
-        _retire_cancelled_jobs()
+        # The cancel and its kill report are committed: a store read that
+        # fails here must not replace them with a tool error. Reconciliation
+        # runs again before the next admission.
+        with contextlib.suppress(Exception):
+            _retire_cancelled_jobs()
         return result
 
     return await _in_thread(cancel)
@@ -2865,6 +2883,37 @@ def _result_lane(agent: str) -> str:
     return adapters.lane_for(agent)
 
 
+def _unheld_result_refusal(recipient: str) -> dict | None:
+    """A refusal when this process does not hold the lane a result would go to.
+
+    ``_result_lane`` falls back to the parent-derived lane without a grant, and
+    a sibling server may hold it: the notice would then be consumed by the
+    sibling and never by the dispatcher. A bare name is the shared mailbox and
+    belongs to no one. Caller holds ``_identity_lock``."""
+    if ":" not in recipient:
+        return None
+    if sessions.granted([recipient]):
+        return None
+    # A grant can be missing without anyone else holding the lane: a rebuilt
+    # store, or a process key that only became readable after registration.
+    # Repair it as a consuming read does before calling the lane unheld.
+    if agent := adapters.self_agent():
+        _announce_locked(agent, adapters.lane_for(agent))
+        if sessions.granted([recipient]):
+            return None
+    return {
+        "ok": False,
+        "accepted": False,
+        "dispatched": False,
+        "retryable": True,
+        "error": (
+            f"this server does not hold {recipient!r}, where the result notice would "
+            "go, so it could not be read here. Retry after the lane is restored, or "
+            "give this server a name of its own with register_session(label=...)"
+        ),
+    }
+
+
 def _ask_async_impl(agent: str, ask_fn, prompt: str, from_agent: str, **options) -> dict:
     """Admit an async job; whatever admission answers carries the model hint.
 
@@ -2962,6 +3011,8 @@ def _admit_async(
             # "claude" is what let another session ack it out of sight.
             recipient = _result_lane(from_agent)
             refusal, continuity_note = _continuity_refusal(from_agent, recipient)
+            if refusal is None:
+                refusal = _unheld_result_refusal(recipient)
             if refusal is None:
                 job_id = jobs.create(
                     agent=agent,
@@ -3075,9 +3126,18 @@ def _admit_async(
         _fail_unstarted(db_path, job_id, result)
         return {**result, "accepted": False, "dispatched": False, "job_id": job_id}
     _track_job(db_path, job_id, future, slots)
-    _retire_cancelled_jobs()
-    job = jobs.get(job_id, db_path=db_path)
-    state = job["state"]
+    # The job is accepted and will run: a store read that fails from here on
+    # must not turn that into a tool error with no job_id, which invites a
+    # second dispatch of the same task.
+    read_error = None
+    job = None
+    try:
+        _retire_cancelled_jobs()
+        job = jobs.get(job_id, db_path=db_path)
+    except Exception as exc:  # noqa: BLE001 - the job is already admitted
+        read_error = f"{type(exc).__name__}: {exc}"
+    state = job["state"] if job else "unknown"
+    job = job or {}
     receipt = {
         "ok": state not in {jobs.FAILED, jobs.CANCELLED, jobs.LOST},
         "accepted": True,
@@ -3090,6 +3150,11 @@ def _admit_async(
     }
     if job.get("error"):
         receipt["error"] = job["error"]
+    if read_error:
+        receipt["warning"] = (
+            f"the job was accepted, but its state could not be read ({read_error}); "
+            "track it with job_status and do not dispatch it again"
+        )
     if routing is not None:
         receipt["routing"] = routing
     if resolution:

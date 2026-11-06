@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/sessions.py",
+  "before": "r[\"owner_key\"]) != DEAD",
+  "after": "r[\"owner_key\"]) == ALIVE",
+  "tests": [
+    "tests/test_scoping.py::test_work_owed_to_a_lane_by_an_unprobeable_owner_still_holds_it"
+  ]
+}

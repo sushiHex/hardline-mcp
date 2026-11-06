@@ -75,7 +75,7 @@ class Unavailable(Exception):
 def _read(sql: str, params: tuple) -> list[sqlite3.Row]:
     """One short read-only query, like ``watch.read_pending``: ``mode=ro``, no
     initializing connect, no transaction held past the statement."""
-    db = mailbox._resolve_db(None).expanduser().resolve()
+    db = mailbox._resolve_db(None).resolve()
     try:
         uri = db.as_uri() + "?mode=ro"
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as conn:

@@ -125,3 +125,20 @@ async def test_a_waiting_call_reports_progress(monkeypatch, fail):
         result = exc
     assert result == {"ok": True, "reply": "done"}
     assert len(ctx.reports) >= 2, "no keep-alive while the worker ran"
+
+
+def _raises(prompt, **kwargs):
+    raise ValueError("codex binary vanished mid-resolve")
+
+
+@pytest.mark.anyio
+async def test_a_raising_worker_reaches_the_caller_with_its_own_message():
+    """The task group wraps the worker's error in an ExceptionGroup whose text
+    is "unhandled errors in a TaskGroup", which hides what actually failed."""
+    try:
+        await server._sync_agent(None, _raises, "p")
+    except Exception as exc:  # noqa: BLE001 - judged by assertion below
+        assert type(exc) is ValueError, f"worker error arrived wrapped: {exc!r}"
+        assert str(exc) == "codex binary vanished mid-resolve"
+    else:
+        raise AssertionError("the worker's error was swallowed")

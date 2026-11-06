@@ -268,6 +268,25 @@ def test_an_invalid_timeout_fails_before_any_probe(codex, monkeypatch, kwargs):
     assert out.get("ok") is False and "HARDLINE_CODEX_TIMEOUT_S" in out.get("error", "")
 
 
+def test_an_invalid_idle_limit_fails_before_any_probe(codex, monkeypatch):
+    monkeypatch.setenv("HARDLINE_CODEX_IDLE_S", "never")
+    out = adapters.ask_codex("review")
+    assert codex.calls == [], "nothing - not even an isolation probe - may start"
+    assert out.get("ok") is False and "HARDLINE_CODEX_IDLE_S" in out.get("error", "")
+
+
+def test_an_invalid_claude_idle_limit_fails_before_github_is_collected(monkeypatch):
+    monkeypatch.setenv("HARDLINE_CLAUDE_IDLE_S", "never")
+    collected = []
+    monkeypatch.setattr(
+        adapters, "_github_attachment",
+        lambda *a, **k: collected.append(a) or (None, {"ok": False, "error": "stub"}),
+    )
+    out = adapters.ask_claude("review", github="owner/repo#1")
+    assert collected == [], "collected before the check"
+    assert out.get("ok") is False and "HARDLINE_CLAUDE_IDLE_S" in out.get("error", "")
+
+
 def test_a_cancel_at_the_first_probe_stops_the_call(codex):
     out = adapters.ask_codex("review", on_spawn=lambda pid: False)
     assert out.get("cancelled") is True

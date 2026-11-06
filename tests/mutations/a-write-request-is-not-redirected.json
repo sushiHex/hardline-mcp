@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "    elif write:\n        ineligible = \"A write-enabled",
+  "after": "    elif False:\n        ineligible = \"A write-enabled",
+  "tests": [
+    "tests/test_guards_server.py::test_a_write_request_is_blocked_not_redirected_to_advisory"
+  ]
+}

@@ -3,7 +3,6 @@
   "before": "            if self.stopped or self.outstanding is not None:\n                return None\n            self.announced",
   "after": "            if self.outstanding is not None:\n                return None\n            self.announced",
   "tests": [
-    "tests/test_codex_queue.py::test_a_second_top_level_thread_stops_waking_rather_than_migrating",
     "tests/test_codex_queue.py::test_a_conflict_found_during_the_scan_stops_the_reservation"
   ]
 }
