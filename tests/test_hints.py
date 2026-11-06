@@ -300,14 +300,32 @@ def test_a_push_names_the_lane_once_and_never_shows_the_mail(held, monkeypatch):
     monkeypatch.setattr(channel, "bodies", lambda ids: pytest.fail("fetched a body"))
     pusher = channel.Pusher()
     params, _, _, _ = pusher.next_batch()
-    assert params["content"] == channel.pointer(OLD)
+    assert params["content"].startswith(channel.pointer(OLD))
     assert "register_session(label='fonts.0ld0ld00', wait=true)" in params["content"]
+    assert f"receipt='{params['meta']['receipt']}'" in params["content"], "asks for its receipt"
     pusher.notices.clear()
     assert pusher.next_batch() is None, "told once"
     held.before = []  # hidden while awaited, then the wait is cancelled
     assert pusher.next_batch() is None
     held.before = [OLD]
     assert pusher.next_batch() is None, "not told the same mail twice"
+
+
+def test_a_notice_only_push_can_be_receipted_by_the_text_it_sent(held, monkeypatch):
+    """The notice is recorded as awaiting a receipt, so what it says must be
+    enough to produce one; otherwise delivery decays to unreceipted."""
+    held.send(OLD, "waiting")
+    clock = [channel._now()]
+    pusher = channel.Pusher(clock=lambda: clock[0])
+    pusher.declare()
+    params, ids, nonce, built = pusher.next_batch()
+    assert ids == []
+    pusher.sent(ids, nonce, built)
+    clock[0] += channel.delivery.GRACE * 2
+    assert pusher.state() == "unreceipted"  # nobody answered
+    assert f"receipt='{nonce}'" in params["content"]
+    receipt = nonce
+    assert pusher.accept_receipt(receipt) and pusher.state() == "receipted"
 
 
 def test_a_push_after_a_reclaim_is_not_delayed_by_having_told(held):

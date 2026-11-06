@@ -114,7 +114,8 @@ class Announcer:
             if self.outstanding is None or self.outstanding[0] != nonce:
                 return False
             self.facts["last_receipted_push_at"] = self.outstanding[1]
-            self.facts["oldest_unreceipted_at"] = None
+            if not self.stopped:  # a stopped wake never reads as receipted again
+                self.facts["oldest_unreceipted_at"] = None
             self.outstanding = None
             self._retry_at, self._failures = None, 0  # settled, by any copy that landed
             self._dirty = True

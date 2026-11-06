@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "                if self.facts.get(\"last_push_at\"):\n",
+  "after": "                if False:\n",
+  "tests": [
+    "tests/test_codex_queue.py::test_a_stopped_wake_stops_reading_as_receipted"
+  ]
+}

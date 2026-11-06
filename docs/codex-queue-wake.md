@@ -165,7 +165,9 @@ Every 2 s, `CodexWake` follows these steps:
      past settlement, which settles nothing and is never rescheduled.
    - **A broken setup** therefore keeps trying at the growing interval, and
      the session's delivery state reads `unreceipted` meanwhile.
-   - **A stopped wake** (a second top-level thread) sends nothing again.
+   - **A stopped wake** (a second top-level thread) sends nothing again. Its
+     facts then stop reading `receipted`: the last push counts as unanswered,
+     so the state ages from `awaiting_receipt` into `unreceipted`.
 
    The case that motivated this (2026-10-16): a steer was refused, then
    `codex queue` failed and inserted nothing. The notice stayed outstanding, so

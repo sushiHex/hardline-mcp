@@ -443,6 +443,32 @@ def test_a_conflict_found_during_the_scan_stops_the_reservation(monkeypatch):
     assert wake.stopped and wake.outstanding is None
 
 
+def test_a_stopped_wake_stops_reading_as_receipted(monkeypatch):
+    """Nothing will announce again, so its facts must not keep saying the
+    wake works - not even when a receipt for an earlier notice lands later."""
+    from datetime import timedelta
+
+    wake = _armed(monkeypatch, [{"id": 1, "recipient": "codex:a"}], ["codex:a"])
+    now = wake.clock()
+    wake.clock = lambda: now
+    _, nonce, _ = wake.poll()
+    assert wake.accept_receipt(nonce) and wake.state() == "receipted"
+    wake.observe({"_meta": meta(thread=OTHER)})
+    assert wake.stopped and wake.state() == "awaiting_receipt"
+    now += timedelta(hours=1)
+    assert wake.state() == "unreceipted"
+
+
+def test_a_receipt_after_the_stop_does_not_restore_receipted(monkeypatch):
+    wake = _armed(monkeypatch, [{"id": 1, "recipient": "codex:a"}], ["codex:a"])
+    now = wake.clock()
+    wake.clock = lambda: now
+    _, nonce, _ = wake.poll()
+    wake.observe({"_meta": meta(thread=OTHER)})
+    assert wake.accept_receipt(nonce)
+    assert wake.state() != "receipted"
+
+
 def test_observe_leaves_logging_to_the_poll_thread(monkeypatch):
     """observe() runs on the event loop: a stderr write blocked on a full pipe
     there would stall every tool. It records; the poll thread writes."""
