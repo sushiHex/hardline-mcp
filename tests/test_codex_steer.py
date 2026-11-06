@@ -113,8 +113,11 @@ def test_an_accepted_steer_names_the_turn_and_the_server():
     assert not any(r.get("id") == 7 for r in daemon.requests), "a server request is never answered"
 
 
-@pytest.mark.parametrize("code", sorted(codex_steer.NOT_ADMITTED))
+@pytest.mark.parametrize("code", [-32600, -32601, -32602, -32001])  # literals: not the constant under test
 def test_an_error_raised_before_admission_is_a_refusal(code):
+    assert ending(lambda: steer(Daemon(steer={"error": {**MISMATCH, "code": code}}))) == (
+        codex_steer.REFUSED
+    )
     outcome = steer(Daemon(steer={"error": {**MISMATCH, "code": code}}))
     assert (outcome.status, outcome.detail) == (codex_steer.REFUSED, MISMATCH["message"])
 

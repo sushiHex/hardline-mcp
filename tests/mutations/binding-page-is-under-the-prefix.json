@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/bindings.py",
+  "before": "\" WHERE thread = ? AND substr(lane, 1, ?) = ? AND (? IS NULL OR seq < ?)\"",
+  "after": "\" WHERE thread = ? AND (substr(lane, 1, ?) = ? OR 1) AND (? IS NULL OR seq < ?)\"",
+  "tests": [
+    "tests/test_scoping.py::test_a_page_of_bindings_is_below_its_cursor_and_under_its_prefix"
+  ]
+}

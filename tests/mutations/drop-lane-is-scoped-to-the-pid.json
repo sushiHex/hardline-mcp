@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/sessions.py",
+  "before": "\"DELETE FROM agent_sessions WHERE pid = ? AND lane = ?\", (pid, lane)",
+  "after": "\"DELETE FROM agent_sessions WHERE (pid = ? OR 1) AND lane = ?\", (pid, lane)",
+  "tests": [
+    "tests/test_scoping.py::test_dropping_a_lane_leaves_another_processs_hold_of_it"
+  ]
+}
