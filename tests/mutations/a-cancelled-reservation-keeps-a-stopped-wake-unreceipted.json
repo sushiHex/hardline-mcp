@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/announce.py",
+  "before": "            if not self.stopped:  # a stopped wake keeps its unanswered mark\n",
+  "after": "            if True:  # a stopped wake keeps its unanswered mark\n",
+  "tests": [
+    "tests/test_codex_queue.py::test_cancelling_a_reservation_on_a_stopped_wake_keeps_it_unreceipted"
+  ]
+}

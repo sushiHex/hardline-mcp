@@ -312,10 +312,10 @@ class CodexWake(announce.Announcer):
                 self.stopped = True
                 if self.facts.get("last_push_at"):
                     # Nothing will announce again: stop reading as receipted.
-                    # An unreceipted push ages into ``unreceipted``, as any
-                    # that was never answered does.
+                    # Dated from the push, as an unanswered one always is, so a
+                    # receipt before the stop and after it read alike.
                     self.facts["oldest_unreceipted_at"] = (
-                        self.facts.get("oldest_unreceipted_at") or self.clock()
+                        self.facts.get("oldest_unreceipted_at") or self.facts["last_push_at"]
                     )
                     self._dirty = True
                 self._notes.append(

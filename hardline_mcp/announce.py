@@ -261,7 +261,8 @@ class Announcer:
             self.announced -= ids
             self.pointed = self._previous_pointed
             self.facts["last_push_at"] = self._previous_push
-            self.facts["oldest_unreceipted_at"] = None
+            if not self.stopped:  # a stopped wake keeps its unanswered mark
+                self.facts["oldest_unreceipted_at"] = None
             self._dirty = True
         self._flush()
 

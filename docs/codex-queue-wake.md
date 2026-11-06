@@ -167,7 +167,12 @@ Every 2 s, `CodexWake` follows these steps:
      the session's delivery state reads `unreceipted` meanwhile.
    - **A stopped wake** (a second top-level thread) sends nothing again. Its
      facts then stop reading `receipted`: the last push counts as unanswered,
-     so the state ages from `awaiting_receipt` into `unreceipted`.
+     so the state ages from `awaiting_receipt` into `unreceipted`, dated from
+     that push whether its receipt came before or after the stop. A receipt
+     that lands later is still accepted (it proves that notice was seen) but
+     does not restore `receipted`, nor does cancelling an unsent reservation:
+     for a stopped wake the state reports that nothing will announce again,
+     not only whether the last notice was read.
 
    The case that motivated this (2026-10-16): a steer was refused, then
    `codex queue` failed and inserted nothing. The notice stayed outstanding, so

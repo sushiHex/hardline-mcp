@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/codex_queue.py",
+  "before": "self.facts.get(\"oldest_unreceipted_at\") or self.facts[\"last_push_at\"]",
+  "after": "self.facts.get(\"oldest_unreceipted_at\") or self.clock()",
+  "tests": [
+    "tests/test_codex_queue.py::test_a_receipt_before_and_after_the_stop_read_alike"
+  ]
+}

@@ -459,6 +459,40 @@ def test_a_stopped_wake_stops_reading_as_receipted(monkeypatch):
     assert wake.state() == "unreceipted"
 
 
+def test_cancelling_a_reservation_on_a_stopped_wake_keeps_it_unreceipted(monkeypatch):
+    rows = [{"id": 1, "recipient": "codex:a"}]
+    wake = _armed(monkeypatch, rows, ["codex:a"])
+    now = wake.clock()
+    wake.clock = lambda: now
+    _, nonce, _ = wake.poll()
+    assert wake.accept_receipt(nonce)
+    rows.append({"id": 2, "recipient": "codex:a"})
+    _, nonce_b, ids_b = wake.poll()  # B is reserved
+    wake.observe({"_meta": meta(thread=OTHER)})  # then the wake is stopped
+    wake.take_back(nonce_b, ids_b)  # and B is cancelled unsent
+    assert wake.state() != "receipted"
+
+
+def test_a_receipt_before_and_after_the_stop_read_alike(monkeypatch):
+    from datetime import timedelta
+
+    states = []
+    for receipt_first in (True, False):
+        wake = _armed(monkeypatch, [{"id": 1, "recipient": "codex:a"}], ["codex:a"])
+        now = wake.clock()
+        wake.clock = lambda: now
+        _, nonce, _ = wake.poll()
+        if receipt_first:
+            wake.accept_receipt(nonce)
+        now += timedelta(minutes=5)
+        wake.observe({"_meta": meta(thread=OTHER)})
+        if not receipt_first:
+            wake.accept_receipt(nonce)
+        now += timedelta(minutes=6)
+        states.append(wake.state())
+    assert states == ["unreceipted", "unreceipted"]
+
+
 def test_a_receipt_after_the_stop_does_not_restore_receipted(monkeypatch):
     wake = _armed(monkeypatch, [{"id": 1, "recipient": "codex:a"}], ["codex:a"])
     now = wake.clock()
