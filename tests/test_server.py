@@ -245,7 +245,7 @@ async def test_a_result_skips_a_derived_lane_another_process_took(
         server.sessions.register(agent="claude", lanes=server.adapters.owned_recipients("claude"),
                                  db_path=db)  # this session's heartbeat
         dispatched = await server.ask_codex_async(prompt="go", from_agent="claude")
-        assert dispatched["lane"] == "claude:construction"
+        assert dispatched.get("lane") == "claude:construction", dispatched
     finally:
         other.kill()
         other.wait()
