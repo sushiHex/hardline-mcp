@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "    if \":\" not in recipient:\n        return None\n    if sessions.granted([recipient]):",
+  "after": "    if sessions.granted([recipient]):",
+  "tests": [
+    "tests/test_server.py::test_an_anonymous_session_may_dispatch_async_to_the_shared_name"
+  ]
+}

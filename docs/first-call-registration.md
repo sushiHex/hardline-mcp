@@ -54,11 +54,12 @@ instead of at startup, so silent servers are never offered as destinations.
   lane, and an unattributed claim unbinds a name its parent thread had bound.
   The failure that remains is a notice stranded when the subagent exits early;
   the result stays readable through `job_result`.
-- **Found in passing, not fixed here:** `_result_lane` returns a parent-derived
-  lane without checking it is granted, so a first `ask_*_async` after a
-  contested registration admits a job whose notice this process cannot
-  consume. Admission should refuse an unowned result destination, checked in
-  the transaction that creates the job.
+- **Found in passing, fixed separately:** `_result_lane` returns a
+  parent-derived lane without checking it is granted, so a first
+  `ask_*_async` after a contested registration admitted a job whose notice
+  this process cannot consume. `_admit_async` now refuses (retryably) a
+  lane-qualified result destination this process does not hold, checked under
+  the identity lock that spans the choice and `jobs.create`.
 
 ## What the evidence shows instead
 

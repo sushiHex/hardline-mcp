@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "        with contextlib.suppress(Exception):\n            _retire_cancelled_jobs()\n        return result\n",
+  "after": "        _retire_cancelled_jobs()\n        return result\n",
+  "tests": [
+    "tests/test_server.py::test_a_store_read_after_cancel_does_not_hide_the_kill_report"
+  ]
+}
