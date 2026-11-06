@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/procid.py",
+  "before": "    if not snapshot or snapshot == ctypes.c_void_p(-1).value:\n",
+  "after": "    if snapshot == -1:\n",
+  "tests": [
+    "tests/test_procid_snapshot.py::test_a_failed_snapshot_is_not_walked_or_closed"
+  ]
+}

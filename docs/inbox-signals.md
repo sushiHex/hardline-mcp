@@ -87,8 +87,10 @@ contents as data. It contains no mail content, because Codex shows a queued
 notice exactly as if you had typed it.
 
 - **Arming.** The session's first hardline tool call from a top-level thread
-  identifies it. A normal Codex session is one; a subagent, or a thread an
-  app-server client started without `threadSource`, is not. Until then, nothing
+  identifies it. A normal Codex session is one; a subagent is not. A thread an
+  app-server client started without `threadSource` is one only when it has no
+  `parent_thread_id` and its `session_id` is its own thread id (Codex Desktop,
+  #114; see [Codex queue wake](codex-queue-wake.md)). Until then, nothing
   can be queued. A subagent's server that calls hardline says so: senders see
   `recipient_delivery: not_top_level`.
 - **Coalescing.** One notice is outstanding at a time; only its receipt

@@ -1,6 +1,6 @@
 {
   "file": "hardline_mcp/github_context.py",
-  "before": "    if target.exists():\n        _touch(target)\n        return\n",
+  "before": "    if target.exists():\n        if _intact(target, sid):\n            _touch(target)\n            return\n",
   "after": "",
   "tests": [
     "tests/test_github_context.py::test_an_existing_snapshot_is_never_overwritten"
