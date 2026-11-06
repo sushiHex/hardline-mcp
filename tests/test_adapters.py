@@ -1569,6 +1569,24 @@ def test_quota_router_detaches_inherited_mcp_stdin(monkeypatch):
     assert captured["kwargs"]["close_fds"] is True
 
 
+def test_quota_router_output_is_decoded_as_utf8_not_the_locale_codepage(monkeypatch):
+    """Windows decodes text=True as cp1252, where 0x8d is undefined: a UTF-8
+    collector emitting U+014D would crash the decode. Name the encoding."""
+    monkeypatch.setenv("HARDLINE_QUOTA_ROUTER_COMMAND_JSON", '["quota-router"]')
+    raw = '{"providers": {"note": "ō"}}'.encode("utf-8")
+
+    def fake_run(argv, **kwargs):
+        try:
+            text = raw.decode(kwargs.get("encoding") or "cp1252", kwargs.get("errors", "strict"))
+        except UnicodeDecodeError as exc:
+            raise AssertionError(f"the collector's output was decoded wrongly: {exc}")
+        return _FakeCompleted(stdout=text)
+
+    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+
+    assert adapters._fetch_subscription_quota() == {"providers": {"note": "ō"}}
+
+
 def test_ask_claude_redirects_to_chatgpt_when_it_has_more_weekly_quota(monkeypatch):
     _enable_quota_router(
         monkeypatch,
