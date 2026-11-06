@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/sessions.py",
+  "before": "lane, mine = row[\"lane\"], (row[\"pid\"], row[\"process_key\"]) == (pid, key)",
+  "after": "lane, mine = row[\"lane\"], row[\"pid\"] == pid",
+  "tests": [
+    "tests/test_scoping.py::test_a_binding_left_by_a_dead_predecessor_of_this_pid_is_not_held"
+  ]
+}

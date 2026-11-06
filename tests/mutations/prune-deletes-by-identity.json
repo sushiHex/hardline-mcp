@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/delivery.py",
+  "before": "WHERE pid = ? AND process_key = ?\", dead",
+  "after": "WHERE pid = ? AND (process_key = ? OR 1)\", dead",
+  "tests": [
+    "tests/test_scoping.py::test_a_prune_keeps_what_it_could_not_probe_and_deletes_by_identity"
+  ]
+}

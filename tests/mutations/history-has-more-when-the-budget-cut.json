@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/server.py",
+  "before": "response[\"has_more\"] = bool(dropped) or full_page >=",
+  "after": "response[\"has_more\"] = full_page >=",
+  "tests": [
+    "tests/test_guards_server.py::test_a_short_page_that_the_budget_cut_still_has_more"
+  ]
+}

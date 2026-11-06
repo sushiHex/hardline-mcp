@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/bindings.py",
+  "before": "\"DELETE FROM thread_names WHERE lane = ? AND thread = ?\"",
+  "after": "\"DELETE FROM thread_names WHERE lane = ? AND (thread = ? OR 1)\"",
+  "tests": [
+    "tests/test_scoping.py::test_a_dismissal_leaves_another_threads_binding_of_the_same_name"
+  ]
+}
