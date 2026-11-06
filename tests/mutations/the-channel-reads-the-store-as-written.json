@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/channel.py",
+  "before": "    db = mailbox._resolve_db(None).resolve()\n",
+  "after": "    db = mailbox._resolve_db(None).expanduser().resolve()\n",
+  "tests": [
+    "tests/test_watch.py::test_a_literal_tilde_store_is_the_file_the_servers_open"
+  ]
+}

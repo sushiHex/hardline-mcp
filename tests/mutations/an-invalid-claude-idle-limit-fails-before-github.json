@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/adapters.py",
+  "before": "        _idle_for(\"claude\")\n",
+  "after": "",
+  "tests": [
+    "tests/test_codex_isolation.py::test_an_invalid_claude_idle_limit_fails_before_github_is_collected"
+  ]
+}

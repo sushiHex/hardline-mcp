@@ -1,0 +1,10 @@
+{
+  "file": "hardline_mcp/github_context.py",
+  "before": "[\\x00-\\x1f\\x7f\\x85\\u2028\\u2029]",
+  "after": "[\\x00-\\x1f\\x7f]",
+  "tests": [
+    "tests/test_github_context.py::test_a_filename_cannot_forge_lines_with_unicode_separators[u2028]",
+    "tests/test_github_context.py::test_a_filename_cannot_forge_lines_with_unicode_separators[u2029]",
+    "tests/test_github_context.py::test_a_filename_cannot_forge_lines_with_unicode_separators[x85]"
+  ]
+}

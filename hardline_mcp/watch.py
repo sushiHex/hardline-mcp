@@ -274,7 +274,7 @@ def target_from_args(
             f"each --lane must be a complete recipient beginning with {prefix}"
         )
     return Target(
-        mailbox._resolve_db(args.db).expanduser().resolve(),
+        mailbox._resolve_db(args.db).resolve(),
         args.agent,
         lanes,
         args.owner_pid,
@@ -311,7 +311,7 @@ def launch_info(agent: str | None) -> dict:
             "-m",
             "hardline_mcp.watch",
             "--db",
-            str(mailbox._resolve_db(None).expanduser().resolve()),
+            str(mailbox._resolve_db(None).resolve()),
             "--agent",
             agent,
             "--owner-pid",

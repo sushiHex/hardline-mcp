@@ -23,6 +23,26 @@ def target(tmp_path):
     return watch.Target(db, "codex", ("codex:mine",))
 
 
+def test_a_literal_tilde_store_is_the_file_the_servers_open(monkeypatch, tmp_path):
+    """HARDLINE_DB from an MCP config is never shell-expanded, and the servers
+    open it as written (mailbox._resolve_db). The observer and the channel
+    reader must name the same file, not the home directory's."""
+    from hardline_mcp import channel
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HARDLINE_DB", "~/hl.db")
+    mailbox.send("claude", "claude:lane", "hello")
+    served = (tmp_path / "~" / "hl.db").resolve()
+    assert served.exists()
+    argv = watch.launch_info("claude")["argv"]
+    assert argv[argv.index("--db") + 1] == str(served)
+    try:
+        rows = channel.unread(("claude:lane",))[0]
+    except channel.Unavailable:  # it looked somewhere else
+        rows = None
+    assert rows is not None and [r["recipient"] for r in rows] == ["claude:lane"]
+
+
 def sql(target, statement, params=()):
     conn = sqlite3.connect(target.db)
     try:

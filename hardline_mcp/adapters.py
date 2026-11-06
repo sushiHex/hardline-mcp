@@ -3084,6 +3084,7 @@ def _ask_codex_validated(
     # has run.
     try:
         _timeout_for("codex")
+        _idle_for("codex")  # every call streams, so this is read too
         sandbox = _codex_sandbox()
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
@@ -3957,6 +3958,7 @@ def ask_claude(
         )
     try:
         _timeout_for("claude")  # a configuration error, reported before gh runs
+        _idle_for("claude")
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     attachment = None
