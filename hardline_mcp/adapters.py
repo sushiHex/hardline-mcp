@@ -3678,6 +3678,10 @@ def _fetch_subscription_quota() -> dict:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            # The collector is the owner's JSON emitter; name the encoding
+            # rather than inherit the Windows locale codepage (cp1252).
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
             close_fds=True,
