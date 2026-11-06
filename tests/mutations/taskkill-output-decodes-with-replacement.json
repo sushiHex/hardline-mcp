@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/jobs.py",
+  "before": "                errors=\"replace\",\n                stdin=subprocess.DEVNULL,\n",
+  "after": "                stdin=subprocess.DEVNULL,\n",
+  "tests": [
+    "tests/test_jobs.py::test_a_successful_taskkill_survives_undecodable_output"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/github_context.py",
+  "before": "        *([f\"> {line}\" for line in body.splitlines()] or [\"(none)\"]),\n",
+  "after": "        body or \"(none)\",\n",
+  "tests": [
+    "tests/test_github_context.py::test_a_body_cannot_forge_evidence_lines"
+  ]
+}

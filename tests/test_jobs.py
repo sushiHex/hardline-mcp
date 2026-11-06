@@ -412,6 +412,22 @@ def test_kill_refuses_a_pid_whose_identity_no_longer_matches(tmp_path):
     assert err == jobs.ALREADY_GONE
 
 
+def test_a_successful_taskkill_survives_undecodable_output(monkeypatch):
+    """Only taskkill's exit code decides the kill. Output the console codepage
+    cannot decode (0x81 is undefined in cp1252) must not raise inside the
+    decode and turn a successful kill into a failure report."""
+    import types
+
+    def fake_run(argv, **kwargs):
+        raw = b"SUCCESS: \x81"
+        text = raw.decode(kwargs.get("encoding") or "cp1252", kwargs.get("errors", "strict"))
+        return types.SimpleNamespace(returncode=0, stdout=text, stderr="")
+
+    monkeypatch.setattr(jobs, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(jobs.subprocess, "run", fake_run)
+    assert jobs.kill_process_tree(31337) == (True, None)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX")
 def test_kill_never_signals_its_own_process_group(monkeypatch):
     """A child that shares this process's group (it started no session of its

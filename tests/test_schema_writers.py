@@ -5,6 +5,7 @@ live. A positional ``INSERT INTO t VALUES (...)`` fails in all of them the momen
 any revision adds a column to ``t``, so no writer may rely on a table's shape.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -23,12 +24,27 @@ POSITIONAL = re.compile(
 )
 
 
+def string_values(source: str) -> list[str]:
+    """Every string in ``source`` as the parser reads it: adjacent literals
+    joined whatever their quotes or prefixes, and an f-string's placeholder
+    standing in as a name (``f"INSERT INTO {table} VALUES"``)."""
+    values = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            values.append(node.value)
+        elif isinstance(node, ast.JoinedStr):
+            values.append("".join(
+                part.value if isinstance(part, ast.Constant) else "table"
+                for part in node.values
+            ))
+    return values
+
+
 def positional_inserts() -> list[str]:
     found = []
     for path in sorted(SOURCE.rglob("*.py")):
-        # Adjacent string literals are one statement: join them before matching.
-        text = re.sub(r'"\s*\n\s*(?:f?")', "", path.read_text(encoding="utf-8"))
-        found += [f"{path.relative_to(SOURCE)}: {m.group(0)}" for m in POSITIONAL.finditer(text)]
+        for text in string_values(path.read_text(encoding="utf-8")):
+            found += [f"{path.relative_to(SOURCE)}: {m.group(0)}" for m in POSITIONAL.finditer(text)]
     return found
 
 
@@ -53,6 +69,20 @@ def test_no_insert_relies_on_a_tables_column_order():
 )
 def test_the_guard_sees_a_positional_insert(sql):
     assert POSITIONAL.search(sql), sql
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'q = f"INSERT INTO {table} VALUES (?, ?)"',
+        'q = "INSERT INTO lane_hints" " VALUES (?, ?)"',
+        "q = ('INSERT INTO lane_hints'\n' VALUES (?)')",
+        'q = ("INSERT INTO t"\n rf" VALUES (?)")',
+    ],
+    ids=["placeholder-table", "adjacent-one-line", "single-quoted", "raw-f-prefix"],
+)
+def test_the_scan_sees_a_positional_insert_however_the_string_is_written(code):
+    assert any(POSITIONAL.search(s) for s in string_values(code)), code
 
 
 @pytest.mark.parametrize(

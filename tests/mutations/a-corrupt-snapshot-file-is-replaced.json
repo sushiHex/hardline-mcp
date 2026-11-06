@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/github_context.py",
+  "before": "        if _intact(target, sid):\n",
+  "after": "        if True:\n",
+  "tests": [
+    "tests/test_github_context.py::test_a_snapshot_whose_content_does_not_match_its_id_is_replaced"
+  ]
+}

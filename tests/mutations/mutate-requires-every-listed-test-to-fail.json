@@ -1,0 +1,8 @@
+{
+  "file": "scripts/mutate.py",
+  "before": "        or passing\n",
+  "after": "",
+  "tests": [
+    "tests/test_mutations.py::test_every_listed_test_must_fail_not_just_one"
+  ]
+}

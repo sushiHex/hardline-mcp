@@ -1,0 +1,8 @@
+{
+  "file": "tests/test_schema_writers.py",
+  "before": "else \"table\"",
+  "after": "else \"{}\"",
+  "tests": [
+    "tests/test_schema_writers.py::test_the_scan_sees_a_positional_insert_however_the_string_is_written[placeholder-table]"
+  ]
+}

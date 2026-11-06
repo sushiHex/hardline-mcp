@@ -465,7 +465,8 @@ def _windows_parent(pid: int) -> Optional[int]:
     if kernel32 is None:
         return None
     snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
-    if snapshot == -1:
+    # HANDLE comes back unsigned, so INVALID_HANDLE_VALUE is 2**64-1, never -1.
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
         return None
     try:
         entry = _ENTRY()

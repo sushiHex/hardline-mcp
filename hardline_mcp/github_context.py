@@ -236,6 +236,15 @@ def store_dir() -> Optional[Path]:
     return path
 
 
+def _intact(target: Path, sid: str) -> bool:
+    """Whether the file at ``target`` still hashes to ``sid``. A file that
+    cannot be read is kept, as before: another process may hold it open."""
+    try:
+        return snapshot_id(target.read_bytes()) == sid
+    except OSError:
+        return True
+
+
 def store(data: bytes, sid: str, directory: Path) -> None:
     """Persist ``data`` under its id. An existing file IS that content: keep it.
 
@@ -249,8 +258,11 @@ def store(data: bytes, sid: str, directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"{sid}.json"
     if target.exists():
-        _touch(target)
-        return
+        if _intact(target, sid):
+            _touch(target)
+            return
+        # Truncated or garbled (a crash after the replace, no fsync): keeping
+        # it would hand out an id that load() always refuses.
     fd, temp = tempfile.mkstemp(dir=directory, prefix=f".{sid[:12]}-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -387,14 +399,17 @@ _OVER_BUDGET = "[not shown: delivery budget spent]"
 _SUMMARY_SLACK = 100
 
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")  # incl. the Unicode line breaks
 
 
 def _one_line(text) -> str:
     """``text`` that cannot start a line of its own: a filename is a heading,
     and one carrying a newline could forge another file's heading or a
     coverage line inside the evidence."""
-    return _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", str(text))
+    return _CONTROL.sub(
+        lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 0x100 else f"\\u{ord(m.group()):04x}",
+        str(text),
+    )
 
 
 def _withheld_text(reason: str, entry: dict) -> str:
@@ -455,7 +470,9 @@ def _render(snapshot, exclude, file_budget, total_budget, nonce) -> tuple[str, d
         f"Head: {snapshot['head']['ref']} @ {snapshot['head']['sha']}",
         "",
         "Description:",
-        body or "(none)",
+        # Quoted line by line, so no line of it can open a heading or a
+        # coverage line of its own, as a patch line cannot.
+        *([f"> {line}" for line in body.splitlines()] or ["(none)"]),
         "",
     ]
     sections = []
