@@ -130,36 +130,26 @@ cancel queued or running work. A clean exit records the jobs it never started
 as `failed`; jobs whose owner exits without recording a terminal state become
 `lost` and are not automatically resumed.
 
-A spawned reviewer cannot reach GitHub itself. Pass `github="owner/repo#123"`
-and Hardline collects the pull request with its own `gh` and hands it over; see
-[GitHub evidence for reviews](docs/configuration.md#github-evidence-for-reviews).
+What a spawned agent can and cannot do:
 
-A spawned Codex is read-only unless `write=True`, and gets no MCP servers or app
-connectors. Its sandbox (bubblewrap on Linux, Seatbelt on macOS, MXC on
-Windows) is pinned through a permission profile that also keeps its commands
-out of your secrets: Claude Code's and Codex's credentials and transcripts,
-gh's token, Hardline's mailbox, and `~/.ssh`. Its commands don't inherit
-variables named like credentials (`GH_TOKEN`, `OPENAI_API_KEY`), though on
-macOS a command can read any of your processes' starting environments. The
-denial holds for that one reviewer and leaves your own Codex sessions, full
-access included, untouched; see
-[what a Codex reviewer can read](docs/configuration.md#what-a-codex-reviewer-can-read).
-
-Writes require both `write=True` and `HARDLINE_ALLOW_WRITE=1` in the MCP server's
-environment, plus an explicit existing `workdir`; a Codex write also needs that
-`workdir` inside a git repository (a read-only review runs anywhere). Claude's default read controls
-are not a filesystem sandbox. Read [execution modes and write access](docs/configuration.md#execution-modes-and-write-access)
-before enabling unattended edits.
-
-`context="clean"` on the Codex tools runs a builder without your Codex home
-(instructions, config, memories), for a result that does not depend on your
-setup; every result says what it did not remove. See
-[clean context](docs/configuration.md#clean-context-codex).
-
-On Windows the prompt travels on the command line. One over the operating
-system's limit is refused with a clear error, and so are arguments that
-`cmd.exe` would act on when the agent is installed as a `.cmd` shim; see
-[limits](docs/configuration.md#limits).
+- **GitHub:** it cannot reach GitHub itself. Pass `github="owner/repo#123"` and
+  Hardline collects the pull request with its own `gh`
+  ([details](docs/configuration.md#github-evidence-for-reviews)).
+- **Codex is sandboxed and read-only** unless `write=True`. It gets no MCP servers
+  or app connectors, and its commands cannot read your credentials, transcripts,
+  mailbox or `~/.ssh`. Your own Codex sessions are untouched
+  ([what a reviewer can read](docs/configuration.md#what-a-codex-reviewer-can-read)).
+- **Writes** need `write=True`, `HARDLINE_ALLOW_WRITE=1` in the server's
+  environment, and an existing `workdir` (inside a git repository for Codex).
+  Claude's read controls are not a filesystem sandbox; read
+  [execution modes](docs/configuration.md#execution-modes-and-write-access)
+  before enabling unattended edits.
+- **Clean context:** `context="clean"` runs a Codex builder without your Codex
+  home, so the result does not depend on your setup
+  ([details](docs/configuration.md#clean-context-codex)).
+- **Windows:** a prompt over the command-line limit, or carrying characters
+  `cmd.exe` acts on for a `.cmd` shim, is refused with a clear error
+  ([limits](docs/configuration.md#limits)).
 
 ## Inbox signals
 
