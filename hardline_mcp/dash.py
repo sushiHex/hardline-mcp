@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 import threading
@@ -46,6 +47,15 @@ RECENT = 15
 JOBS_SHOWN = 40
 LINKS_SHOWN = 30
 PAGE = Path(__file__).with_name("dash.html")
+
+
+PLAY = re.compile(r"^(swim-lanes|roundtable|ping-pong)-r?(\d+)-(.+)$")
+
+
+def _play(label: Optional[str]) -> Optional[dict]:
+    """The playbook names each job ``<play>-<round>-<lane>`` (skills/playbook)."""
+    found = PLAY.match(label or "")
+    return {"name": found[1], "round": int(found[2]), "lane": found[3][:CLIP]} if found else None
 
 
 def _parse(stamp: Optional[str]) -> Optional[datetime]:
@@ -104,7 +114,8 @@ def _snapshot(db: Path, since: str) -> dict:
             # Who reached whom: counts per pair, never the messages themselves.
             "links": _rows(
                 conn,
-                "SELECT sender, recipient, COUNT(*) AS n, SUM(acked_at IS NULL) AS unread"
+                "SELECT sender, recipient, COUNT(*) AS n, SUM(acked_at IS NULL) AS unread,"
+                " MAX(created_at) AS last"
                 " FROM messages WHERE created_at >= ? GROUP BY sender, recipient"
                 " ORDER BY n DESC LIMIT ?",
                 (since, LINKS_SHOWN),
@@ -208,6 +219,7 @@ def state(
                 "agent": _clip(row["agent"]),
                 "requester": _clip(row["requester"]),
                 "label": _clip(row["label"]),
+                "play": _play(row["label"]),
                 "state": verdict,
                 "start_s": _ago(begun, now),
                 "end_s": _ago(row["finished_at"], now),
@@ -233,7 +245,13 @@ def state(
         "traffic": traffic,
         "temporary": sorted(_clip(l["lane"]) for l in lanes if l["temp"]),
         "links": [
-            {"from": _clip(r["sender"]), "to": _clip(r["recipient"]), "n": r["n"], "unread": r["unread"]}
+            {
+                "from": _clip(r["sender"]),
+                "to": _clip(r["recipient"]),
+                "n": r["n"],
+                "unread": r["unread"],
+                "last_s": _ago(r["last"], now),
+            }
             for r in read["links"] or []
         ],
         "jobs": jobs,

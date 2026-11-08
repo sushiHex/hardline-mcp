@@ -48,7 +48,7 @@ h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .02em; }
 section { margin-top: 30px; }
 h2 { font-size: 14px; font-weight: 600; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
 h2 .ic { color: var(--ink-3); }
-h2 .meta { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--ink-3); display: flex; align-items: center; gap: 14px; }
+h2 .meta { flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; margin-left: auto; font-weight: 400; font-size: 12px; color: var(--ink-3); display: flex; align-items: center; gap: 14px; }
 .group { margin: 10px 0 2px; color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
 .list { columns: 2 280px; column-gap: 32px; }
 .item { display: flex; align-items: center; gap: 8px; padding: 2px 0; break-inside: avoid; }
@@ -71,17 +71,24 @@ details summary small { color: var(--ink-3); }
 details[open] summary { margin-bottom: 8px; }
 svg.chart { display: block; width: 100%; height: auto; }
 svg.chart text { fill: var(--ink-3); font-size: 11px; }
-.board .cable { fill: none; stroke: var(--ink-3); opacity: .55; transition: opacity .15s; }
-.board .cable.ringing { stroke: var(--warn); opacity: .8; }
+.board .cable { opacity: var(--o, .6); transition: opacity .15s; }
+.board .cable path.line { fill: none; stroke-linecap: round; }
 .board .cable.dim { opacity: .08; }
 .board .cable:hover { opacity: 1; }
+.board .flow { fill: none; stroke: var(--surface); stroke-opacity: .8; stroke-linecap: round; stroke-dasharray: 9 200; stroke-dashoffset: 9; animation: flow 2.6s ease-in-out infinite; }
+@keyframes flow { to { stroke-dashoffset: -100; } }
+.board text.cnt { fill: var(--ink-2); font-size: 14px; font-variant-numeric: tabular-nums; }
+.board .swatch.hot, .dot.hot { animation: pulse 1.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .board .flow, .board .swatch.hot, .dot.hot { animation: none; } }
 .board .plug { fill: var(--ink-3); }
 .board .plug.answer { fill: var(--surface); stroke: var(--ink-3); stroke-width: 2; }
 .board text.lbl { fill: var(--ink); font-size: 19px; cursor: default; }
 .board text.lbl.temp { font-style: italic; fill: var(--ink-2); }
 .board .swatch { stroke: none; }
 .key { display: inline-flex; align-items: center; gap: 6px; }
-.key .cord { width: 28px; }
+.key .mini { width: 38px; height: 14px; }
+.flowdemo { animation: flow 2.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .flowdemo { animation: none; } }
 .row { display: grid; grid-template-columns: 220px 1fr 110px; gap: 10px; align-items: center; padding: 3px 0; }
 .row .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track { position: relative; height: 10px; background: var(--card); border-radius: 5px; }
@@ -96,6 +103,32 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
 .who { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .who .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who .dot { width: 8px; height: 8px; }
+.mark { --c: var(--other); width: 16px; height: 16px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; flex: none;
+  border: 2px solid var(--c); background: var(--c); color: var(--surface); }
+.mark { border-width: 1.5px; }
+.mark .ic { width: 9px; height: 9px; stroke-width: 3; }
+.mark.claude { --c: var(--claude); } .mark.codex { --c: var(--codex); } .mark.hermes { --c: var(--hermes); }
+.mark.temp { background: var(--surface); color: var(--c); border-style: dashed; }
+.mark.unknown { border-color: var(--ink-3); }
+.mark.dark { --c: var(--line); color: var(--ink-3); }
+.mark.ring { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 45%, transparent); animation: glow 1.8s ease-in-out infinite; }
+.mark.hot { animation: pulse 1.4s ease-in-out infinite; }
+.mark.ring.hot { animation: glow 1.8s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .mark.ring, .mark.hot { animation: none; } }
+.meter { display: inline-flex; height: 6px; border-radius: 3px; overflow: hidden; flex: none; }
+.meter .o { background: var(--c); } .meter .i { background: var(--c); opacity: .35; }
+.group { display: flex; align-items: center; gap: 8px; }
+.play { margin-bottom: 16px; }
+.play-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.play-head .ic { color: var(--ink-3); }
+.play-head .state { margin-left: auto; }
+.pgrid { display: grid; grid-template-columns: 150px repeat(var(--cols), 64px); gap: 6px; align-items: center; justify-content: start; }
+.pgrid .rn { color: var(--ink-3); font-size: 12px; text-align: center; }
+.pgrid .ln { display: flex; align-items: center; gap: 8px; font-style: italic; color: var(--ink-2); min-width: 0; }
+.pgrid .cell { height: 30px; border-radius: 8px; background: var(--card); display: flex; align-items: center; justify-content: center; color: var(--ink-3); }
+.pgrid .cell.completed { color: var(--good); } .pgrid .cell.failed, .pgrid .cell.lost { color: var(--bad); }
+.pgrid .cell.running { color: var(--ink); animation: pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .pgrid .cell.running { animation: none; } }
 .dot.temp { background: none; box-sizing: border-box; border: 2px dashed var(--other); box-shadow: none; }
 .dot.temp.claude { border-color: var(--claude); } .dot.temp.codex { border-color: var(--codex); } .dot.temp.hermes { border-color: var(--hermes); }
 .t.temp, .what.temp { font-style: italic; color: var(--ink-2); }
@@ -124,6 +157,8 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
     <h2 id="h-board"></h2>
     <div id="board"></div>
   </section>
+
+  <section id="play-section" hidden><h2 id="h-play"></h2><div id="play"></div></section>
 
   <section><h2 id="h-lines"></h2><div id="live"></div></section>
 
@@ -163,6 +198,12 @@ const ICONS = {
   stop: '<rect x="7" y="7" width="10" height="10" rx="1.5" class="solid"/>',
   queue: '<path d="M5 8h14M5 12h14M5 16h9"/>',
   bolt: '<path d="M13 3L5 14h6l-1 7 8-11h-6z"/>',
+  claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"/>',
+  codex: '<path d="M5 7l5 5-5 5M12.5 18H20"/>',
+  hermes: '<path d="M4 14l16-9-5 14-3-6z"/>',
+  waves: '<path d="M3 8c3-3 6 3 9 0s6 3 9 0M3 16c3-3 6 3 9 0s6 3 9 0"/>',
+  roundtable: '<circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="4.5" r="1.7" class="solid"/><circle cx="19.5" cy="12" r="1.7" class="solid"/><circle cx="12" cy="19.5" r="1.7" class="solid"/><circle cx="4.5" cy="12" r="1.7" class="solid"/>',
+  pingpong: '<path d="M4 8h14M14 4l4 4-4 4M20 16H6M10 12l-4 4 4 4"/>',
   search: '<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.5 5.5"/>',
 };
 const icon = (name) => {
@@ -186,10 +227,48 @@ const HASH = /\.([0-9a-f]{8})$/;
 const nameText = (n) => (n.includes(":") ? n.slice(n.indexOf(":") + 1) : n).replace(HASH, "");
 // A worker started on demand (a job's CLI, or a bare "codex"/"claude" reporting back) comes and goes.
 // It is drawn as a dashed ring, never as a solid dot, so it is not mistaken for a session someone is in.
-let twins = new Set(), temps = new Set();
+let twins = new Set(), temps = new Set(), stats = new Map(), maxCalls = 1;
 const isTemp = (n) => temps.has(n) || (!n.includes(":") && known(n) !== "");
+const isHot = (n) => (stats.get(n)?.last ?? Infinity) <= 300; // a call in the last five minutes
+const AGENT_VAR = { claude: "var(--claude)", codex: "var(--codex)", hermes: "var(--hermes)" };
+
+// The agent's own mark: which tool this session is, with the state drawn as a ring around it:
+// dashed = started on demand, glowing = calls waiting, pulsing = a call in the last five minutes,
+// faint = nobody holds the name.
+function mark(name, o = {}) {
+  const a = known(agentOf(name));
+  const m = el("span", "mark " + a + (o.temp ? " temp" : "") + (o.ring ? " ring" : "") + (o.dark ? " dark" : "") +
+    (o.unknown ? " unknown" : "") + (o.hot !== false && isHot(name) ? " hot" : ""));
+  m.append(icon(a || "lamp"));
+  return m;
+}
+
+// How much a session was on the phone this hour: the bar's length is the calls it placed and took,
+// solid for placed, faint for taken.
+function meter(name) {
+  const s = stats.get(name);
+  if (!s) return null;
+  const total = s.out + s.in;
+  const m = el("span", "meter");
+  m.title = `${plural(s.out, "call")} placed, ${plural(s.in, "call")} taken`;
+  m.style.setProperty("--c", AGENT_VAR[known(agentOf(name))] || "var(--other)");
+  const w = 8 + 44 * Math.sqrt(total / maxCalls);
+  const o = el("span", "o"), i = el("span", "i");
+  o.style.width = (w * s.out / total) + "px";
+  i.style.width = (w * s.in / total) + "px";
+  m.append(o, i);
+  return m;
+}
 function indexNames(d) {
   temps = new Set(d.temporary || []);
+  stats = new Map();
+  const st = (n) => stats.get(n) || stats.set(n, { out: 0, in: 0, last: Infinity }).get(n);
+  for (const l of d.links || []) {
+    const a = st(l.from), b = st(l.to), t = l.last_s ?? 3600;
+    a.out += l.n; b.in += l.n;
+    a.last = Math.min(a.last, t); b.last = Math.min(b.last, t);
+  }
+  maxCalls = Math.max(1, ...[...stats.values()].map((s) => s.out + s.in));
   const groups = new Map();
   const add = (n) => {
     const k = agentOf(n) + "|" + nameText(n);
@@ -217,8 +296,7 @@ function who(n) {
   const w = el("span", "who");
   const temp = isTemp(n);
   w.title = temp ? n + " (reviewer started on demand)" : n;
-  const dot = el("span", "dot " + known(agentOf(n)) + (temp ? " temp" : ""));
-  w.append(dot, el("span", "t" + (temp ? " temp" : ""), nameText(n)));
+  w.append(mark(n, { temp }), el("span", "t" + (temp ? " temp" : ""), nameText(n)));
   const t = tagEl(n);
   if (t) w.append(t);
   return w;
@@ -251,26 +329,30 @@ function summary(d) {
   const dead = d.lanes.filter((l) => !isLive(l) && l.unread);
   const waiting = live.reduce((n, l) => n + l.unread, 0);
   const stranded = dead.reduce((n, l) => n + l.unread, 0);
-  const running = d.jobs.filter((j) => j.state === "running" || j.state === "queued").length;
+  const activeJob = (j) => j.state === "running" || j.state === "queued";
+  const running = d.jobs.filter((j) => !j.play && activeJob(j)).length;
+  const plays = new Set(d.jobs.filter((j) => j.play && activeJob(j)).map((j) => j.play.name + "|" + j.requester)).size;
   const box = $("summary");
   box.replaceChildren(
     chip("lamp", live.length, "active", "Lines that placed or took a call in the last hour, or have a call waiting"),
     chip("bell", waiting, "waiting", "Calls waiting for an active line to pick up"),
     chip("search", running, "reviewing", "Reviewers (Codex or Claude, started on demand) running now"),
   );
+  if (plays) box.append(chip("roundtable", plays, plays === 1 ? "play" : "plays", "Playbook plays with a reviewer still running"));
   if (idle) box.append(chip("moon", idle, "idle", "Open lines with no call in the last hour", "muted"));
   if (stranded) box.append(chip("bellOff", stranded, "unanswered", `${plural(stranded, "call")} ringing on ${plural(dead.length, "line")} nobody holds`, "warn"));
 }
 
 function item(l, label) {
   const row = el("div", "item");
-  row.append(el("span", "dot " + known(agentOf(l.agent)) + (l.liveness === "unknown" ? " unknown" : "") +
-    (isLive(l) ? "" : " dark") + (l.unread ? " ring" : "")));
+  row.append(mark(l.lane, { ring: !!l.unread, dark: !isLive(l), unknown: l.liveness === "unknown" }));
   const name = el("span", "name", label);
   name.title = l.lane;
   const tag = tagEl(l.lane);
   if (tag) name.append(tag);
   row.append(name);
+  const bar = meter(l.lane);
+  if (bar) row.append(bar);
   if (l.unread) {
     const old = l.oldest_s > 600;
     const n = el("span", "n" + (old ? " old" : ""));
@@ -294,7 +376,9 @@ function live(d) {
   const lanes = d.lanes.filter((l) => isLive(l) && l.active && !l.temp);
   if (!lanes.length) return box.append(el("div", "empty", "No line active in the last hour."));
   for (const a of [...new Set(lanes.map((l) => agentOf(l.agent)))].sort()) {
-    box.append(el("div", "group", a));
+    const head = el("div", "group");
+    head.append(mark(a, { hot: false }), a);
+    box.append(head);
     const list = el("div", "list");
     for (const l of lanes.filter((x) => agentOf(x.agent) === a)) {
       list.append(item(l, l.lane.includes(":") ? nameText(l.lane) : l.lane + " (shared)"));
@@ -332,23 +416,40 @@ function stranded(d) {
     `${plural(dead.length, "line")} with nobody on them, ${plural(calls, "call")} still ringing`, dead, "warn");
 }
 
-const short = (s) => (s.length > 26 ? s.slice(0, 25) + "…" : s);
-const AGENT_VAR = { claude: "var(--claude)", codex: "var(--codex)", hermes: "var(--hermes)" };
+const short = (s) => (s.length > 22 ? s.slice(0, 21) + "…" : s);
 
-function cordKey() {
-  const k = (cls, text) => {
+// What the cables mean, drawn once as a key: weight, colour, recency, unanswered, on demand.
+function cordKey(links) {
+  const mini = (inner, text) => {
     const s = el("span", "key");
-    s.append(el("span", "cord" + cls), text);
+    const v = document.createElementNS(SVG, "svg");
+    v.setAttribute("viewBox", "0 0 44 16");
+    v.setAttribute("class", "mini");
+    v.innerHTML = inner; // fixed strings, never data
+    s.append(v, text);
     return s;
   };
-  return [k("", "answered"), k(" ringing", "unanswered")];
+  const line = (y, w, c, extra = "") => `<path d="M2 ${y}H34" stroke="${c}" stroke-width="${w}" stroke-linecap="round" ${extra}/>`;
+  const agents = ["claude", "codex", "hermes"].filter((a) => links.some((l) => agentOf(l.from) === a || agentOf(l.to) === a));
+  const who = agents.map((a) => {
+    const s = el("span", "key");
+    s.append(mark(a, { hot: false }), a[0].toUpperCase() + a.slice(1));
+    return s;
+  });
+  return [
+    ...who,
+    mini(line(5, 1.5, "var(--ink-3)") + line(11, 5, "var(--ink-3)") + '<polygon points="42,8 36,4 36,12" fill="var(--ink-3)"/>', "volume"),
+    mini('<path d="M2 8H34" stroke="var(--claude)" stroke-width="4" stroke-linecap="round"/><path class="flowdemo" d="M2 8H34" pathLength="100" stroke="var(--surface)" stroke-opacity=".8" stroke-width="2" stroke-linecap="round" stroke-dasharray="9 200" stroke-dashoffset="9"/>', "just now"),
+    mini(line(8, 3, "var(--ink-3)") + '<polygon points="42,8 33,2 33,14" fill="var(--warn)"/>', "unanswered"),
+    mini(line(8, 3, "var(--codex)", 'stroke-dasharray="6 4"'), "on demand"),
+  ];
 }
 
 // A patch panel: who placed calls on the left, the line each one reached on the right.
 let boardKey = "";
 function board(d) {
   const links = d.links || [];
-  heading("h-board", "board", "Who called whom", ...(links.length ? cordKey() : []));
+  heading("h-board", "board", "Who called whom", ...(links.length ? cordKey(links) : []));
   if (JSON.stringify(links) === boardKey) return; // unchanged: leave it, so a hover is not wiped every 2s
   boardKey = JSON.stringify(links);
   const box = $("board");
@@ -374,31 +475,75 @@ function board(d) {
   };
   const cables = [];
   const focus = (pred) => cables.forEach((c) => c.el.classList.toggle("dim", pred ? !pred(c.link) : false));
+  // The counts live at the edges, one per row, where there is room: calls placed on the left, calls
+  // received on the right (amber for the ones never answered). Faint stripes tie a bar to its name.
+  const placed = new Map(), taken = new Map(), waiting = new Map();
+  for (const l of links) {
+    placed.set(l.from, (placed.get(l.from) || 0) + l.n);
+    taken.set(l.to, (taken.get(l.to) || 0) + l.n);
+    waiting.set(l.to, (waiting.get(l.to) || 0) + (l.unread || 0));
+  }
+  const peak = Math.max(...placed.values(), ...taken.values());
+  const bar = (v) => 6 + 56 * Math.sqrt(v / peak);
+  const stripe = (list) => list.forEach((name, i) => {
+    if (i % 2 === 0) svg.append(mk("rect", { x: 0, y: TOP + i * ROW + 2, width: W, height: ROW - 4, rx: 8, fill: "var(--card)", opacity: 0.6 }));
+  });
+  stripe(callers.length >= lines.length ? callers : lines);
+  const num = (x, y, v, anchor) => svg.append(mk("text", { x, y: y + 4.5, "text-anchor": anchor, class: "cnt" }, String(v)));
+  callers.forEach((name) => {
+    const v = placed.get(name), y = yOf(callers, name), w = bar(v);
+    svg.append(mk("rect", { x: 8, y: y - 4, width: w, height: 8, rx: 4, fill: AGENT_VAR[agentOf(name)] || "var(--other)" }));
+    num(8 + w + 7, y, v, "start");
+  });
+  lines.forEach((name) => {
+    const v = taken.get(name), un = Math.min(waiting.get(name) || 0, v), y = yOf(lines, name), w = bar(v);
+    const x0 = W - 8 - w, wu = w * un / v;
+    svg.append(mk("rect", { x: x0, y: y - 4, width: w, height: 8, rx: 4, fill: AGENT_VAR[agentOf(name)] || "var(--other)" }));
+    if (un) svg.append(mk("rect", { x: W - 8 - wu, y: y - 4, width: wu, height: 8, rx: 4, fill: "var(--warn)" }));
+    num(x0 - 7, y, v, "end");
+  });
   for (const l of links) {
     const y1 = yOf(callers, l.from), y2 = yOf(lines, l.to);
-    const c = mk("path", {
-      d: `M${XL} ${y1} C ${XL + 150} ${y1}, ${XR - 150} ${y2}, ${XR} ${y2}`,
-      class: "cable" + (l.unread ? " ringing" : ""),
-      "stroke-width": (1.5 + 5 * Math.sqrt(l.n / max)).toFixed(1),
-      "stroke-linecap": "round",
-    });
-    c.append(mk("title", {}, `${l.from} to ${l.to}: ${plural(l.n, "call")}` + (l.unread ? `, ${l.unread} not answered` : "")));
-    c.addEventListener("mouseenter", () => focus((x) => x === l));
-    c.addEventListener("mouseleave", () => focus(null));
-    svg.append(c);
-    cables.push({ el: c, link: l });
+    // Colour is who placed the call; weight is how many; flowing dots mean one in the last five
+    // minutes; fading is age; an arrow enters the line it reached; a dashed cord is a reviewer
+    // started on demand; an amber badge means some calls were never answered.
+    const colour = AGENT_VAR[agentOf(l.from)] || "var(--other)";
+    const age = l.last_s ?? 3600, fresh = age <= 300;
+    const w = 1.5 + 5 * Math.sqrt(l.n / max);
+    const d = `M${XL} ${y1} C ${XL + 130} ${y1}, ${XR - 130} ${y2}, ${XR} ${y2}`;
+    const g = mk("g", { class: "cable" });
+    g.style.setProperty("--o", fresh ? 0.95 : age <= 1800 ? 0.6 : 0.35);
+    g.append(mk("title", {}, `${l.from} to ${l.to}: ${plural(l.n, "call")}` + (l.unread ? `, ${l.unread} not answered` : "") + `, last ${dur(age)} ago`));
+    g.append(mk("path", { d, class: "line", stroke: colour, "stroke-width": w.toFixed(1), "stroke-dasharray": isTemp(l.from) ? "8 5" : "none" }));
+    if (fresh) g.append(mk("path", { d, class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
+    g.append(mk("polygon", { points: `${XR - 9},${y2} ${XR - 20},${y2 - 6} ${XR - 20},${y2 + 6}`, fill: l.unread ? "var(--warn)" : colour }));
+    g.addEventListener("mouseenter", () => focus((x) => x === l));
+    g.addEventListener("mouseleave", () => focus(null));
+    svg.append(g);
+    cables.push({ el: g, link: l });
   }
   const side = (list, x, answer) => {
     for (const name of list) {
       const y = yOf(list, name);
       svg.append(mk("circle", { cx: x, cy: y, r: 6.5, class: "plug" + (answer ? " answer" : "") }));
       const colour = AGENT_VAR[agentOf(name)] || "var(--other)", temp = isTemp(name);
-      svg.append(mk("circle", temp
-        ? { cx: answer ? x + 26 : x - 26, cy: y, r: 6, fill: "none", stroke: colour, "stroke-width": 2.2, "stroke-dasharray": "3 2.2" }
-        : { cx: answer ? x + 26 : x - 26, cy: y, r: 6.5, fill: colour, class: "swatch" }));
+      const cx = answer ? x + 21 : x - 21;
+      // A solid badge in the agent's colour with its glyph in white; an on-demand reviewer is the same
+      // glyph in a dashed outline instead, so the two are never confused.
+      const badge = mk("g", { class: "swatch" + (isHot(name) ? " hot" : "") });
+      badge.append(mk("circle", temp
+        ? { cx, cy: y, r: 8.5, fill: "var(--surface)", stroke: colour, "stroke-width": 1.6, "stroke-dasharray": "3 2.2" }
+        : { cx, cy: y, r: 8.5, fill: colour }));
+      const glyph = mk("g", {
+        transform: `translate(${cx - 5.5} ${y - 5.5}) scale(0.4583)`, stroke: temp ? colour : "var(--surface)", fill: "none",
+        "stroke-width": 3.4, "stroke-linecap": "round", "stroke-linejoin": "round",
+      });
+      glyph.innerHTML = ICONS[known(agentOf(name)) || "lamp"]; // fixed strings, never data
+      badge.append(glyph);
+      svg.append(badge);
       const tag = tagOf(name);
-      if (tag) svg.append(mk("rect", { x: answer ? x + 37 : x - 46, y: y - 4.5, width: 9, height: 9, rx: 2.5, fill: tag, class: "swatch" }));
-      const label = mk("text", { x: answer ? x + (tag ? 56 : 42) : x - (tag ? 56 : 42), y: y + 5.5, "text-anchor": answer ? "start" : "end", class: "lbl" + (temp ? " temp" : "") }, short(nameText(name)));
+      if (tag) svg.append(mk("rect", { x: answer ? x + 34 : x - 43, y: y - 4.5, width: 9, height: 9, rx: 2.5, fill: tag, class: "swatch" }));
+      const label = mk("text", { x: answer ? x + (tag ? 53 : 38) : x - (tag ? 53 : 38), y: y + 5.5, "text-anchor": answer ? "start" : "end", class: "lbl" + (temp ? " temp" : "") }, short(nameText(name)));
       label.append(mk("title", {}, name));
       const mine = answer ? (l) => l.to === name : (l) => l.from === name;
       label.addEventListener("mouseenter", () => focus(mine));
@@ -448,15 +593,71 @@ function traffic(d) {
   box.append(svg);
 }
 
+// A playbook play: reviewers labelled <play>-<round>-<lane>, drawn as lanes (rows) by rounds (columns).
+const PLAY_ICON = { "swim-lanes": "waves", roundtable: "roundtable", "ping-pong": "pingpong" };
+function playbook(d) {
+  const plays = new Map();
+  for (const j of d.jobs) {
+    if (!j.play) continue;
+    const key = j.play.name + "|" + j.requester;
+    if (!plays.has(key)) plays.set(key, { name: j.play.name, requester: j.requester, jobs: [] });
+    plays.get(key).jobs.push(j);
+  }
+  $("play-section").hidden = !plays.size;
+  const box = $("play");
+  box.replaceChildren();
+  if (!plays.size) return;
+  heading("h-play", "roundtable", "Playbook");
+  for (const p of plays.values()) {
+    const rounds = [...new Set(p.jobs.map((j) => j.play.round))].sort((a, b) => a - b);
+    const lanes = [];
+    for (const j of [...p.jobs].reverse()) if (!lanes.includes(j.play.lane)) lanes.push(j.play.lane);
+    const cells = new Map();
+    for (const j of p.jobs) { const k = j.play.lane + "|" + j.play.round; if (!cells.has(k)) cells.set(k, j); } // newest first
+    const active = p.jobs.some((j) => j.state === "running" || j.state === "queued");
+    const bad = p.jobs.some((j) => j.state === "failed" || j.state === "lost");
+    const [sIcon, sWord] = active ? ["play", "in progress"] : bad ? ["cross", "a lane failed"] : ["check", "every lane finished"];
+    const wrap = el("div", "play");
+    const head = el("div", "play-head");
+    const status = el("span", "state " + (active ? "running" : bad ? "failed" : "completed"));
+    status.title = sWord;
+    status.append(icon(sIcon));
+    head.append(icon(PLAY_ICON[p.name] || "roundtable"), el("b", "", p.name), who(p.requester), status);
+    const grid = el("div", "pgrid");
+    grid.style.setProperty("--cols", rounds.length);
+    grid.append(el("span"));
+    for (const r of rounds) grid.append(el("span", "rn", String(r)));
+    for (const lane of lanes) {
+      const first = p.jobs.find((j) => j.play.lane === lane);
+      const ln = el("div", "ln");
+      ln.append(mark(first.agent, { temp: true, hot: false }), lane);
+      grid.append(ln);
+      for (const r of rounds) {
+        const j = cells.get(lane + "|" + r);
+        const cell = el("div", "cell " + (j ? j.state : "none"));
+        if (j) {
+          const [ic, word] = STATE[j.state] || ["clock", j.state];
+          cell.title = `${lane}, round ${r}: ${word}, ${dur((j.start_s ?? 0) - (j.end_s ?? 0))}`;
+          cell.append(icon(ic));
+        }
+        grid.append(cell);
+      }
+    }
+    wrap.append(head, grid);
+    box.append(wrap);
+  }
+}
+
 function jobs(d) {
   heading("h-jobs", "search", "Reviews");
   const box = $("jobs");
   box.replaceChildren();
-  if (!d.jobs.length) return box.append(el("div", "empty", "none"));
-  for (const j of d.jobs) {
+  const single = d.jobs.filter((j) => !j.play);
+  if (!single.length) return box.append(el("div", "empty", "none"));
+  for (const j of single) {
     const row = el("div", "row");
     const what = el("div", "what temp");
-    what.append(el("span", "dot temp " + known(agentOf(j.agent))), el("span", "", j.label || j.id));
+    what.append(mark(j.agent, { temp: true }), el("span", "", j.label || j.id));
     what.title = `${j.agent} reviewer started by ${j.requester} (${j.id})`;
     const track = el("div", "track");
     const active = j.end_s === null && j.state !== "lost";
@@ -497,7 +698,7 @@ async function tick() {
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
     indexNames(d);
-    summary(d); live(d); board(d); traffic(d); jobs(d); recent(d); idle(d); stranded(d);
+    summary(d); live(d); board(d); playbook(d); traffic(d); jobs(d); recent(d); idle(d); stranded(d);
     lastOk = Date.now();
     st.className = "";
     text.textContent = d.unavailable.length ? "no data: " + d.unavailable.join(", ") : "live";

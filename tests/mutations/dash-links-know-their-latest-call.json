@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "\" MAX(created_at) AS last\"",
+  "after": "\" MIN(created_at) AS last\"",
+  "tests": [
+    "tests/test_dash.py::test_links_count_who_reached_whom_this_hour"
+  ]
+}

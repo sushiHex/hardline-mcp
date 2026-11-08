@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "\"round\": int(found[2])",
+  "after": "\"round\": 1",
+  "tests": [
+    "tests/test_dash.py::test_playbook_jobs_are_recognised_by_their_label"
+  ]
+}

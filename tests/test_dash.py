@@ -93,20 +93,23 @@ def test_links_count_who_reached_whom_this_hour(tmp_path):
     from datetime import datetime, timedelta, timezone
 
     db = tmp_path / "mb.db"
-    mailbox.send("claude", "codex:a", SECRET, db_path=db)
-    mailbox.send("claude", "codex:a", SECRET, db_path=db)
+    ago = lambda minutes: (lambda: datetime.now(timezone.utc) - timedelta(minutes=minutes))
+    mailbox.send("claude", "codex:a", SECRET, db_path=db, now_fn=ago(20))
+    mailbox.send("claude", "codex:a", SECRET, db_path=db, now_fn=ago(5))
     mailbox.send("codex:a", "claude", SECRET, db_path=db)
-    long_ago = lambda: datetime.now(timezone.utc) - timedelta(hours=3)
-    mailbox.send("claude", "codex:old", SECRET, db_path=db, now_fn=long_ago)
+    mailbox.send("claude", "codex:old", SECRET, db_path=db, now_fn=ago(180))
     raw = sqlite3.connect(db)
     with raw:
         raw.execute("UPDATE messages SET acked_at = created_at WHERE id = 1")
     raw.close()
     got = dash.state(db)["links"]
-    assert got == [
-        {"from": "claude", "to": "codex:a", "n": 2, "unread": 1},
-        {"from": "codex:a", "to": "claude", "n": 1, "unread": 1},
-    ]
+    by = {(link["from"], link["to"]): link for link in got}
+    assert {pair: (link["n"], link["unread"]) for pair, link in by.items()} == {
+        ("claude", "codex:a"): (2, 1),
+        ("codex:a", "claude"): (1, 1),
+    }
+    assert 250 <= by["claude", "codex:a"]["last_s"] <= 400  # the newer of its two calls
+    assert by["codex:a", "claude"]["last_s"] < 60
     assert SECRET not in json.dumps(got)
 
 
@@ -140,6 +143,20 @@ def test_a_session_hosted_by_a_spawned_cli_is_temporary(tmp_path):
     got = dash.state(db, probe=lambda pid, key: procid.ALIVE)
     assert {lane["lane"]: lane["temp"] for lane in got["lanes"]} == {"claude:worker": True, "claude:regular": False}
     assert got["temporary"] == ["claude:worker"]
+
+
+def test_playbook_jobs_are_recognised_by_their_label(tmp_path):
+    db = tmp_path / "mb.db"
+    for label in ("roundtable-2-astra", "swim-lanes-r1-fable", "ping-pong-3-astra-high", "retry-review", "roundtable-x-astra"):
+        jobs.create(agent="codex", requester="claude:x", label=label, request={}, db_path=db)
+    by_label = {j["label"]: j["play"] for j in dash.state(db)["jobs"]}
+    assert by_label == {
+        "roundtable-2-astra": {"name": "roundtable", "round": 2, "lane": "astra"},
+        "swim-lanes-r1-fable": {"name": "swim-lanes", "round": 1, "lane": "fable"},
+        "ping-pong-3-astra-high": {"name": "ping-pong", "round": 3, "lane": "astra-high"},
+        "retry-review": None,
+        "roundtable-x-astra": None,
+    }
 
 
 def test_the_store_is_opened_read_only(tmp_path, monkeypatch):
