@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "\"unheld\" if \":\" in recipient else \"shared\"",
+  "after": "\"shared\"",
+  "tests": [
+    "tests/test_dash.py::test_lanes_unread_traffic_and_jobs"
+  ]
+}

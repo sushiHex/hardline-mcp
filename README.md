@@ -204,6 +204,7 @@ need no MCP client:
 | --- | --- |
 | `hardline-mcp watch` | Level-triggered observer of unread mail, for a Claude Monitor. `server_info()` gives the exact arguments. |
 | `hardline-mcp watch-codex` | Forward the same observations to a bound Codex app-server thread (needs `.[codex-watch]`). |
+| `hardline-mcp dash [--db PATH] [--port N]` | A live, one-screen page on `127.0.0.1:8765` for a human: who talks to whom, active and idle sessions, unanswered mail, call volume, reviews and playbook plays, over the last 15 minutes, hour or 6 hours. Metadata only (no message body or job text), read-only. |
 | `hardline-mcp report [--db PATH]` | Read-only audit of a store: which revisions the registered servers run, unread mail by lane, and who acknowledged each job notice. |
 
 ## Skills

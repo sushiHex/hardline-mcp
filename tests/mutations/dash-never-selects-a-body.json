@@ -1,0 +1,9 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "length(body) AS size",
+  "after": "body AS size",
+  "tests": [
+    "tests/test_dash.py::test_no_body_request_or_path_leaves_the_store",
+    "tests/test_dash.py::test_it_serves_the_page_and_the_state"
+  ]
+}

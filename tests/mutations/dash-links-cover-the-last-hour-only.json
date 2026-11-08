@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "\" FROM messages WHERE created_at >= ? GROUP BY sender, recipient\"",
+  "after": "\" FROM messages WHERE created_at >= ? OR 1 GROUP BY sender, recipient\"",
+  "tests": [
+    "tests/test_dash.py::test_links_count_who_reached_whom_this_hour"
+  ]
+}

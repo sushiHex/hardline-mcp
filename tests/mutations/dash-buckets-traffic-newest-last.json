@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "slot = bars - 1 - age // bucket",
+  "after": "slot = age // bucket",
+  "tests": [
+    "tests/test_dash.py::test_lanes_unread_traffic_and_jobs"
+  ]
+}

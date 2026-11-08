@@ -31,7 +31,11 @@ blocks waiting for input.
 Dependencies point one way: `procid` <- `mailbox` <- `jobs`/`sessions` <-
 `watch` <- `server`.
 
-- `cli.py` picks the subcommand (serve / `watch` / `watch-codex` / `report`) *before*
+- `dash.py` (+ `dash.html`) is `hardline-mcp dash`: a loopback page for a human,
+  built on the same read-only snapshot idea as `report.py`. It selects metadata
+  only (`length(body)`, never a body, request, result or cwd) and refuses a
+  foreign Host or Origin; keep both properties when adding a panel.
+- `cli.py` picks the subcommand (serve / `watch` / `watch-codex` / `report` / `dash`) *before*
   importing anything heavy, so the watchers never load `mcp` or `websockets`
   unless they need them.
 - `server.py` is **the only module that imports `mcp`**. Everything else is pure

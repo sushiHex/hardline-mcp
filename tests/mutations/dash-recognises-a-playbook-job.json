@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "\"play\": _play(row[\"label\"]),",
+  "after": "\"play\": None,",
+  "tests": [
+    "tests/test_dash.py::test_playbook_jobs_are_recognised_by_their_label"
+  ]
+}

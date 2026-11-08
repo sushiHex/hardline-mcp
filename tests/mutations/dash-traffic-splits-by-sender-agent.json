@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "agent = row[\"sender\"].split(\":\")[0]",
+  "after": "agent = \"claude\"",
+  "tests": [
+    "tests/test_dash.py::test_traffic_is_split_by_the_agent_that_placed_the_call"
+  ]
+}

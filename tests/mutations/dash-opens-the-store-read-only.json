@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "db.as_uri() + \"?mode=ro\"",
+  "after": "db.as_uri() + \"?mode=rw\"",
+  "tests": [
+    "tests/test_dash.py::test_the_store_is_opened_read_only"
+  ]
+}

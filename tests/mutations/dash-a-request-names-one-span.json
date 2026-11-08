@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "    if len(choice) != 1:\n        return None\n",
+  "after": "",
+  "tests": [
+    "tests/test_dash.py::test_a_request_names_one_known_span"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "verdict = _state(row, seen)",
+  "after": "verdict = seen(row[\"pid\"], row[\"process_key\"])",
+  "tests": [
+    "tests/test_dash.py::test_a_server_whose_host_died_is_not_shown_as_held"
+  ]
+}

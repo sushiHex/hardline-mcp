@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "SUM(acked_at IS NULL) AS unread",
+  "after": "0 AS unread",
+  "tests": [
+    "tests/test_dash.py::test_links_count_who_reached_whom_this_hour"
+  ]
+}

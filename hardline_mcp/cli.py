@@ -23,9 +23,13 @@ def main(argv: list[str] | None = None) -> None:
         from .report import main as report
 
         raise SystemExit(report(args[1:]))
+    elif args[0] == "dash":
+        from .dash import main as dash
+
+        raise SystemExit(dash(args[1:]))
     elif args in (["-h"], ["--help"]):
         print(
-            "Usage: hardline-mcp [watch | watch-codex | report] [OPTIONS]\n\n"
+            "Usage: hardline-mcp [watch | watch-codex | report | dash] [OPTIONS]\n\n"
             "Omit COMMAND to serve MCP over stdio. Use COMMAND --help for options."
         )
     else:
