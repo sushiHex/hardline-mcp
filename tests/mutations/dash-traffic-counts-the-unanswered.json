@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "pending[slot] += 1 if row[\"pending\"] else 0",
+  "after": "pending[slot] += 1",
+  "tests": [
+    "tests/test_dash.py::test_traffic_is_split_by_the_agent_that_placed_the_call"
+  ]
+}

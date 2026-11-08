@@ -126,8 +126,12 @@ def test_a_line_with_no_calls_this_hour_is_inactive(tmp_path):
     with raw:
         raw.execute("UPDATE messages SET acked_at = created_at")
     raw.close()
-    got = {lane["lane"]: lane["active"] for lane in dash.state(db)["lanes"]}
-    assert got == {"codex:idle": False, "codex:talker": True, "codex:was-busy": False}
+    lanes = {lane["lane"]: lane for lane in dash.state(db)["lanes"]}
+    assert {name: lane["active"] for name, lane in lanes.items()} == {
+        "codex:idle": False, "codex:talker": True, "codex:was-busy": False}
+    # Quiet since its last call, or since it started if it never made one.
+    assert 10700 <= lanes["codex:was-busy"]["idle_s"] <= 10900
+    assert lanes["codex:idle"]["idle_s"] < 120
 
 
 def test_a_session_hosted_by_a_spawned_cli_is_temporary(tmp_path):
@@ -169,6 +173,12 @@ def test_traffic_is_split_by_the_agent_that_placed_the_call(tmp_path):
     by = got["traffic_by"]
     assert {agent: col[-1] for agent, col in by.items()} == {"claude": 1, "codex": 2, "other": 1}
     assert [sum(col) for col in zip(*by.values())] == got["traffic"]
+    assert got["traffic_unanswered"][-1] == 4
+    raw = sqlite3.connect(db)
+    with raw:
+        raw.execute("UPDATE messages SET acked_at = created_at WHERE id IN (1, 2)")
+    raw.close()
+    assert dash.state(db)["traffic_unanswered"][-1] == 2  # only the calls nobody answered
 
 
 def test_the_store_is_opened_read_only(tmp_path, monkeypatch):

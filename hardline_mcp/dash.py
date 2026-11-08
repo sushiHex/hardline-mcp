@@ -96,14 +96,20 @@ def _snapshot(db: Path, since: str) -> dict:
         return {
             "sessions": _rows(
                 conn,
-                "SELECT pid, process_key, host_pid, host_key, lane, agent FROM agent_sessions",
+                "SELECT pid, process_key, host_pid, host_key, lane, agent, started_at FROM agent_sessions",
+            ),
+            # The last call each name sent or took, whenever it was: how long a line has been quiet.
+            "latest": _rows(
+                conn,
+                "SELECT name, MAX(created_at) AS last FROM (SELECT sender AS name, created_at FROM messages"
+                " UNION ALL SELECT recipient, created_at FROM messages) GROUP BY name",
             ),
             "unread": _rows(
                 conn,
                 "SELECT recipient, COUNT(*) AS n, MIN(created_at) AS oldest"
                 " FROM messages WHERE acked_at IS NULL GROUP BY recipient",
             ),
-            "traffic": _rows(conn, "SELECT created_at, sender FROM messages WHERE created_at >= ?", (since,)),
+            "traffic": _rows(conn, "SELECT created_at, sender, acked_at IS NULL AS pending FROM messages WHERE created_at >= ?", (since,)),
             # Every name that sent or received anything this hour: the activity test for a line.
             "talkers": _rows(
                 conn,
@@ -168,7 +174,8 @@ def state(
             continue
         temp = row["pid"] in spawned or row["host_pid"] in spawned
         lane = held.setdefault(
-            row["lane"], {"lane": row["lane"], "agent": row["agent"], "liveness": verdict, "temp": temp}
+            row["lane"],
+            {"lane": row["lane"], "agent": row["agent"], "liveness": verdict, "temp": temp, "since": row["started_at"]},
         )
         lane["temp"] = lane["temp"] and temp  # temporary only if every holder is
         if verdict == ALIVE:
@@ -182,13 +189,18 @@ def state(
                 # A bare agent name is a shared mailbox any reader may drain.
                 "liveness": "unheld" if ":" in recipient else "shared",
                 "temp": False,
+                "since": None,
             },
         )
     # A line is active if it placed or took a call this hour, has calls waiting, or started a job.
     busy = {r["name"] for r in read["talkers"] or []} | {r["requester"] for r in read["jobs"] or []}
+    last_call = {r["name"]: r["last"] for r in read["latest"] or []}
     lanes = []
     for lane in sorted(held.values(), key=lambda e: e["lane"]):
         waiting = unread.get(lane["lane"])
+        # Quiet for how long: since its last call, or, if it never made or took one, since it started.
+        lane["idle_s"] = _ago(last_call.get(lane["lane"]) or lane.pop("since"), now)
+        lane.pop("since", None)
         lanes.append(
             {
                 **lane,
@@ -203,11 +215,13 @@ def state(
     minutes = int(WINDOW.total_seconds() // 60)
     traffic = [0] * minutes
     by_agent: dict = {}  # the same minutes, split by the agent that placed the call
+    pending = [0] * minutes  # and how many of each minute's calls nobody has answered
     for row in read["traffic"] or []:
         age = _ago(row["created_at"], now)
         if age is not None and age < minutes * 60:
             slot = minutes - 1 - age // 60
             traffic[slot] += 1
+            pending[slot] += 1 if row["pending"] else 0
             agent = row["sender"].split(":")[0]
             agent = agent if agent in ("claude", "codex", "hermes") else "other"
             by_agent.setdefault(agent, [0] * minutes)[slot] += 1
@@ -249,6 +263,7 @@ def state(
         "lanes": lanes,
         "traffic": traffic,
         "traffic_by": by_agent,
+        "traffic_unanswered": pending,
         "temporary": sorted(_clip(l["lane"]) for l in lanes if l["temp"]),
         "links": [
             {

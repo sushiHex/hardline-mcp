@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "_ago(last_call.get(lane[\"lane\"]) or lane.pop(\"since\"), now)",
+  "after": "_ago(lane.pop(\"since\"), now)",
+  "tests": [
+    "tests/test_dash.py::test_a_line_with_no_calls_this_hour_is_inactive"
+  ]
+}

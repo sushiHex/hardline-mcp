@@ -31,26 +31,44 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--surface); color: var(--ink);
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 880px; margin: 0 auto; padding: 24px 16px 56px; }
-header { display: flex; align-items: center; gap: 16px; }
+/* One screen: a header, then two columns whose panels share the height. A panel that outgrows its
+   share scrolls inside itself, never the page. Narrow or short windows fall back to a normal page. */
+html, body { height: 100%; }
+body { overflow: hidden; }
+main { height: 100vh; padding: 14px 22px 16px; display: flex; flex-direction: column; gap: 12px; }
+header.top { display: flex; align-items: center; gap: 26px; flex: none; }
+.layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 30px; }
+.col { min-height: 0; display: flex; flex-direction: column; gap: 14px; }
+.panel { min-height: 0; display: flex; flex-direction: column; }
+.panel.grow { flex: 1 1 0; }
+.panel.lines { flex: 0 1 auto; max-height: 40%; overflow-y: auto; }
+.panel.scrolls { flex: 0 1 auto; max-height: 26%; overflow-y: auto; }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; }
+#board { flex: 1; min-height: 0; }
+#board svg.chart { height: 100%; }
+.fold { margin-top: 8px; }
+@media (max-width: 960px), (max-height: 540px) {
+  html, body { height: auto; } body { overflow: auto; }
+  main { height: auto; } .layout { display: block; } .col { display: block; } .panel { margin-bottom: 22px; }
+  .panel.lines, .panel.scrolls { max-height: none; } #board svg.chart { height: auto; }
+}
 h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .02em; }
 #status { margin-left: auto; color: var(--ink-3); font-size: 12px; display: flex; align-items: center; gap: 6px; }
 #status .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--good); animation: pulse 2s ease-in-out infinite; }
 #status.stale { color: var(--bad); } #status.stale .pulse { background: var(--bad); animation: none; }
 .ic { width: 1.15em; height: 1.15em; flex: none; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -0.2em; }
 .ic .solid { fill: currentColor; stroke: none; }
-#summary { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 14px 0 4px; font-size: 15px; }
+#summary { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 0; font-size: 15px; flex: 1; }
 .chip { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-2); cursor: default; }
 .chip b { color: var(--ink); font-size: 17px; font-variant-numeric: tabular-nums; }
 .chip small { color: var(--ink-3); font-size: 12px; }
 .chip.warn, .chip.warn b { color: var(--warn); }
 .chip.muted b { color: var(--ink-2); font-weight: 500; }
-section { margin-top: 30px; }
-h2 { font-size: 14px; font-weight: 600; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+h2 { font-size: 14px; font-weight: 600; margin: 0 0 8px; flex: none; display: flex; align-items: center; gap: 8px; }
 h2 .ic { color: var(--ink-3); }
 h2 .meta { flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; margin-left: auto; font-weight: 400; font-size: 12px; color: var(--ink-3); display: flex; align-items: center; gap: 14px; }
 .group { margin: 10px 0 2px; color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
-.list { columns: 2 280px; column-gap: 32px; }
+.list { columns: 2 220px; column-gap: 28px; }
 .item { display: flex; align-items: center; gap: 8px; padding: 2px 0; break-inside: avoid; }
 .item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .n { color: var(--ink-2); font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: 4px; }
@@ -87,11 +105,15 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
 .board .swatch { stroke: none; }
 .key { display: inline-flex; align-items: center; gap: 6px; }
 .key .dot { width: 9px; height: 9px; }
+.avgkey { display: inline-block; width: 16px; border-top: 2px solid var(--ink-2); opacity: .7; }
+.tick { display: inline-block; width: 10px; height: 3px; border-radius: 2px; background: var(--warn); }
+.readout { display: flex; align-items: center; gap: 14px; min-height: 22px; font-size: 12.5px; color: var(--ink-2); flex: none; }
+.readout .hint { color: var(--ink-3); } .readout .warnnote { color: var(--warn); font-weight: 600; }
 .key .dot.other { background: var(--other); }
 .key .mini { width: 38px; height: 14px; }
 .flowdemo { animation: flow 2.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .flowdemo { animation: none; } }
-.row { display: grid; grid-template-columns: 220px 1fr 110px; gap: 10px; align-items: center; padding: 3px 0; }
+.row { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(50px, 1fr) 84px; gap: 10px; align-items: center; padding: 3px 0; }
 .row .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track { position: relative; height: 10px; background: var(--card); border-radius: 5px; }
 .fill { position: absolute; top: 0; bottom: 0; border-radius: 5px; background: var(--other); min-width: 4px; }
@@ -152,24 +174,30 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
 </head>
 <body>
 <main>
-  <header><h1>hardline</h1><div id="status"><span class="pulse"></span><span id="statustext">connecting</span></div></header>
-  <div id="summary"></div>
+  <header class="top">
+    <h1>hardline</h1>
+    <div id="summary"></div>
+    <div id="status"><span class="pulse"></span><span id="statustext">connecting</span></div>
+  </header>
 
-  <section>
-    <h2 id="h-board"></h2>
-    <div id="board"></div>
-  </section>
+  <div class="layout">
+    <div class="col">
+      <section class="panel grow"><h2 id="h-board"></h2><div id="board"></div></section>
+      <section class="panel"><h2 id="h-volume"></h2><div id="traffic"></div></section>
+    </div>
 
-  <section id="play-section" hidden><h2 id="h-play"></h2><div id="play"></div></section>
-
-  <section><h2 id="h-lines"></h2><div id="live"></div></section>
-
-  <section><h2 id="h-volume"></h2><div id="traffic"></div></section>
-  <section><h2 id="h-jobs"></h2><div id="jobs"></div></section>
-  <section><h2 id="h-recent"></h2><div id="recent"></div></section>
-
-  <section id="idle-section" hidden><div id="idle"></div></section>
-  <section id="stranded-section" hidden><div id="stranded"></div></section>
+    <div class="col">
+      <section class="panel lines">
+        <h2 id="h-lines"></h2>
+        <div id="live"></div>
+        <div id="idle-section" class="fold" hidden><div id="idle"></div></div>
+        <div id="stranded-section" class="fold" hidden><div id="stranded"></div></div>
+      </section>
+      <section id="play-section" class="panel scrolls" hidden><h2 id="h-play"></h2><div id="play"></div></section>
+      <section class="panel scrolls jobs"><h2 id="h-jobs"></h2><div id="jobs"></div></section>
+      <section class="panel grow"><h2 id="h-recent"></h2><div id="recent" class="scroll"></div></section>
+    </div>
+  </div>
 </main>
 <script>
 "use strict";
@@ -315,7 +343,7 @@ const STATE = {
   queued: ["queue", "waiting for a line"], running: ["play", "connected"], completed: ["check", "hung up"],
   failed: ["cross", "dropped"], cancelled: ["stop", "cut off"], lost: ["alert", "dropped, its owner died"],
 };
-let lastOk = 0;
+let lastOk = 0, lastData = null;
 
 function heading(id, ic, text, ...meta) {
   const h = $(id);
@@ -364,6 +392,12 @@ function item(l, label) {
   row.append(name);
   const bar = meter(l.lane);
   if (bar) row.append(bar);
+  if (isLive(l) && !l.active && l.idle_s != null) { // an idle line says how long it has been quiet
+    const q = el("span", "n");
+    q.title = "no call for " + dur(l.idle_s);
+    q.append(icon("moon"), dur(l.idle_s));
+    row.append(q);
+  }
   if (l.unread) {
     const old = l.oldest_s > 600;
     const n = el("span", "n" + (old ? " old" : ""));
@@ -461,20 +495,26 @@ let boardKey = "";
 function board(d) {
   const links = d.links || [];
   heading("h-board", "board", "Who called whom", ...(links.length ? cordKey(links) : []));
-  if (JSON.stringify(links) === boardKey) return; // unchanged: leave it, so a hover is not wiped every 2s
-  boardKey = JSON.stringify(links);
   const box = $("board");
+  const key = JSON.stringify(links) + box.clientWidth + "x" + box.clientHeight;
+  if (key === boardKey) return; // unchanged: leave it, so a hover is not wiped every 2s
+  boardKey = key;
   box.replaceChildren();
   if (!links.length) return box.append(el("div", "empty", "No calls in the last hour."));
   const order = (a, b) => agentOf(a).localeCompare(agentOf(b)) || a.localeCompare(b);
   const callers = [...new Set(links.map((l) => l.from))].sort(order);
   const lines = [...new Set(links.map((l) => l.to))].sort(order);
-  const ROW = 36, TOP = 12, W = 1000, XL = 390, XR = 610;
+  // Rows grow to use the height the panel has, within reason, so a quiet hour does not leave a small board in a big space.
+  const TOP = 12, W = 1000, XL = 390, XR = 610;
+  const rowsN = Math.max(callers.length, lines.length);
+  const availU = (box.clientHeight || 400) / ((box.clientWidth || W) / W);
+  const ROW = Math.max(32, Math.min(64, Math.floor((availU - TOP - 6) / rowsN)));
   const H = TOP + Math.max(callers.length, lines.length) * ROW + 6;
   const yOf = (list, name) => TOP + list.indexOf(name) * ROW + ROW / 2;
   const max = Math.max(...links.map((l) => l.n));
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("class", "chart board");
+  svg.setAttribute("preserveAspectRatio", "xMidYMin meet");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", `${links.length} caller-to-line pairs in the last hour`);
@@ -568,22 +608,36 @@ function board(d) {
   box.append(svg);
 }
 
-// Calls per minute for the last hour, stacked by the agent that placed them.
+// Calls per minute for the last hour, stacked by the agent that placed them, in muted tints so it sits
+// quietly beside the board. Hover a minute for its readout; the line is a five-minute average; an amber
+// tick under a minute means some of its calls were never answered.
 const STACK = ["claude", "codex", "hermes", "other"];
+const soft = (c) => `color-mix(in srgb, ${c} 52%, var(--surface))`;
+let trafficKey = "";
 function traffic(d) {
-  const n = d.traffic.length, W = 1000, H = 100, pad = 20, gutter = 34, bw = (W - gutter) / n;
+  const n = d.traffic.length, W = 1000, H = 110, pad = 26, gutter = 30, bw = (W - gutter) / n;
   const max = Math.max(1, ...d.traffic), total = d.traffic.reduce((a, b) => a + b, 0);
-  const by = d.traffic_by || {};
-  const present = STACK.filter((a) => by[a]);
-  const legend = present.map((a) => {
-    const s = el("span", "key");
-    s.append(el("span", "dot " + a), a);
+  const by = d.traffic_by || {}, pend = d.traffic_unanswered || [];
+  const lost = pend.reduce((a, b) => a + b, 0);
+  const legend = STACK.filter((a) => by[a]).map((a) => {
+    const s = el("span", "key"), sw = el("span", "dot");
+    sw.style.background = soft(AGENT_VAR[a] || "var(--other)");
+    s.append(sw, a);
     return s;
   });
-  heading("h-volume", "bars", "Call volume", el("span", "", total ? `${total} this hour · busiest minute ${max}` : "none this hour"), ...legend);
+  const avg = el("span", "key"); avg.append(el("span", "avgkey"), "5-min average");
+  const miss = el("span", "key"); miss.append(el("span", "tick"), "unanswered");
+  heading("h-volume", "bars", "Call volume", el("span", "", total ? `${total} this hour, busiest minute ${max}` : "none this hour"),
+    ...legend, ...(total ? [avg] : []), ...(lost ? [miss] : []));
+  const key = JSON.stringify([d.traffic, by, pend]);
   const box = $("traffic");
+  if (key === trafficKey && box.firstChild) return; // unchanged: keep the chart, and a hover on it
+  trafficKey = key;
   box.replaceChildren();
   if (!total) return;
+  const readout = el("div", "readout");
+  const idle = () => readout.replaceChildren(el("span", "hint", "hover a minute for detail"));
+  idle();
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("class", "chart");
   svg.setAttribute("viewBox", `0 0 ${W} ${H + pad}`);
@@ -596,39 +650,54 @@ function traffic(d) {
     return e;
   };
   const yv = (v) => H - (v / max) * (H - 6);
-  // Soft gridlines at the top and the middle, labelled at the left.
+  const xo = (i) => gutter + i * bw;
+  const bands = d.traffic.map((_, i) => {
+    const b = mk("rect", { x: xo(i), y: 0, width: bw, height: H, rx: 3, fill: "var(--card)", opacity: 0 });
+    svg.append(b);
+    return b;
+  });
   for (const v of [...new Set([max, Math.round(max / 2)])].filter((x) => x > 0)) {
     svg.append(mk("line", { x1: gutter, x2: W, y1: yv(v), y2: yv(v), stroke: "var(--line)", "stroke-dasharray": "2 5" }));
     svg.append(mk("text", { x: 0, y: yv(v) + 4 }, String(v)));
   }
   svg.append(mk("line", { x1: gutter, x2: W, y1: H, y2: H, stroke: "var(--line)" }));
   d.traffic.forEach((v, i) => {
-    const x = gutter + i * bw + 1.5, w = Math.max(bw - 3, 3);
-    const parts = STACK.filter((a) => by[a] && by[a][i]);
-    const tip = v
-      ? `${plural(v, "call")}, ${n - 1 - i === 0 ? "this minute" : (n - 1 - i) + " min ago"}: ` + parts.map((a) => `${a} ${by[a][i]}`).join(", ")
-      : "";
-    if (!v) {
-      svg.append(mk("rect", { x, y: H - 2, width: w, height: 2, rx: 1, fill: "var(--line)" })); // a quiet minute
-      return;
-    }
+    const x = xo(i) + 1.5, w = Math.max(bw - 3, 3);
+    if (!v) { svg.append(mk("rect", { x, y: H - 2, width: w, height: 2, rx: 1, fill: "var(--line)" })); return; } // a quiet minute
     let top = H;
-    for (const a of parts) {
+    for (const a of STACK.filter((s) => by[s] && by[s][i])) {
       const h = (by[a][i] / max) * (H - 6);
       top -= h;
-      svg.append(mk("rect", {
-        x, y: top, width: w, height: Math.max(h - 1.5, 2), rx: 2.5,
-        fill: AGENT_VAR[a] || "var(--other)", stroke: "var(--surface)", "stroke-width": 1,
-      }));
+      svg.append(mk("rect", { x, y: top, width: w, height: Math.max(h - 1.5, 2), rx: 2.5, fill: soft(AGENT_VAR[a] || "var(--other)") }));
     }
-    const hit = mk("rect", { x: x - 1.5, y: 0, width: w + 3, height: H, fill: "transparent" });
-    hit.append(mk("title", {}, tip));
+  });
+  pend.forEach((p, i) => { if (p) svg.append(mk("rect", { x: xo(i) + 1.5, y: H + 4, width: Math.max(bw - 3, 3), height: 3, rx: 1.5, fill: "var(--warn)" })); });
+  const pts = d.traffic.map((_, i) => {
+    const win = d.traffic.slice(Math.max(0, i - 4), i + 1);
+    return `${(xo(i) + bw / 2).toFixed(1)},${yv(win.reduce((a, b) => a + b, 0) / win.length).toFixed(1)}`;
+  });
+  svg.append(mk("polyline", { points: pts.join(" "), fill: "none", stroke: "var(--ink-2)", "stroke-width": 1.6, "stroke-linejoin": "round", "stroke-linecap": "round", opacity: 0.7 }));
+  d.traffic.forEach((v, i) => {
+    const hit = mk("rect", { x: xo(i), y: 0, width: bw, height: H + pad, fill: "transparent" });
+    hit.addEventListener("mouseenter", () => {
+      bands[i].setAttribute("opacity", 0.8);
+      const when = n - 1 - i === 0 ? "this minute" : `${n - 1 - i} min ago`;
+      readout.replaceChildren(el("b", "", when), ` · ${plural(v, "call")}`);
+      for (const a of STACK.filter((s) => by[s] && by[s][i])) {
+        const s = el("span", "key"), sw = el("span", "dot");
+        sw.style.background = soft(AGENT_VAR[a] || "var(--other)");
+        s.append(sw, `${a} ${by[a][i]}`);
+        readout.append(s);
+      }
+      if (pend[i]) readout.append(el("span", "warnnote", `${pend[i]} unanswered`));
+    });
+    hit.addEventListener("mouseleave", () => { bands[i].setAttribute("opacity", 0); idle(); });
     svg.append(hit);
   });
   for (const [x, anchor, text] of [[gutter, "start", "1 hour ago"], [gutter + (W - gutter) / 2, "middle", "30 min"], [W, "end", "now"]]) {
-    svg.append(mk("text", { x, y: H + 15, "text-anchor": anchor }, text));
+    svg.append(mk("text", { x, y: H + pad - 4, "text-anchor": anchor }, text));
   }
-  box.append(svg);
+  box.append(readout, svg);
 }
 
 // A playbook play: reviewers labelled <play>-<round>-<lane>, drawn as lanes (rows) by rounds (columns).
@@ -735,6 +804,7 @@ async function tick() {
     const r = await fetch("/api/state", { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
+    lastData = d;
     indexNames(d);
     summary(d); live(d); board(d); playbook(d); traffic(d); jobs(d); recent(d); idle(d); stranded(d);
     lastOk = Date.now();
@@ -747,6 +817,7 @@ async function tick() {
 }
 tick();
 setInterval(tick, 2000);
+window.addEventListener("resize", () => { if (lastData) { board(lastData); traffic(lastData); } }); // the drawings fit their panels
 </script>
 </body>
 </html>
