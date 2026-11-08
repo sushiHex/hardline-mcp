@@ -44,11 +44,11 @@ header.top { display: flex; align-items: center; gap: 26px; flex: none; }
 .panel.lines { flex: 0 1 auto; max-height: 40%; overflow-y: auto; }
 .panel.scrolls { flex: 0 1 auto; max-height: 26%; overflow-y: auto; }
 .scroll { flex: 1; min-height: 0; overflow-y: auto; }
-.panel.vol { flex: 0 0 34%; }
+.panel.vol { flex: 1 1 0; min-height: 150px; }
 #traffic { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #traffic svg.chart { flex: 1; min-height: 0; height: 100%; }
-#board { flex: 1; min-height: 0; }
-#board svg.chart { height: 100%; }
+#board { flex: 0 1 auto; min-height: 0; }
+#board svg.chart { height: auto; }
 .fold { margin-top: 8px; }
 @media (max-width: 960px), (max-height: 540px) {
   html, body { height: auto; } body { overflow: auto; }
@@ -70,7 +70,7 @@ h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .02em; }
 h2 { font-size: 14px; font-weight: 600; margin: 0 0 8px; flex: none; display: flex; align-items: center; gap: 8px; }
 h2 .ic { color: var(--ink-3); }
 h2 .ttl { white-space: nowrap; }
-h2 .meta { flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; margin-left: auto; font-weight: 400; font-size: 12px; color: var(--ink-3); display: flex; align-items: center; gap: 14px; }
+h2 .meta { flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; margin-left: auto; font-weight: 400; font-size: 12px; color: var(--ink-3); display: flex; align-items: center; gap: 4px 12px; }
 .group { margin: 10px 0 2px; color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
 .list { columns: 2 220px; column-gap: 28px; }
 .item { display: flex; align-items: center; gap: 8px; padding: 2px 0; break-inside: avoid; }
@@ -103,7 +103,6 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
 .board .swatch.hot, .dot.hot { animation: pulse 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .board .flow, .board .swatch.hot, .dot.hot { animation: none; } }
 .board .plug { fill: var(--ink-3); }
-.board .plug.answer { fill: var(--surface); stroke: var(--ink-3); stroke-width: 2; }
 .board text.lbl { fill: var(--ink); font-size: 19px; cursor: default; }
 .board text.lbl.temp { font-style: italic; fill: var(--ink-2); }
 .board .swatch { stroke: none; }
@@ -193,7 +192,7 @@ body.offline .layout { opacity: .45; filter: grayscale(.6); transition: opacity 
 
   <div class="layout">
     <div class="col">
-      <section class="panel grow"><h2 id="h-board"></h2><div id="board"></div></section>
+      <section class="panel"><h2 id="h-board"></h2><div id="board"></div></section>
       <section class="panel vol"><h2 id="h-volume"></h2><div id="traffic"></div></section>
     </div>
 
@@ -514,57 +513,12 @@ function cordKey(links) {
   });
   return [
     ...who,
-    mini(line(5, 1.5, "var(--ink-3)") + line(11, 5, "var(--ink-3)") + '<polygon points="42,8 36,4 36,12" fill="var(--ink-3)"/>', "volume"),
+    mini('<path d="M8 4.5H34" stroke="var(--ink-3)" stroke-width="2.5" stroke-linecap="round"/><polygon points="42,4.5 34,0.5 34,8.5" fill="var(--ink-3)"/>' +
+      '<path d="M10 11.5H36" stroke="var(--ink-3)" stroke-width="2.5" stroke-linecap="round"/><polygon points="2,11.5 10,7.5 10,15.5" fill="var(--ink-3)"/>', "each way"),
     mini('<path d="M2 8H34" stroke="var(--claude)" stroke-width="4" stroke-linecap="round"/><path class="flowdemo" d="M2 8H34" pathLength="100" stroke="var(--surface)" stroke-opacity=".8" stroke-width="2" stroke-linecap="round" stroke-dasharray="9 200" stroke-dashoffset="9"/>', "just now"),
     mini(line(8, 3, "var(--ink-3)") + '<polygon points="42,8 33,2 33,14" fill="var(--warn)"/>', "unanswered"),
     mini(line(8, 3, "var(--codex)", 'stroke-dasharray="6 4"'), "on demand"),
   ];
-}
-
-// Companions are a Claude and a Codex session that share a name, or where one name extends the other
-// ("retro" and "retro-wave"). They go on the same rows: the Claude caller sits across from its Codex
-// line, then the Codex caller across from the Claude line, so the cables between them run straight.
-// Anything else is grouped by its own name. A row a side has nobody for is left blank.
-function layout(links) {
-  const froms = [...new Set(links.map((l) => l.from))], tos = [...new Set(links.map((l) => l.to))];
-  const all = [...new Set([...froms, ...tos])];
-  const pair = (n) => n.includes(":") && (agentOf(n) === "claude" || agentOf(n) === "codex");
-  const key = (n) => {
-    if (!pair(n)) return "~" + n; // not a Claude or Codex session: its own group, after the companions
-    const b = nameText(n);
-    let k = b;
-    for (const m of all) {
-      if (!pair(m) || agentOf(m) === agentOf(n)) continue;
-      const c = nameText(m);
-      const cand = c === b || c.startsWith(b + "-") ? b : b.startsWith(c + "-") ? c : null;
-      if (cand !== null && cand.length < k.length) k = cand;
-    }
-    return k;
-  };
-  const groups = new Map();
-  const slot = (n, side) => {
-    const k = key(n);
-    if (!groups.has(k)) groups.set(k, { lc: [], lx: [], lo: [], rc: [], rx: [], ro: [] });
-    const a = agentOf(n), g = groups.get(k);
-    g[side + (a === "claude" ? "c" : a === "codex" ? "x" : "o")].push(n);
-  };
-  froms.sort().forEach((n) => slot(n, "l"));
-  tos.sort().forEach((n) => slot(n, "r"));
-  const L = [], R = [];
-  const track = (left, right) => {
-    for (let i = 0; i < Math.max(left.length, right.length); i++) { L.push(left[i] ?? null); R.push(right[i] ?? null); }
-  };
-  // Pairs first; then the rest, with the callers that have no companion (an on-demand reviewer, say)
-  // ahead of the lines they reached, so those cables are short too.
-  const paired = (g) => (g.lc.length + g.rc.length > 0) && (g.lx.length + g.rx.length > 0);
-  const rank = (k) => (paired(groups.get(k)) ? 0 : k[0] === "~" ? 1 : 2);
-  for (const k of [...groups.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))) {
-    const g = groups.get(k);
-    track(g.lc, g.rx); // Claude placing calls, across from the Codex line
-    track(g.lx, g.rc); // Codex placing calls, across from the Claude line
-    track(g.lo, g.ro);
-  }
-  return { callers: L, lines: R };
 }
 
 // A patch panel: who placed calls on the left, the line each one reached on the right.
@@ -589,133 +543,184 @@ function pinChip() {
   c.addEventListener("click", () => pin(pinned));
   return c;
 }
+
+// Each session appears once: Claude sessions on the left, everything else (Codex, on-demand reviewers,
+// Hermes) on the right. Companions, a Claude and a Codex session that share a name or where one name
+// extends the other ("retro", "retro-wave"), share a row. The rest pair with whoever they talked to most.
+function layout(links) {
+  const names = [...new Set(links.flatMap((l) => [l.from, l.to]))];
+  const isLeft = (n) => agentOf(n) === "claude" && n.includes(":");
+  const sess = (n) => n.includes(":") && (agentOf(n) === "claude" || agentOf(n) === "codex");
+  const lefts = names.filter(isLeft).sort(), rights = names.filter((n) => !isLeft(n)).sort();
+  const companion = (a, b) => { const x = nameText(a), y = nameText(b); return x === y || x.startsWith(y + "-") || y.startsWith(x + "-"); };
+  const weight = (a, b) => links.filter((l) => (l.from === a && l.to === b) || (l.from === b && l.to === a)).reduce((s, l) => s + l.n, 0);
+  const rows = [], usedL = new Set(), usedR = new Set();
+  for (const r of rights) {
+    if (!sess(r)) continue;
+    const m = lefts.find((l) => !usedL.has(l) && companion(l, r));
+    if (m) { rows.push([m, r]); usedL.add(m); usedR.add(r); }
+  }
+  for (const r of rights.filter((n) => !usedR.has(n))) {
+    let best = null, top = 0;
+    for (const l of lefts) if (!usedL.has(l)) { const w = weight(l, r); if (w > top) { top = w; best = l; } }
+    rows.push([best, r]);
+    if (best) usedL.add(best);
+  }
+  for (const l of lefts) if (!usedL.has(l)) rows.push([l, null]);
+  return rows;
+}
+
+// The board: who has been talking to whom this hour. One strand per direction of a conversation, each
+// with its own arrowhead, so a two-way conversation reads as two-way and a one-way call as one-way.
 function board(d) {
   const links = d.links || [];
-  heading("h-board", "board", "Who called whom", ...(pinned ? [pinChip()] : []), ...(links.length ? cordKey(links) : []));
+  heading("h-board", "board", "Who talks to whom", ...(pinned ? [pinChip()] : []), ...(links.length ? cordKey(links) : []));
   const box = $("board");
   // Redraw only when something drawn changes. A pair's age ticks every second, but only its tier is drawn.
   const tier = (l) => ((l.last_s ?? 3600) <= 300 ? 0 : (l.last_s ?? 3600) <= 1800 ? 1 : 2);
-  const key = JSON.stringify(links.map((l) => [l.from, l.to, l.n, l.unread, tier(l)])) + box.clientWidth + "x" + box.clientHeight + pinned;
+  const col = box.closest(".col"); // the board hugs its rows; the column's height is what it may use
+  const key = JSON.stringify(links.map((l) => [l.from, l.to, l.n, l.unread, tier(l)])) + box.clientWidth + "x" + col.clientHeight + pinned;
   if (key === boardKey) return; // unchanged: leave it, so a hover is not wiped every 2s
   boardKey = key;
   box.replaceChildren();
   if (!links.length) return box.append(el("div", "empty", "No calls in the last hour."));
-  const { callers, lines } = layout(links); // rows, with a blank where a side has no one on that row
-  // Rows grow to use the height the panel has, within reason, so a quiet hour does not leave a small board in a big space.
+  const rows = layout(links);
+  const rowOf = new Map(), sideOf = new Map();
+  rows.forEach(([l, r], i) => {
+    if (l) { rowOf.set(l, i); sideOf.set(l, 0); }
+    if (r) { rowOf.set(r, i); sideOf.set(r, 1); }
+  });
+  // Rows grow to use the height the panel has, within reason.
   const TOP = 12, W = 1000, XL = 390, XR = 610;
-  const rowsN = Math.max(callers.length, lines.length);
-  const availU = (box.clientHeight || 400) / ((box.clientWidth || W) / W);
-  const ROW = Math.max(32, Math.min(76, Math.floor((availU - TOP - 6) / rowsN)));
-  const k = Math.min(1.5, ROW / 40); // marks grow with the rows, so a roomy board is not a sparse one...
-  const kf = Math.min(k, 1.1); // ...but type grows only a little: names must keep clear of the count bars
-  const H = TOP + Math.max(callers.length, lines.length) * ROW + 6;
-  const yOf = (list, name) => TOP + list.indexOf(name) * ROW + ROW / 2;
-  const max = Math.max(...links.map((l) => l.n));
+  const availU = ((col.clientHeight || 700) - 230) / ((box.clientWidth || W) / W); // the rest is the chart's minimum and the headings
+  const ROW = Math.max(32, Math.min(76, Math.floor((availU - TOP - 6) / rows.length)));
+  const k = Math.min(1.5, ROW / 40); // marks grow with the rows...
+  const kf = Math.min(k, 1.1); // ...type only a little, so names keep clear of the bars
+  const H = TOP + rows.length * ROW + 6;
+  const yOf = (n) => TOP + rowOf.get(n) * ROW + ROW / 2;
+  const xOf = (n) => (sideOf.get(n) ? XR : XL);
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("class", "chart board");
   svg.setAttribute("preserveAspectRatio", "xMidYMin meet");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `${links.length} caller-to-line pairs in the last hour`);
+  svg.setAttribute("aria-label", `${links.length} directed conversations in the last hour`);
   const mk = (tag, attrs, text) => {
     const n = document.createElementNS(SVG, tag);
-    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    for (const [a, v] of Object.entries(attrs)) n.setAttribute(a, v);
     if (text !== undefined) n.textContent = text;
     return n;
   };
   const cables = [];
-  const focus = (pred) => cables.forEach((c) => c.el.classList.toggle("dim", pred ? !pred(c.link) : false));
+  const focus = (pred) => cables.forEach((c) => c.el.classList.toggle("dim", pred ? !c.links.some(pred) : false));
   boardFocus = focus; // the lists beside the board can point at a name too
-  // The counts live at the edges, one per row, where there is room: calls placed on the left, calls
-  // received on the right (amber for the ones never answered). Faint stripes tie a bar to its name.
+  // Per session: calls placed, calls taken, and how many of those taken are still unanswered.
   const placed = new Map(), taken = new Map(), waiting = new Map();
   for (const l of links) {
     placed.set(l.from, (placed.get(l.from) || 0) + l.n);
     taken.set(l.to, (taken.get(l.to) || 0) + l.n);
     waiting.set(l.to, (waiting.get(l.to) || 0) + (l.unread || 0));
   }
-  const peak = Math.max(...placed.values(), ...taken.values());
+  const total = (n) => (placed.get(n) || 0) + (taken.get(n) || 0);
+  const peak = Math.max(...[...rowOf.keys()].map(total));
   const bar = (v) => 6 + 56 * Math.sqrt(v / peak);
-  const stripe = (list) => list.forEach((name, i) => {
+  rows.forEach((_, i) => {
     if (i % 2 === 0) svg.append(mk("rect", { x: 0, y: TOP + i * ROW + 2, width: W, height: ROW - 4, rx: 8, fill: "var(--card)", opacity: 0.6 }));
   });
-  stripe(callers.length >= lines.length ? callers : lines);
-  const num = (x, y, v, anchor) => {
-    const t = mk("text", { x, y: y + 4.5 * k, "text-anchor": anchor, class: "cnt" }, String(v));
-    t.style.fontSize = 14 * kf + "px";
-    svg.append(t);
-  };
-  callers.forEach((name) => {
-    if (name == null) return;
-    const v = placed.get(name), y = yOf(callers, name), w = bar(v);
-    svg.append(mk("rect", { x: 8, y: y - 4 * k, width: w, height: 8 * k, rx: 4 * k, fill: AGENT_VAR[agentOf(name)] || "var(--other)" }));
-    num(8 + w + 7, y, v, "start");
-  });
-  lines.forEach((name) => {
-    if (name == null) return;
-    const v = taken.get(name), un = Math.min(waiting.get(name) || 0, v), y = yOf(lines, name), w = bar(v);
-    const x0 = W - 8 - w, wu = w * un / v;
-    svg.append(mk("rect", { x: x0, y: y - 4 * k, width: w, height: 8 * k, rx: 4 * k, fill: AGENT_VAR[agentOf(name)] || "var(--other)" }));
-    if (un) svg.append(mk("rect", { x: W - 8 - wu, y: y - 4 * k, width: wu, height: 8 * k, rx: 4 * k, fill: "var(--warn)" }));
-    num(x0 - 7, y, v, "end");
-  });
+  // The outer bar per session: placed (solid) then taken (faint), the unanswered part of it amber.
+  for (const n of rowOf.keys()) {
+    const y = yOf(n), right = sideOf.get(n) === 1, p = placed.get(n) || 0, t = taken.get(n) || 0;
+    const w = bar(p + t), wp = w * p / (p + t), wt = w - wp, wu = t ? wt * Math.min(waiting.get(n) || 0, t) / t : 0;
+    const colour = AGENT_VAR[agentOf(n)] || "var(--other)", x0 = right ? W - 8 : 8;
+    const seg = (from, len, fill, opacity) => len > 0 && svg.append(mk("rect", {
+      x: right ? x0 - from - len : x0 + from, y: y - 4 * k, width: len, height: 8 * k, rx: 4 * k, fill, opacity,
+    }));
+    seg(0, wp, colour, 1);
+    seg(wp, wt, colour, 0.38);
+    seg(w - wu, wu, "var(--warn)", 1);
+    const num = mk("text", { x: right ? x0 - w - 7 : x0 + w + 7, y: y + 4.5 * k, "text-anchor": right ? "end" : "start", class: "cnt" }, String(p + t));
+    num.style.fontSize = 14 * kf + "px";
+    svg.append(num);
+  }
+  // One group per pair of sessions, with a strand for each direction that has traffic.
+  const pairs = new Map();
   for (const l of links) {
-    const y1 = yOf(callers, l.from), y2 = yOf(lines, l.to);
-    // Colour is who placed the call; weight is how many; flowing dots mean one in the last five
-    // minutes; fading is age; an arrow enters the line it reached; a dashed cord is a reviewer
-    // started on demand; an amber badge means some calls were never answered.
-    const colour = AGENT_VAR[agentOf(l.from)] || "var(--other)";
-    const age = l.last_s ?? 3600, fresh = age <= 300;
-    const w = (1.5 + 5 * Math.sqrt(l.n / max)) * Math.sqrt(k);
-    const d = `M${XL} ${y1} C ${XL + 130} ${y1}, ${XR - 130} ${y2}, ${XR} ${y2}`;
+    if (l.from === l.to) continue;
+    const pk = [l.from, l.to].sort().join("\u0000");
+    if (!pairs.has(pk)) pairs.set(pk, []);
+    pairs.get(pk).push(l);
+  }
+  const max = Math.max(...links.map((l) => l.n));
+  for (const group of pairs.values()) {
+    const wOf = (l) => (1.5 + 5 * Math.sqrt(l.n / max)) * Math.sqrt(k);
+    const off = group.length === 2 ? (wOf(group[0]) + wOf(group[1])) / 4 + 3.2 * Math.sqrt(k) : 0;
     const g = mk("g", { class: "cable" });
-    g.style.setProperty("--o", fresh ? 0.95 : age <= 1800 ? 0.6 : 0.35);
-    g.append(mk("title", {}, `${l.from} to ${l.to}: ${plural(l.n, "call")}` + (l.unread ? `, ${l.unread} not answered` : "") + `, last ${dur(age)} ago`));
-    g.append(mk("path", { d, class: "line", stroke: colour, "stroke-width": w.toFixed(1), "stroke-dasharray": isTemp(l.from) ? "8 5" : "none" }));
-    if (fresh) g.append(mk("path", { d, class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
-    g.append(mk("polygon", { points: `${XR - 9},${y2} ${XR - 9 - 11 * k},${y2 - 6 * k} ${XR - 9 - 11 * k},${y2 + 6 * k}`, fill: l.unread ? "var(--warn)" : colour }));
-    g.addEventListener("mouseenter", () => focus((x) => x === l));
+    const youngest = Math.min(...group.map((l) => l.last_s ?? 3600));
+    g.style.setProperty("--o", youngest <= 300 ? 0.95 : youngest <= 1800 ? 0.6 : 0.35);
+    g.append(mk("title", {}, group.map((l) => `${l.from} to ${l.to}: ${plural(l.n, "call")}` + (l.unread ? `, ${l.unread} not answered` : "")).join("\n")));
+    // The two directions are kept apart: the one running left to right rides above, the other below.
+    const lane = (l) => (xOf(l.from) <= xOf(l.to) && sideOf.get(l.from) <= sideOf.get(l.to) ? -1 : 1);
+    group.forEach((l, i) => {
+      const colour = AGENT_VAR[agentOf(l.from)] || "var(--other)", w = wOf(l);
+      const fresh = (l.last_s ?? 3600) <= 300;
+      const dy = group.length === 2 ? (lane(l) < 0 ? -off : off) : 0;
+      const xs = xOf(l.from), xt = xOf(l.to), ys = yOf(l.from) + dy, yt = yOf(l.to) + dy;
+      let path, dirn;
+      if (sideOf.get(l.from) !== sideOf.get(l.to)) {
+        const s = xt > xs ? 1 : -1;
+        path = `M${xs} ${ys} C ${xs + s * 130} ${ys}, ${xt - s * 130} ${yt}, ${xt} ${yt}`;
+        dirn = s; // travelling right (+1) or left (-1) as it arrives
+      } else {
+        // Two sessions on the same side: an arc bulging toward the middle, arriving back at the column.
+        const into = sideOf.get(l.from) === 0 ? 1 : -1, bulge = 70 + 26 * i;
+        path = `M${xs} ${ys} C ${xs + into * bulge} ${ys}, ${xt + into * bulge} ${yt}, ${xt} ${yt}`;
+        dirn = -into;
+      }
+      g.append(mk("path", { d: path, class: "line", stroke: colour, "stroke-width": w.toFixed(1), "stroke-dasharray": isTemp(l.from) ? "8 5" : "none" }));
+      if (fresh) g.append(mk("path", { d: path, class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
+      // The head is sized from the strand it ends: a thick cable gets a head that clearly outgrows it.
+      const half = Math.max(6 * k, w * 0.9 + 3), len = Math.max(11 * k, w * 1.5 + 6);
+      const tip = xt - dirn * 9, base = tip - dirn * len;
+      g.append(mk("polygon", { points: `${tip},${yt} ${base},${yt - half} ${base},${yt + half}`, fill: l.unread ? "var(--warn)" : colour }));
+    });
+    g.addEventListener("mouseenter", () => focus((x) => group.includes(x)));
     g.addEventListener("mouseleave", refocus);
     svg.append(g);
-    cables.push({ el: g, link: l });
+    cables.push({ el: g, links: group });
   }
-  const side = (list, x, answer) => {
-    for (const name of list) {
-      if (name == null) continue;
-      const y = yOf(list, name);
-      svg.append(mk("circle", { cx: x, cy: y, r: 6.5, class: "plug" + (answer ? " answer" : "") }));
-      const colour = AGENT_VAR[agentOf(name)] || "var(--other)", temp = isTemp(name);
-      const off = 21 * k, br = 8.5 * k;
-      const cx = answer ? x + off : x - off;
-      // A solid badge in the agent's colour with its glyph in white; an on-demand reviewer is the same
-      // glyph in a dashed outline instead, so the two are never confused.
-      const badge = mk("g", { class: "swatch" + (isHot(name) ? " hot" : "") });
-      badge.append(mk("circle", temp
-        ? { cx, cy: y, r: br, fill: "var(--surface)", stroke: colour, "stroke-width": 1.6, "stroke-dasharray": "3 2.2" }
-        : { cx, cy: y, r: br, fill: colour }));
-      const glyph = mk("g", {
-        transform: `translate(${cx - 5.5 * k} ${y - 5.5 * k}) scale(${0.4583 * k})`, stroke: temp ? colour : "var(--surface)", fill: "none",
-        "stroke-width": 3.4, "stroke-linecap": "round", "stroke-linejoin": "round",
-      });
-      glyph.innerHTML = ICONS[known(agentOf(name)) || "lamp"]; // fixed strings, never data
-      badge.append(glyph);
-      svg.append(badge);
-      const tag = tagOf(name);
-      const lab = off + br + 8.5; // where the name starts, past the badge
-      if (tag) svg.append(mk("rect", { x: answer ? x + lab - 5 : x - lab - 4, y: y - 4.5, width: 9, height: 9, rx: 2.5, fill: tag, class: "swatch" }));
-      const label = mk("text", { x: answer ? x + lab + (tag ? 15 : 0) : x - lab - (tag ? 15 : 0), y: y + 6 * k, "text-anchor": answer ? "start" : "end", class: "lbl" + (temp ? " temp" : "") + (pinned === name ? " pinned" : "") }, short(nameText(name)));
-      label.style.fontSize = 19 * kf + "px";
-      label.style.fill = tint(name);
-      label.append(mk("title", {}, name));
-      const mine = answer ? (l) => l.to === name : (l) => l.from === name;
-      label.addEventListener("mouseenter", () => focus(mine));
-      label.addEventListener("mouseleave", refocus);
-      label.addEventListener("click", () => pin(name));
-      svg.append(label);
-    }
-  };
-  side(callers, XL, false);
-  side(lines, XR, true);
+  // The sessions themselves: a plug, the agent's badge, and the name.
+  for (const name of rowOf.keys()) {
+    const y = yOf(name), x = xOf(name), right = sideOf.get(name) === 1;
+    svg.append(mk("circle", { cx: x, cy: y, r: 6.5, class: "plug" }));
+    const colour = AGENT_VAR[agentOf(name)] || "var(--other)", temp = isTemp(name);
+    const off = 21 * k, br = 8.5 * k, cx = right ? x + off : x - off;
+    // A solid badge in the agent's colour with its glyph in white; an on-demand reviewer is the same
+    // glyph in a dashed outline instead, so the two are never confused.
+    const badge = mk("g", { class: "swatch" + (isHot(name) ? " hot" : "") });
+    badge.append(mk("circle", temp
+      ? { cx, cy: y, r: br, fill: "var(--surface)", stroke: colour, "stroke-width": 1.6, "stroke-dasharray": "3 2.2" }
+      : { cx, cy: y, r: br, fill: colour }));
+    const glyph = mk("g", {
+      transform: `translate(${cx - 5.5 * k} ${y - 5.5 * k}) scale(${0.4583 * k})`, stroke: temp ? colour : "var(--surface)", fill: "none",
+      "stroke-width": 3.4, "stroke-linecap": "round", "stroke-linejoin": "round",
+    });
+    glyph.innerHTML = ICONS[known(agentOf(name)) || "lamp"]; // fixed strings, never data
+    badge.append(glyph);
+    svg.append(badge);
+    const tag = tagOf(name), lab = off + br + 8.5; // where the name starts, past the badge
+    if (tag) svg.append(mk("rect", { x: right ? x + lab - 5 : x - lab - 4, y: y - 4.5, width: 9, height: 9, rx: 2.5, fill: tag, class: "swatch" }));
+    const label = mk("text", {
+      x: right ? x + lab + (tag ? 15 : 0) : x - lab - (tag ? 15 : 0), y: y + 6 * k, "text-anchor": right ? "start" : "end",
+      class: "lbl" + (temp ? " temp" : "") + (pinned === name ? " pinned" : ""),
+    }, short(nameText(name)));
+    label.style.fontSize = 19 * kf + "px";
+    label.style.fill = tint(name);
+    label.append(mk("title", {}, name));
+    label.addEventListener("mouseenter", () => focus(focusFor(name)));
+    label.addEventListener("mouseleave", refocus);
+    label.addEventListener("click", () => pin(name));
+    svg.append(label);
+  }
   box.append(svg);
   refocus(); // a pinned name stays lit across a redraw
 }
@@ -730,7 +735,7 @@ function traffic(d) {
   // The chart takes the height its panel has (within reason), so the left column has no blank gap.
   const box = $("traffic");
   const n = d.traffic.length, W = 1000, pad = 26, gutter = 30, bw = (W - gutter) / n;
-  const H = Math.max(80, Math.min(240, Math.floor(((box.clientHeight || 160) - 26) / ((box.clientWidth || W) / W) - pad)));
+  const H = Math.max(80, Math.min(320, Math.floor(((box.clientHeight || 160) - 26) / ((box.clientWidth || W) / W) - pad)));
   const max = Math.max(1, ...d.traffic), total = d.traffic.reduce((a, b) => a + b, 0);
   const by = d.traffic_by || {}, pend = d.traffic_unanswered || [];
   const lost = pend.reduce((a, b) => a + b, 0);
