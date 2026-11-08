@@ -532,7 +532,7 @@ function cordKey(links) {
     mini('<defs><linearGradient id="kg" x1="0" x2="1"><stop offset="0" stop-color="var(--claude)"/><stop offset=".4" stop-color="var(--claude)"/><stop offset=".65" stop-color="var(--codex)"/><stop offset="1" stop-color="var(--codex)"/></linearGradient></defs>' +
       '<path d="M8 8H36" stroke="url(#kg)" stroke-width="3" stroke-linecap="round"/><polygon points="43,8 35,3.5 35,12.5" fill="var(--codex)"/><polygon points="1,8 9,3.5 9,12.5" fill="var(--claude)"/>', "both ways"),
     mini('<path d="M2 8H34" stroke="var(--claude)" stroke-width="4" stroke-linecap="round"/><path class="flowdemo" d="M2 8H34" pathLength="100" stroke="var(--surface)" stroke-opacity=".8" stroke-width="2" stroke-linecap="round" stroke-dasharray="9 200" stroke-dashoffset="9"/>', "just now"),
-    mini(line(8, 3, "var(--ink-3)") + '<polygon points="42,8 33,2 33,14" fill="var(--warn)"/>', "unanswered"),
+    mini(line(8, 3, "var(--ink-3)") + '<polygon points="42,8 33,2.5 33,13.5" fill="var(--ink-3)" stroke="var(--warn)" stroke-width="2" stroke-linejoin="round"/>', "unanswered"),
     mini(line(8, 3, "var(--codex)", 'stroke-dasharray="6 4"'), "on demand"),
   ];
 }
@@ -730,12 +730,17 @@ function board(d) {
     const d = route(ea, ya, eb, yb);
     g.append(mk("path", { d, class: "line", stroke, "stroke-width": w.toFixed(1), "stroke-dasharray": group.some((l) => isTemp(l.from)) ? "8 5" : "none" }));
     if (age <= 300) g.append(mk("path", { d: latest.from === a ? d : route(eb, yb, ea, ya), class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
-    const head = (l, x, y, heading) => {
+    // The head takes the colour the line has where it arrives; unanswered calls give it an amber outline.
+    const gradient = stroke.startsWith("url(");
+    const head = (l, x, y, heading, colour) => {
       const { half, len } = size(l), tip = x - heading * 2, base = tip - heading * len;
-      g.append(mk("polygon", { points: `${tip},${y} ${base},${y - half} ${base},${y + half}`, fill: l.unread ? "var(--warn)" : AGENT_VAR[agentOf(l.from)] || "var(--other)" }));
+      g.append(mk("polygon", {
+        points: `${tip},${y} ${base},${y - half} ${base},${y + half}`, fill: colour,
+        ...(l.unread ? { stroke: "var(--warn)", "stroke-width": 2.2 * Math.sqrt(k), "stroke-linejoin": "round" } : {}),
+      }));
     };
-    if (fwd) head(fwd, xb, yb, toB);
-    if (back) head(back, xa, ya, toA);
+    if (fwd) head(fwd, xb, yb, toB, gradient ? colB : stroke);
+    if (back) head(back, xa, ya, toA, gradient ? colA : stroke);
     // An end that only placed calls has no head: it ends in a dot of its own colour instead.
     const tail = (x, y, colour) => g.append(mk("circle", { cx: x, cy: y, r: Math.max(3.5 * k, w / 2 + 1.5), fill: colour }));
     if (!back) tail(xa, ya, colA);
