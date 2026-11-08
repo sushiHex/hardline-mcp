@@ -532,7 +532,7 @@ function cordKey(links) {
     mini('<defs><linearGradient id="kg" x1="0" x2="1"><stop offset="0" stop-color="var(--claude)"/><stop offset=".4" stop-color="var(--claude)"/><stop offset=".65" stop-color="var(--codex)"/><stop offset="1" stop-color="var(--codex)"/></linearGradient></defs>' +
       '<path d="M8 8H36" stroke="url(#kg)" stroke-width="3" stroke-linecap="round"/><polygon points="43,8 35,3.5 35,12.5" fill="var(--codex)"/><polygon points="1,8 9,3.5 9,12.5" fill="var(--claude)"/>', "both ways"),
     mini('<path d="M2 8H34" stroke="var(--claude)" stroke-width="4" stroke-linecap="round"/><path class="flowdemo" d="M2 8H34" pathLength="100" stroke="var(--surface)" stroke-opacity=".8" stroke-width="2" stroke-linecap="round" stroke-dasharray="9 200" stroke-dashoffset="9"/>', "just now"),
-    mini(line(8, 3, "var(--ink-3)") + '<polygon points="42,8 33,2.5 33,13.5" fill="var(--ink-3)" stroke="var(--warn)" stroke-width="2" stroke-linejoin="round"/>', "unanswered"),
+    mini('<path d="M2 8H20" stroke="var(--ink-3)" stroke-width="3" stroke-linecap="round"/><polygon points="42,8 33,2.5 33,13.5" fill="var(--ink-3)"/>', "unanswered"),
     mini(line(8, 3, "var(--codex)", 'stroke-dasharray="6 4"'), "on demand"),
   ];
 }
@@ -703,14 +703,20 @@ function board(d) {
       return `M${x1} ${y1} C ${x1 + into * 70} ${y1}, ${x2 + into * 70} ${y2}, ${x2} ${y2}`; // an arc through the middle
     };
     let stroke = fwd ? colA : colB;
+    let colourAt = () => stroke; // the line's colour at a given x, for the heads
     if (across && fwd && back && colA !== colB) {
       const id = "gr" + gradients++, share = nF / total;
+      const lo = Math.max(0, share - 0.12), hi = Math.min(1, share + 0.12);
       const grad = mk("linearGradient", { id, gradientUnits: "userSpaceOnUse", x1: xa, y1: 0, x2: xb, y2: 0 });
-      for (const [o, c] of [[0, colA], [Math.max(0, share - 0.12), colA], [Math.min(1, share + 0.12), colB], [1, colB]]) {
-        grad.append(mk("stop", { offset: o, "stop-color": c }));
-      }
+      for (const [o, c] of [[0, colA], [lo, colA], [hi, colB], [1, colB]]) grad.append(mk("stop", { offset: o, "stop-color": c }));
       defs.append(grad);
       stroke = `url(#${id})`;
+      colourAt = (x) => {
+        const t = (x - xa) / (xb - xa);
+        if (t <= lo) return colA;
+        if (t >= hi) return colB;
+        return `color-mix(in srgb, ${colB} ${Math.round((100 * (t - lo)) / (hi - lo))}%, ${colA})`;
+      };
     } else if (fwd && back) stroke = colA;
     const latest = group.reduce((m, l) => ((l.last_s ?? 3600) < (m.last_s ?? 3600) ? l : m));
     const age = latest.last_s ?? 3600;
@@ -725,22 +731,21 @@ function board(d) {
     };
     const toB = across ? (xb > xa ? 1 : -1) : -into; // which way a call from a is heading as it arrives at b
     const toA = across ? -toB : -into; // and one from b, arriving at a
-    const inset = (l, x, heading) => (l ? x - heading * (2 + size(l).len * 0.6) : x); // where the line may stop
+    // Where the line stops: inside the head normally, or short of it, leaving a break, while calls that
+    // way are still unanswered.
+    const inset = (l, x, heading) => (l ? x - heading * (2 + (l.unread ? size(l).len + 18 * k + w : size(l).len * 0.6)) : x);
     const ea = inset(back, xa, toA), eb = inset(fwd, xb, toB);
     const d = route(ea, ya, eb, yb);
     g.append(mk("path", { d, class: "line", stroke, "stroke-width": w.toFixed(1), "stroke-dasharray": group.some((l) => isTemp(l.from)) ? "8 5" : "none" }));
     if (age <= 300) g.append(mk("path", { d: latest.from === a ? d : route(eb, yb, ea, ya), class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
-    // The head takes the colour the line has where it arrives; unanswered calls give it an amber outline.
-    const gradient = stroke.startsWith("url(");
+    // The head takes the colour the line actually has where it arrives (a lopsided conversation can
+    // turn the line before it reaches the end).
     const head = (l, x, y, heading, colour) => {
       const { half, len } = size(l), tip = x - heading * 2, base = tip - heading * len;
-      g.append(mk("polygon", {
-        points: `${tip},${y} ${base},${y - half} ${base},${y + half}`, fill: colour,
-        ...(l.unread ? { stroke: "var(--warn)", "stroke-width": 2.2 * Math.sqrt(k), "stroke-linejoin": "round" } : {}),
-      }));
+      g.append(mk("polygon", { points: `${tip},${y} ${base},${y - half} ${base},${y + half}`, fill: colour }));
     };
-    if (fwd) head(fwd, xb, yb, toB, gradient ? colB : stroke);
-    if (back) head(back, xa, ya, toA, gradient ? colA : stroke);
+    if (fwd) head(fwd, xb, yb, toB, colourAt(eb));
+    if (back) head(back, xa, ya, toA, colourAt(ea));
     // An end that only placed calls has no head: it ends in a dot of its own colour instead.
     const tail = (x, y, colour) => g.append(mk("circle", { cx: x, cy: y, r: Math.max(3.5 * k, w / 2 + 1.5), fill: colour }));
     if (!back) tail(xa, ya, colA);
