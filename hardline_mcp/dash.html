@@ -44,7 +44,8 @@ header.top { display: flex; align-items: center; gap: 26px; flex: none; }
 .panel.lines { flex: 0 1 auto; max-height: 40%; overflow-y: auto; }
 .panel.scrolls { flex: 0 1 auto; max-height: 26%; overflow-y: auto; }
 .scroll { flex: 1; min-height: 0; overflow-y: auto; }
-.panel.vol { flex: 1 1 0; min-height: 150px; }
+.panel.vol { flex: 0 0 auto; }
+.panel.quiet { flex: 1 1 0; min-height: 0; overflow-y: auto; }
 #traffic { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #traffic svg.chart { flex: none; height: auto; }
 #board { flex: 0 1 auto; min-height: 0; }
@@ -164,14 +165,17 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
 .call .when { color: var(--ink-3); }
 .call span.cord { overflow: visible; }
 .cord { position: relative; height: 0; border-top: 2px solid var(--ink-3); }
-.cord::before, .cord::after { content: ""; position: absolute; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
-.cord::before { left: -2px; } .cord::after { right: -2px; }
+/* A call in the list: a line from who placed it to who took it, with the head at the receiving end,
+   as on the board. Amber and dashed while nobody has answered. */
+.cord::before { content: ""; position: absolute; top: -5px; left: -2px; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
+.cord::after { content: ""; position: absolute; top: -7px; right: -3px; width: 0; height: 0; border-left: 10px solid var(--ink-3); border-top: 6px solid transparent; border-bottom: 6px solid transparent; }
 .cord.ringing { border-top: 2px dashed var(--warn); }
-.cord.ringing::before { background: var(--warn); } .cord.ringing::after { background: none; box-shadow: inset 0 0 0 2px var(--warn); }
+.cord.ringing::before { background: var(--warn); } .cord.ringing::after { border-left-color: var(--warn); }
 .call .status { text-align: right; color: var(--good); }
 .call .status.ringing { color: var(--warn); }
 .empty { color: var(--ink-3); }
 .item, .who, .board text.lbl { cursor: pointer; }
+.item:focus-visible, .who:focus-visible { outline: 2px solid var(--ink-3); outline-offset: 2px; border-radius: 6px; }
 .item.pinned { background: var(--card); border-radius: 6px; box-shadow: -6px 0 0 var(--card), 6px 0 0 var(--card); }
 .who.pinned .t { text-decoration: underline; text-underline-offset: 3px; }
 .board text.lbl.pinned { font-weight: 700; }
@@ -194,14 +198,16 @@ body.offline .layout { opacity: .45; filter: grayscale(.6); transition: opacity 
     <div class="col">
       <section class="panel"><h2 id="h-board"></h2><div id="board"></div></section>
       <section class="panel vol"><h2 id="h-volume"></h2><div id="traffic"></div></section>
+      <section class="panel quiet">
+        <div id="idle-section" class="fold" hidden><div id="idle"></div></div>
+        <div id="stranded-section" class="fold" hidden><div id="stranded"></div></div>
+      </section>
     </div>
 
     <div class="col">
       <section class="panel lines">
         <h2 id="h-lines"></h2>
         <div id="live"></div>
-        <div id="idle-section" class="fold" hidden><div id="idle"></div></div>
-        <div id="stranded-section" class="fold" hidden><div id="stranded"></div></div>
       </section>
       <section id="play-section" class="panel scrolls" hidden><h2 id="h-play"></h2><div id="play"></div></section>
       <section class="panel scrolls jobs"><h2 id="h-jobs"></h2><div id="jobs"></div></section>
@@ -356,6 +362,7 @@ function who(n) {
   w.addEventListener("mouseenter", () => boardFocus(focusFor(n)));
   w.addEventListener("mouseleave", refocus);
   w.addEventListener("click", () => pin(n));
+  reachable(w, () => boardFocus(focusFor(n)), () => pin(n));
   w.title = temp ? n + " (reviewer started on demand)" : n;
   const txt = el("span", "t" + (temp ? " temp" : ""), nameText(n));
   txt.style.color = tint(n);
@@ -413,6 +420,7 @@ function item(l, label) {
   row.addEventListener("mouseenter", () => boardFocus(focusFor(l.lane))); // point at it on the board
   row.addEventListener("mouseleave", refocus);
   row.addEventListener("click", () => pin(l.lane));
+  reachable(row, () => boardFocus(focusFor(l.lane)), () => pin(l.lane)); // the same by keyboard
   row.append(mark(l.lane, { ring: !!l.unread, dark: !isLive(l), unknown: l.liveness === "unknown" }));
   const name = el("span", "name", label);
   name.title = l.lane;
@@ -462,12 +470,15 @@ function live(d) {
   }
 }
 
+const folded = { idle: false, stranded: false }; // which lists the viewer has opened, kept across refreshes
 function fold(sectionId, boxId, ic, count, tip, lanes, cls) {
   $(sectionId).hidden = !lanes.length;
   const box = $(boxId);
   box.replaceChildren();
   if (!lanes.length) return;
   const det = el("details");
+  det.open = folded[boxId];
+  det.addEventListener("toggle", () => { folded[boxId] = det.open; });
   const sum = el("summary");
   sum.title = tip;
   sum.append(icon(ic), el("b", "", count), el("small", "", "show"));
@@ -536,6 +547,15 @@ function pin(name) {
   refocus();
 }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pinned) pin(pinned); });
+// Make a clickable name reachable without a mouse: Tab to it to preview it on the board, Enter or
+// Space to pin it.
+function reachable(node, preview, choose) {
+  node.tabIndex = 0;
+  node.setAttribute("role", "button");
+  node.addEventListener("focus", preview);
+  node.addEventListener("blur", refocus);
+  node.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(); } });
+}
 function pinChip() {
   const c = el("span", "key pinchip");
   c.title = "Showing only " + pinned + ". Click to clear.";
@@ -592,7 +612,7 @@ function board(d) {
   });
   // Rows grow to use the height the panel has, within reason.
   const TOP = 12, W = 1000, XL = 390, XR = 610;
-  const availU = ((col.clientHeight || 700) - 230) / ((box.clientWidth || W) / W); // the rest is the chart's minimum and the headings
+  const availU = ((col.clientHeight || 700) - 290) / ((box.clientWidth || W) / W); // the rest is the chart, the quiet lists and the headings
   const ROW = Math.max(32, Math.min(96, Math.floor((availU - TOP - 6) / rows.length)));
   const k = Math.min(1.5, ROW / 40); // marks grow with the rows...
   const kf = Math.min(k, 1.1); // ...type only a little, so names keep clear of the bars
@@ -755,7 +775,8 @@ function traffic(d) {
   // The chart takes the height its panel has (within reason), so the left column has no blank gap.
   const box = $("traffic");
   const n = d.traffic.length, W = 1000, pad = 26, gutter = 30, bw = (W - gutter) / n;
-  const H = Math.max(80, Math.min(190, Math.floor(((box.clientHeight || 160) - 26) / ((box.clientWidth || W) / W) - pad)));
+  const col = box.closest(".col"); // a share of the column, not of its own height, so it cannot feed back on itself
+  const H = Math.max(90, Math.min(190, Math.floor((col.clientHeight || 700) * 0.26 / ((box.clientWidth || W) / W) - pad)));
   const max = Math.max(1, ...d.traffic), total = d.traffic.reduce((a, b) => a + b, 0);
   const by = d.traffic_by || {}, pend = d.traffic_unanswered || [];
   const lost = pend.reduce((a, b) => a + b, 0);
