@@ -604,7 +604,8 @@ function board(d) {
   // Redraw only when something drawn changes. A pair's age ticks every second, but only its tier is drawn.
   const tier = (l) => ((l.last_s ?? 3600) <= 300 ? 0 : (l.last_s ?? 3600) <= 1800 ? 1 : 2);
   const col = box.closest(".col"); // the board hugs its rows; the column's height is what it may use
-  const key = JSON.stringify(links.map((l) => [l.from, l.to, l.n, l.unread, tier(l)])) + box.clientWidth + "x" + col.clientHeight + pinned;
+  // Sorted: pairs with equal counts come back from the store in no fixed order.
+  const key = JSON.stringify(links.map((l) => [l.from, l.to, l.n, l.unread, tier(l)]).sort()) + box.clientWidth + "x" + col.clientHeight + pinned;
   if (key === boardKey) return; // unchanged: leave it, so a hover is not wiped every 2s
   boardKey = key;
   box.replaceChildren();
@@ -716,18 +717,25 @@ function board(d) {
     const g = mk("g", { class: "cable" });
     g.style.setProperty("--o", age <= 300 ? 0.95 : age <= 1800 ? 0.6 : 0.35);
     g.append(mk("title", {}, group.map((l) => `${l.from} to ${l.to}: ${plural(l.n, "call")}` + (l.unread ? `, ${l.unread} not answered` : "")).join("\n") + `\nlast ${dur(age)} ago`));
-    const d = route(xa, ya, xb, yb);
+    // A head at the end that received the calls: sized by its own volume, never smaller than the line,
+    // and the line stops inside it, so the head covers the line's end.
+    const size = (l) => {
+      const own = thick(l.n);
+      return { half: Math.max(6 * k, own * 0.9 + 3, w / 2 + 4), len: Math.max(11 * k, own * 1.5 + 6, w * 1.3 + 5) };
+    };
+    const toB = across ? (xb > xa ? 1 : -1) : -into; // which way a call from a is heading as it arrives at b
+    const toA = across ? -toB : -into; // and one from b, arriving at a
+    const inset = (l, x, heading) => (l ? x - heading * (2 + size(l).len * 0.6) : x); // where the line may stop
+    const ea = inset(back, xa, toA), eb = inset(fwd, xb, toB);
+    const d = route(ea, ya, eb, yb);
     g.append(mk("path", { d, class: "line", stroke, "stroke-width": w.toFixed(1), "stroke-dasharray": group.some((l) => isTemp(l.from)) ? "8 5" : "none" }));
-    if (age <= 300) g.append(mk("path", { d: route(xOf(latest.from), yOf(latest.from), xOf(latest.to), yOf(latest.to)), class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
-    // A head at the end that received the calls: sized by its own volume, and never smaller than the line it ends.
+    if (age <= 300) g.append(mk("path", { d: latest.from === a ? d : route(eb, yb, ea, ya), class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
     const head = (l, x, y, heading) => {
-      const own = thick(l.n), half = Math.max(6 * k, own * 0.9 + 3, w / 2 + 4), len = Math.max(11 * k, own * 1.5 + 6, w * 1.3 + 5);
-      const tip = x - heading * 2, base = tip - heading * len;
+      const { half, len } = size(l), tip = x - heading * 2, base = tip - heading * len;
       g.append(mk("polygon", { points: `${tip},${y} ${base},${y - half} ${base},${y + half}`, fill: l.unread ? "var(--warn)" : AGENT_VAR[agentOf(l.from)] || "var(--other)" }));
     };
-    const toRight = across ? (xb > xa ? 1 : -1) : -into; // which way a call travelling a to b is heading as it arrives
-    if (fwd) head(fwd, xb, yb, toRight);
-    if (back) head(back, xa, ya, across ? -toRight : -into);
+    if (fwd) head(fwd, xb, yb, toB);
+    if (back) head(back, xa, ya, toA);
     // An end that only placed calls has no head: it ends in a dot of its own colour instead.
     const tail = (x, y, colour) => g.append(mk("circle", { cx: x, cy: y, r: Math.max(3.5 * k, w / 2 + 1.5), fill: colour }));
     if (!back) tail(xa, ya, colA);
