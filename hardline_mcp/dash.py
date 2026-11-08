@@ -44,6 +44,7 @@ DEFAULT_PORT = 8765
 WINDOW = timedelta(hours=1)
 RECENT = 15
 JOBS_SHOWN = 40
+LINKS_SHOWN = 30
 PAGE = Path(__file__).with_name("dash.html")
 
 
@@ -93,6 +94,21 @@ def _snapshot(db: Path, since: str) -> dict:
                 " FROM messages WHERE acked_at IS NULL GROUP BY recipient",
             ),
             "traffic": _rows(conn, "SELECT created_at FROM messages WHERE created_at >= ?", (since,)),
+            # Every name that sent or received anything this hour: the activity test for a line.
+            "talkers": _rows(
+                conn,
+                "SELECT sender AS name FROM messages WHERE created_at >= ?"
+                " UNION SELECT recipient FROM messages WHERE created_at >= ?",
+                (since, since),
+            ),
+            # Who reached whom: counts per pair, never the messages themselves.
+            "links": _rows(
+                conn,
+                "SELECT sender, recipient, COUNT(*) AS n, SUM(acked_at IS NULL) AS unread"
+                " FROM messages WHERE created_at >= ? GROUP BY sender, recipient"
+                " ORDER BY n DESC LIMIT ?",
+                (since, LINKS_SHOWN),
+            ),
             "recent": _rows(
                 conn,
                 "SELECT id, sender, recipient, created_at, acked_at, length(body) AS size"
@@ -149,12 +165,15 @@ def state(
                 "liveness": "unheld" if ":" in recipient else "shared",
             },
         )
+    # A line is active if it placed or took a call this hour, has calls waiting, or started a job.
+    busy = {r["name"] for r in read["talkers"] or []} | {r["requester"] for r in read["jobs"] or []}
     lanes = []
     for lane in sorted(held.values(), key=lambda e: e["lane"]):
         waiting = unread.get(lane["lane"])
         lanes.append(
             {
                 **lane,
+                "active": bool(waiting) or lane["lane"] in busy,
                 "lane": _clip(lane["lane"]),
                 "agent": _clip(lane["agent"]),
                 "unread":waiting["n"] if waiting else 0,
@@ -204,6 +223,10 @@ def state(
         "window_s": int(WINDOW.total_seconds()),
         "lanes": lanes,
         "traffic": traffic,
+        "links": [
+            {"from": _clip(r["sender"]), "to": _clip(r["recipient"]), "n": r["n"], "unread": r["unread"]}
+            for r in read["links"] or []
+        ],
         "jobs": jobs,
         "recent": recent,
         "unavailable": unavailable,

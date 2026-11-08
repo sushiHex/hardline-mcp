@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "\"active\": bool(waiting) or lane[\"lane\"] in busy,",
+  "after": "\"active\": bool(waiting),",
+  "tests": [
+    "tests/test_dash.py::test_a_line_with_no_calls_this_hour_is_inactive"
+  ]
+}

@@ -10,7 +10,7 @@
   --surface: #fcfcfb; --card: #f4f3f0; --line: #e1dfda;
   --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #76746f;
   --claude: #2a78d6; --codex: #eb6834; --hermes: #1baf7a; --other: #76746f;
-  --bar: #8a8882; --warn: #a15c00; --bad: #c0302f;
+  --bar: #8a8882; --warn: #a15c00; --bad: #c0302f; --good: #1a7f4b;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
@@ -18,7 +18,7 @@
     --surface: #1a1a19; --card: #232321; --line: #353533;
     --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #98968d;
     --claude: #3987e5; --codex: #d95926; --hermes: #199e70; --other: #98968d;
-    --bar: #8a8882; --warn: #e0a030; --bad: #e66767;
+    --bar: #8a8882; --warn: #e0a030; --bad: #e66767; --good: #4cbf85;
   }
 }
 :root[data-theme="dark"] {
@@ -26,28 +26,36 @@
   --surface: #1a1a19; --card: #232321; --line: #353533;
   --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #98968d;
   --claude: #3987e5; --codex: #d95926; --hermes: #199e70; --other: #98968d;
-  --bar: #8a8882; --warn: #e0a030; --bad: #e66767;
+  --bar: #8a8882; --warn: #e0a030; --bad: #e66767; --good: #4cbf85;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--surface); color: var(--ink);
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 main { max-width: 880px; margin: 0 auto; padding: 24px 16px 56px; }
-header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 6px; }
+header { display: flex; align-items: center; gap: 16px; }
 h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .02em; }
-#status { margin-left: auto; color: var(--ink-3); font-size: 12px; }
-#status.stale { color: var(--bad); }
-#summary { color: var(--ink-2); font-size: 15px; margin: 4px 0 8px; }
-#summary b { color: var(--ink); font-variant-numeric: tabular-nums; }
-#summary .warn { color: var(--warn); }
-section { margin-top: 32px; }
-h2 { font-size: 15px; font-weight: 600; margin: 0; }
-.note { color: var(--ink-3); font-size: 13px; margin: 2px 0 10px; }
+#status { margin-left: auto; color: var(--ink-3); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+#status .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--good); animation: pulse 2s ease-in-out infinite; }
+#status.stale { color: var(--bad); } #status.stale .pulse { background: var(--bad); animation: none; }
+.ic { width: 1.15em; height: 1.15em; flex: none; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -0.2em; }
+.ic .solid { fill: currentColor; stroke: none; }
+#summary { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 14px 0 4px; font-size: 15px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-2); cursor: default; }
+.chip b { color: var(--ink); font-size: 17px; font-variant-numeric: tabular-nums; }
+.chip small { color: var(--ink-3); font-size: 12px; }
+.chip.warn, .chip.warn b { color: var(--warn); }
+.chip.muted b { color: var(--ink-2); font-weight: 500; }
+section { margin-top: 30px; }
+h2 { font-size: 14px; font-weight: 600; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+h2 .ic { color: var(--ink-3); }
+h2 .meta { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--ink-3); display: flex; align-items: center; gap: 14px; }
 .group { margin: 10px 0 2px; color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
 .list { columns: 2 280px; column-gap: 32px; }
 .item { display: flex; align-items: center; gap: 8px; padding: 2px 0; break-inside: avoid; }
 .item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.item .n { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.item .n { color: var(--ink-2); font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: 4px; }
 .item .n.old { color: var(--warn); font-weight: 600; }
+.item .n .gap { margin-left: 6px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--other); }
 .dot.claude { background: var(--claude); } .dot.codex { background: var(--codex); } .dot.hermes { background: var(--hermes); }
 .dot.unknown { background: none; box-shadow: inset 0 0 0 2px var(--ink-3); }
@@ -55,24 +63,39 @@ h2 { font-size: 15px; font-weight: 600; margin: 0; }
 .dot.dark { background: none; box-shadow: inset 0 0 0 2px var(--line); }
 .dot.dark.ring { box-shadow: inset 0 0 0 2px var(--warn), 0 0 0 3px color-mix(in srgb, var(--warn) 35%, transparent); }
 @keyframes glow { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--warn) 10%, transparent); } }
-@media (prefers-reduced-motion: reduce) { .dot.ring { animation: none; } }
-details summary { cursor: pointer; color: var(--ink-2); }
+@keyframes pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .dot.ring, #status .pulse, .fill.live { animation: none; } }
+details summary { cursor: pointer; color: var(--ink-2); display: flex; align-items: center; gap: 8px; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary small { color: var(--ink-3); }
 details[open] summary { margin-bottom: 8px; }
-svg { display: block; width: 100%; height: auto; }
-svg text { fill: var(--ink-3); font-size: 11px; }
-.row { display: grid; grid-template-columns: 220px 1fr 120px; gap: 10px; align-items: center; padding: 3px 0; }
+svg.chart { display: block; width: 100%; height: auto; }
+svg.chart text { fill: var(--ink-3); font-size: 11px; }
+.board .cable { fill: none; stroke: var(--ink-3); opacity: .55; transition: opacity .15s; }
+.board .cable.ringing { stroke: var(--warn); opacity: .8; }
+.board .cable.dim { opacity: .08; }
+.board .cable:hover { opacity: 1; }
+.board .plug { fill: var(--ink-3); }
+.board .plug.answer { fill: var(--surface); stroke: var(--ink-3); stroke-width: 2; }
+.board text.lbl { fill: var(--ink-2); font-size: 12.5px; cursor: default; }
+.board .swatch { stroke: none; }
+.key { display: inline-flex; align-items: center; gap: 6px; }
+.key .cord { width: 28px; }
+.row { display: grid; grid-template-columns: 220px 1fr 110px; gap: 10px; align-items: center; padding: 3px 0; }
 .row .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track { position: relative; height: 10px; background: var(--card); border-radius: 5px; }
 .fill { position: absolute; top: 0; bottom: 0; border-radius: 5px; background: var(--other); min-width: 4px; }
 .fill.claude { background: var(--claude); } .fill.codex { background: var(--codex); } .fill.hermes { background: var(--hermes); }
 .fill.live { animation: pulse 1.6s ease-in-out infinite; }
-@keyframes pulse { 50% { opacity: .55; } }
-@media (prefers-reduced-motion: reduce) { .fill.live { animation: none; } }
-.state { color: var(--ink-2); font-size: 12px; text-align: right; white-space: nowrap; }
-.state.failed, .state.lost { color: var(--bad); }
-.call { display: grid; grid-template-columns: 56px minmax(0, 1fr) 56px minmax(0, 1fr) 76px; gap: 8px; align-items: center;
+.state { color: var(--ink-2); font-size: 12px; display: flex; align-items: center; justify-content: flex-end; gap: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.state.failed, .state.lost { color: var(--bad); } .state.completed { color: var(--good); }
+.call { display: grid; grid-template-columns: 56px minmax(0, 1fr) 56px minmax(0, 1fr) 24px; gap: 8px; align-items: center;
   padding: 5px 0; border-top: 1px solid var(--line); color: var(--ink-2); }
-.call span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-left: 7px; vertical-align: middle; flex: none; }
+.who { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.who .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.who .dot { width: 8px; height: 8px; }
+.call > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .call .when { color: var(--ink-3); }
 .call span.cord { overflow: visible; }
 .cord { position: relative; height: 0; border-top: 2px solid var(--ink-3); }
@@ -80,47 +103,31 @@ svg text { fill: var(--ink-3); font-size: 11px; }
 .cord::before { left: -2px; } .cord::after { right: -2px; }
 .cord.ringing { border-top: 2px dashed var(--warn); }
 .cord.ringing::before { background: var(--warn); } .cord.ringing::after { background: none; box-shadow: inset 0 0 0 2px var(--warn); }
-.call .status { text-align: right; font-size: 12px; }
-.call .status.ringing { color: var(--warn); font-weight: 600; }
-@media (max-width: 640px) { .call { grid-template-columns: 44px minmax(0, 1fr) 36px minmax(0, 1fr); } .call .status { display: none; } }
+.call .status { text-align: right; color: var(--good); }
+.call .status.ringing { color: var(--warn); }
 .empty { color: var(--ink-3); }
-@media (max-width: 640px) { .row { grid-template-columns: 1fr 100px; } .track { grid-column: 1 / -1; order: 3; } }
+@media (max-width: 640px) { .row { grid-template-columns: 1fr 90px; } .track { grid-column: 1 / -1; order: 3; }
+  .call { grid-template-columns: 44px minmax(0, 1fr) 36px minmax(0, 1fr); } .call .status { display: none; } }
 </style>
 </head>
 <body>
 <main>
-  <header><h1>hardline</h1><div id="status">connecting</div></header>
+  <header><h1>hardline</h1><div id="status"><span class="pulse"></span><span id="statustext">connecting</span></div></header>
   <div id="summary"></div>
 
   <section>
-    <h2>Lines</h2>
-    <p class="note">Every session on the board. A lamp that glows has a call waiting for that line to pick up.</p>
-    <div id="live"></div>
+    <h2 id="h-board"></h2>
+    <div id="board"></div>
   </section>
 
-  <section id="stranded-section" hidden>
-    <h2>Unanswered lines</h2>
-    <p class="note">Nobody is on these lines. Their calls keep ringing until a session takes the name.</p>
-    <div id="stranded"></div>
-  </section>
+  <section><h2 id="h-lines"></h2><div id="live"></div></section>
 
-  <section>
-    <h2>Call volume</h2>
-    <p class="note" id="trafficnote"></p>
-    <div id="traffic"></div>
-  </section>
+  <section><h2 id="h-volume"></h2><div id="traffic"></div></section>
+  <section><h2 id="h-jobs"></h2><div id="jobs"></div></section>
+  <section><h2 id="h-recent"></h2><div id="recent"></div></section>
 
-  <section>
-    <h2>Long calls</h2>
-    <p class="note">Background jobs from the last hour. Each bar is a connection held open, from pick-up to hang-up.</p>
-    <div id="jobs"></div>
-  </section>
-
-  <section>
-    <h2>Patched through</h2>
-    <p class="note">The latest calls, caller to line. A solid cord was answered; a dashed one is still ringing.</p>
-    <div id="recent"></div>
-  </section>
+  <section id="idle-section" hidden><div id="idle"></div></section>
+  <section id="stranded-section" hidden><div id="stranded"></div></section>
 </main>
 <script>
 "use strict";
@@ -132,32 +139,115 @@ const el = (tag, cls, text) => {
   if (text !== undefined) n.textContent = text;
   return n;
 };
+
+// One small icon set, drawn with the text colour so each one follows its context.
+const ICONS = {
+  lamp: '<circle cx="12" cy="12" r="3.5" class="solid"/><circle cx="12" cy="12" r="8.5"/>',
+  bell: '<path d="M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7z"/><path d="M10 19a2 2 0 0 0 4 0"/>',
+  bellOff: '<path d="M6 9a6 6 0 0 1 9-5.2M18 9c0 6 2 7 2 7H8"/><path d="M10 19a2 2 0 0 0 4 0"/><path d="M4 4l16 16"/>',
+  moon: '<path d="M20 14a8 8 0 1 1-10-10 6.5 6.5 0 0 0 10 10z"/>',
+  hourglass: '<path d="M7 3h10M7 21h10M8 3v3l4 4 4-4V3M8 21v-3l4-4 4 4v3"/>',
+  check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  cross: '<path d="M6 6l12 12M18 6L6 18"/>',
+  alert: '<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17v.5"/>',
+  play: '<path d="M8 5l11 7-11 7z" class="solid"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  bars: '<path d="M5 20V11M12 20V4M19 20v-6"/>',
+  cord: '<circle cx="5" cy="12" r="2.2" class="solid"/><circle cx="19" cy="12" r="2.2"/><path d="M7 12h10"/>',
+  board: '<path d="M4 7h16M4 12h16M4 17h16"/><circle cx="8" cy="7" r="1.6" class="solid"/><circle cx="16" cy="12" r="1.6" class="solid"/><circle cx="10" cy="17" r="1.6" class="solid"/>',
+  stop: '<rect x="7" y="7" width="10" height="10" rx="1.5" class="solid"/>',
+  queue: '<path d="M5 8h14M5 12h14M5 16h9"/>',
+};
+const icon = (name) => {
+  const s = document.createElementNS(SVG, "svg");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("class", "ic");
+  s.setAttribute("aria-hidden", "true");
+  s.innerHTML = ICONS[name]; // fixed strings above, never data
+  return s;
+};
+
 const agentOf = (s) => String(s).split(":")[0];
 const known = (a) => (["claude", "codex", "hermes"].includes(a) ? a : "");
 const dur = (s) => (s < 90 ? s + "s" : s < 5400 ? Math.round(s / 60) + "m" : s < 172800 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d");
 const plural = (n, one, many) => n + " " + (n === 1 ? one : many || one + "s");
-const GLYPH = { queued: "waiting for a line", running: "connected", completed: "hung up", failed: "dropped", cancelled: "cut off", lost: "dropped, owner died" };
+const isLive = (l) => l.liveness === "alive" || l.liveness === "unknown" || l.liveness === "shared";
+// Session names carry a random suffix ("construction.f39ce7d2"). It is dropped from view. If two
+// sessions then look alike, each gets a small colour tag taken from its own suffix: the same
+// session keeps the same tag, and the full name stays in the tooltip.
+const HASH = /\.([0-9a-f]{8})$/;
+const nameText = (n) => (n.includes(":") ? n.slice(n.indexOf(":") + 1) : n).replace(HASH, "");
+let twins = new Set();
+function indexNames(d) {
+  const groups = new Map();
+  const add = (n) => {
+    const k = agentOf(n) + "|" + nameText(n);
+    if (!groups.has(k)) groups.set(k, new Set());
+    groups.get(k).add(n);
+  };
+  d.lanes.forEach((l) => add(l.lane));
+  (d.links || []).forEach((l) => { add(l.from); add(l.to); });
+  d.recent.forEach((m) => { add(m.from); add(m.to); });
+  twins = new Set();
+  for (const names of groups.values()) if (names.size > 1) names.forEach((n) => twins.add(n));
+}
+const tagOf = (n) => {
+  const m = HASH.exec(n);
+  return m && twins.has(n) ? `hsl(${parseInt(m[1].slice(0, 4), 16) % 360} 62% 52%)` : null;
+};
+const tagEl = (n) => {
+  const c = tagOf(n);
+  if (!c) return null;
+  const t = el("span", "tag");
+  t.style.background = c;
+  return t;
+};
+function who(n) {
+  const w = el("span", "who");
+  w.title = n;
+  const dot = el("span", "dot " + known(agentOf(n)));
+  w.append(dot, el("span", "t", nameText(n)));
+  const t = tagEl(n);
+  if (t) w.append(t);
+  return w;
+}
+const STATE = {
+  queued: ["queue", "waiting for a line"], running: ["play", "connected"], completed: ["check", "hung up"],
+  failed: ["cross", "dropped"], cancelled: ["stop", "cut off"], lost: ["alert", "dropped, its owner died"],
+};
 let lastOk = 0;
 
-const isLive = (l) => l.liveness === "alive" || l.liveness === "unknown" || l.liveness === "shared";
+function heading(id, ic, text, ...meta) {
+  const h = $(id);
+  h.replaceChildren(icon(ic), text);
+  if (meta.length) {
+    const m = el("span", "meta");
+    m.append(...meta);
+    h.append(m);
+  }
+}
+
+function chip(ic, n, word, tip, cls) {
+  const c = el("span", "chip" + (cls ? " " + cls : ""));
+  c.title = tip;
+  c.append(icon(ic), el("b", "", n), el("small", "", word));
+  return c;
+}
 
 function summary(d) {
-  const live = d.lanes.filter(isLive), dead = d.lanes.filter((l) => !isLive(l) && l.unread);
+  const open = d.lanes.filter(isLive), live = open.filter((l) => l.active), idle = open.length - live.length;
+  const dead = d.lanes.filter((l) => !isLive(l) && l.unread);
   const waiting = live.reduce((n, l) => n + l.unread, 0);
   const stranded = dead.reduce((n, l) => n + l.unread, 0);
   const running = d.jobs.filter((j) => j.state === "running" || j.state === "queued").length;
   const box = $("summary");
-  box.replaceChildren();
-  const part = (n, text, cls) => {
-    const s = el("span", cls);
-    s.append(el("b", "", n), " " + text);
-    return s;
-  };
-  box.append(part(live.length, live.length === 1 ? "line open" : "lines open"), ", ",
-    part(waiting, waiting === 1 ? "call waiting" : "calls waiting"), ", ",
-    part(running, running === 1 ? "long call" : "long calls"));
-  if (stranded) box.append(". ", part(stranded, (stranded === 1 ? "call" : "calls") + " ringing on " + plural(dead.length, "line") + " nobody answers", "warn"));
-  box.append(".");
+  box.replaceChildren(
+    chip("lamp", live.length, "active", "Lines that placed or took a call in the last hour, or have a call waiting"),
+    chip("bell", waiting, "waiting", "Calls waiting for an active line to pick up"),
+    chip("hourglass", running, "long calls", "Background jobs running now"),
+  );
+  if (idle) box.append(chip("moon", idle, "idle", "Open lines with no call in the last hour", "muted"));
+  if (stranded) box.append(chip("bellOff", stranded, "unanswered", `${plural(stranded, "call")} ringing on ${plural(dead.length, "line")} nobody holds`, "warn"));
 }
 
 function item(l, label) {
@@ -166,59 +256,159 @@ function item(l, label) {
     (isLive(l) ? "" : " dark") + (l.unread ? " ring" : "")));
   const name = el("span", "name", label);
   name.title = l.lane;
+  const tag = tagEl(l.lane);
+  if (tag) name.append(tag);
   row.append(name);
   if (l.unread) {
     const old = l.oldest_s > 600;
-    const n = el("span", "n" + (old ? " old" : ""), plural(l.unread, "call") + " waiting" + (old ? ", oldest " + dur(l.oldest_s) : ""));
+    const n = el("span", "n" + (old ? " old" : ""));
+    n.title = plural(l.unread, "call") + " waiting, oldest " + dur(l.oldest_s);
+    n.append(icon("bell"), String(l.unread));
+    if (old) {
+      const gap = el("span", "n old");
+      gap.classList.add("gap");
+      gap.append(icon("clock"), dur(l.oldest_s));
+      n.append(gap);
+    }
     row.append(n);
   }
   return row;
 }
 
 function live(d) {
+  heading("h-lines", "lamp", "Lines");
   const box = $("live");
   box.replaceChildren();
-  const lanes = d.lanes.filter(isLive);
-  if (!lanes.length) return box.append(el("div", "empty", "No lines are open."));
+  const lanes = d.lanes.filter((l) => isLive(l) && l.active);
+  if (!lanes.length) return box.append(el("div", "empty", "No line active in the last hour."));
   for (const a of [...new Set(lanes.map((l) => agentOf(l.agent)))].sort()) {
     box.append(el("div", "group", a));
     const list = el("div", "list");
     for (const l of lanes.filter((x) => agentOf(x.agent) === a)) {
-      const bare = l.lane.includes(":") ? l.lane.slice(a.length + 1) : l.lane + " (party line)";
-      list.append(item(l, bare));
+      list.append(item(l, l.lane.includes(":") ? nameText(l.lane) : l.lane + " (shared)"));
     }
     box.append(list);
   }
 }
 
-function stranded(d) {
-  const dead = d.lanes.filter((l) => !isLive(l) && l.unread).sort((a, b) => b.unread - a.unread);
-  $("stranded-section").hidden = !dead.length;
-  const box = $("stranded");
+function fold(sectionId, boxId, ic, count, tip, lanes, cls) {
+  $(sectionId).hidden = !lanes.length;
+  const box = $(boxId);
   box.replaceChildren();
-  if (!dead.length) return;
-  const oldest = Math.max(...dead.map((l) => l.oldest_s || 0));
+  if (!lanes.length) return;
   const det = el("details");
-  det.append(el("summary", "", `${plural(dead.reduce((n, l) => n + l.unread, 0), "call")} ringing on ${plural(dead.length, "line")}, oldest ${dur(oldest)}. Show the list`));
+  const sum = el("summary");
+  sum.title = tip;
+  sum.append(icon(ic), el("b", "", count), el("small", "", "show"));
+  if (cls) sum.style.color = "var(--warn)";
+  det.append(sum);
   const list = el("div", "list");
-  for (const l of dead) list.append(item(l, l.lane));
+  for (const l of lanes) list.append(item(l, l.lane.includes(":") ? nameText(l.lane) : l.lane + " (shared)"));
   det.append(list);
   box.append(det);
 }
 
-function traffic(d) {
-  const box = $("traffic");
+function idle(d) {
+  const quiet = d.lanes.filter((l) => isLive(l) && !l.active);
+  fold("idle-section", "idle", "moon", quiet.length, "Open lines with no call in the last hour", quiet);
+}
+
+function stranded(d) {
+  const dead = d.lanes.filter((l) => !isLive(l) && l.unread).sort((a, b) => b.unread - a.unread);
+  const calls = dead.reduce((n, l) => n + l.unread, 0);
+  fold("stranded-section", "stranded", "bellOff", `${dead.length} · ${calls}`,
+    `${plural(dead.length, "line")} with nobody on them, ${plural(calls, "call")} still ringing`, dead, "warn");
+}
+
+const short = (s) => (s.length > 34 ? s.slice(0, 33) + "…" : s);
+const AGENT_VAR = { claude: "var(--claude)", codex: "var(--codex)", hermes: "var(--hermes)" };
+
+function cordKey() {
+  const k = (cls, text) => {
+    const s = el("span", "key");
+    s.append(el("span", "cord" + cls), text);
+    return s;
+  };
+  return [k("", "answered"), k(" ringing", "unanswered")];
+}
+
+// A patch panel: who placed calls on the left, the line each one reached on the right.
+let boardKey = "";
+function board(d) {
+  const links = d.links || [];
+  heading("h-board", "board", "Who called whom", ...(links.length ? cordKey() : []));
+  if (JSON.stringify(links) === boardKey) return; // unchanged: leave it, so a hover is not wiped every 2s
+  boardKey = JSON.stringify(links);
+  const box = $("board");
   box.replaceChildren();
+  if (!links.length) return box.append(el("div", "empty", "No calls in the last hour."));
+  const order = (a, b) => agentOf(a).localeCompare(agentOf(b)) || a.localeCompare(b);
+  const callers = [...new Set(links.map((l) => l.from))].sort(order);
+  const lines = [...new Set(links.map((l) => l.to))].sort(order);
+  const ROW = 26, TOP = 10, W = 1000, XL = 330, XR = 670;
+  const H = TOP + Math.max(callers.length, lines.length) * ROW + 6;
+  const yOf = (list, name) => TOP + list.indexOf(name) * ROW + ROW / 2;
+  const max = Math.max(...links.map((l) => l.n));
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("class", "chart board");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `${links.length} caller-to-line pairs in the last hour`);
+  const mk = (tag, attrs, text) => {
+    const n = document.createElementNS(SVG, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+  const cables = [];
+  const focus = (pred) => cables.forEach((c) => c.el.classList.toggle("dim", pred ? !pred(c.link) : false));
+  for (const l of links) {
+    const y1 = yOf(callers, l.from), y2 = yOf(lines, l.to);
+    const c = mk("path", {
+      d: `M${XL} ${y1} C ${XL + 150} ${y1}, ${XR - 150} ${y2}, ${XR} ${y2}`,
+      class: "cable" + (l.unread ? " ringing" : ""),
+      "stroke-width": (1.5 + 5 * Math.sqrt(l.n / max)).toFixed(1),
+      "stroke-linecap": "round",
+    });
+    c.append(mk("title", {}, `${l.from} to ${l.to}: ${plural(l.n, "call")}` + (l.unread ? `, ${l.unread} not answered` : "")));
+    c.addEventListener("mouseenter", () => focus((x) => x === l));
+    c.addEventListener("mouseleave", () => focus(null));
+    svg.append(c);
+    cables.push({ el: c, link: l });
+  }
+  const side = (list, x, answer) => {
+    for (const name of list) {
+      const y = yOf(list, name);
+      svg.append(mk("circle", { cx: x, cy: y, r: 5, class: "plug" + (answer ? " answer" : "") }));
+      svg.append(mk("circle", { cx: answer ? x + 22 : x - 22, cy: y, r: 4, fill: AGENT_VAR[agentOf(name)] || "var(--other)", class: "swatch" }));
+      const tag = tagOf(name);
+      if (tag) svg.append(mk("rect", { x: answer ? x + 31 : x - 37, y: y - 3.5, width: 7, height: 7, rx: 2, fill: tag, class: "swatch" }));
+      const label = mk("text", { x: answer ? x + (tag ? 44 : 34) : x - (tag ? 44 : 34), y: y + 4, "text-anchor": answer ? "start" : "end", class: "lbl" }, short(nameText(name)));
+      label.append(mk("title", {}, name));
+      const mine = answer ? (l) => l.to === name : (l) => l.from === name;
+      label.addEventListener("mouseenter", () => focus(mine));
+      label.addEventListener("mouseleave", () => focus(null));
+      svg.append(label);
+    }
+  };
+  side(callers, XL, false);
+  side(lines, XR, true);
+  box.append(svg);
+}
+
+function traffic(d) {
   const n = d.traffic.length, W = 1000, H = 70, pad = 18, bw = W / n;
   const max = Math.max(1, ...d.traffic), total = d.traffic.reduce((a, b) => a + b, 0);
-  $("trafficnote").textContent = total
-    ? `${plural(total, "call")} in the last hour. The tallest bar is ${plural(max, "call")} in one minute.`
-    : "No calls in the last hour.";
+  const note = el("span", "", total ? `${total} in the last hour · peak ${max}/min` : "none in the last hour");
+  heading("h-volume", "bars", "Call volume", note);
+  const box = $("traffic");
+  box.replaceChildren();
   if (!total) return;
   const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("class", "chart");
   svg.setAttribute("viewBox", `0 0 ${W} ${H + pad}`);
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `Messages per minute over the last hour, peak ${max}`);
+  svg.setAttribute("aria-label", `Calls per minute over the last hour, peak ${max}`);
   d.traffic.forEach((v, i) => {
     const r = document.createElementNS(SVG, "rect");
     const h = v ? Math.max((v / max) * H, 2) : 0;
@@ -226,7 +416,7 @@ function traffic(d) {
     r.setAttribute("y", H - h); r.setAttribute("height", h); r.setAttribute("rx", 2);
     r.setAttribute("fill", "var(--bar)");
     const t = document.createElementNS(SVG, "title");
-    t.textContent = `${plural(v, "message")}, ${n - 1 - i} min ago`;
+    t.textContent = `${plural(v, "call")}, ${n - 1 - i} min ago`;
     r.append(t);
     svg.append(r);
   });
@@ -234,7 +424,7 @@ function traffic(d) {
   for (const [k, v] of [["x1", 0], ["x2", W], ["y1", H], ["y2", H]]) base.setAttribute(k, v);
   base.setAttribute("stroke", "var(--line)");
   svg.append(base);
-  for (const [x, anchor, text] of [[0, "start", "1 hour ago"], [W, "end", "now"]]) {
+  for (const [x, anchor, text] of [[0, "start", "-1h"], [W, "end", "now"]]) {
     const t = document.createElementNS(SVG, "text");
     t.setAttribute("x", x); t.setAttribute("y", H + 14); t.setAttribute("text-anchor", anchor);
     t.textContent = text;
@@ -244,9 +434,10 @@ function traffic(d) {
 }
 
 function jobs(d) {
+  heading("h-jobs", "hourglass", "Long calls");
   const box = $("jobs");
   box.replaceChildren();
-  if (!d.jobs.length) return box.append(el("div", "empty", "None."));
+  if (!d.jobs.length) return box.append(el("div", "empty", "none"));
   for (const j of d.jobs) {
     const row = el("div", "row");
     const what = el("div", "what", `${j.agent} · ${j.label || j.id}`);
@@ -258,36 +449,45 @@ function jobs(d) {
     fill.style.left = (100 * (1 - from / d.window_s)) + "%";
     fill.style.width = (100 * Math.max(from - to, 0) / d.window_s) + "%";
     track.append(fill);
-    row.append(what, track, el("div", "state " + j.state, `${GLYPH[j.state] || j.state}, ${dur((j.start_s ?? 0) - (j.end_s ?? 0))}`));
+    const [ic, word] = STATE[j.state] || ["clock", j.state];
+    const state = el("div", "state " + j.state);
+    state.title = word;
+    state.append(icon(ic), dur((j.start_s ?? 0) - (j.end_s ?? 0)));
+    row.append(what, track, state);
     box.append(row);
   }
 }
 
 function recent(d) {
+  heading("h-recent", "cord", "Latest calls");
   const box = $("recent");
   box.replaceChildren();
-  if (!d.recent.length) return box.append(el("div", "empty", "No calls yet."));
+  if (!d.recent.length) return box.append(el("div", "empty", "none yet"));
   for (const m of d.recent) {
     const row = el("div", "call");
     const ring = m.read ? "" : " ringing";
-    row.append(el("span", "when", dur(m.age_s ?? 0) + " ago"), el("span", "", m.from), el("span", "cord" + ring),
-      el("span", "", m.to), el("span", "status" + ring, m.read ? "answered" : "ringing"));
+    const status = el("span", "status" + ring);
+    status.title = m.read ? "answered" : "still ringing";
+    status.append(icon(m.read ? "check" : "bell"));
+    row.append(el("span", "when", dur(m.age_s ?? 0)), who(m.from), el("span", "cord" + ring), who(m.to), status);
     box.append(row);
   }
 }
 
 async function tick() {
+  const st = $("status"), text = $("statustext");
   try {
     const r = await fetch("/api/state", { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
-    summary(d); live(d); stranded(d); traffic(d); jobs(d); recent(d);
+    indexNames(d);
+    summary(d); live(d); board(d); traffic(d); jobs(d); recent(d); idle(d); stranded(d);
     lastOk = Date.now();
-    $("status").className = "";
-    $("status").textContent = d.unavailable.length ? "no data for: " + d.unavailable.join(", ") : "live, updates every 2s";
+    st.className = "";
+    text.textContent = d.unavailable.length ? "no data: " + d.unavailable.join(", ") : "live";
   } catch (e) {
-    $("status").className = "stale";
-    $("status").textContent = lastOk ? "disconnected, last update " + dur(Math.round((Date.now() - lastOk) / 1000)) + " ago" : "cannot reach the dashboard";
+    st.className = "stale";
+    text.textContent = lastOk ? "offline " + dur(Math.round((Date.now() - lastOk) / 1000)) : "cannot reach";
   }
 }
 tick();

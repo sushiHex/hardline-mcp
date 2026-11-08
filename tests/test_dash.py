@@ -89,6 +89,44 @@ def test_the_dashboard_never_writes(tmp_path):
         dash.state(tmp_path / "none.db")
 
 
+def test_links_count_who_reached_whom_this_hour(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    db = tmp_path / "mb.db"
+    mailbox.send("claude", "codex:a", SECRET, db_path=db)
+    mailbox.send("claude", "codex:a", SECRET, db_path=db)
+    mailbox.send("codex:a", "claude", SECRET, db_path=db)
+    long_ago = lambda: datetime.now(timezone.utc) - timedelta(hours=3)
+    mailbox.send("claude", "codex:old", SECRET, db_path=db, now_fn=long_ago)
+    raw = sqlite3.connect(db)
+    with raw:
+        raw.execute("UPDATE messages SET acked_at = created_at WHERE id = 1")
+    raw.close()
+    got = dash.state(db)["links"]
+    assert got == [
+        {"from": "claude", "to": "codex:a", "n": 2, "unread": 1},
+        {"from": "codex:a", "to": "claude", "n": 1, "unread": 1},
+    ]
+    assert SECRET not in json.dumps(got)
+
+
+def test_a_line_with_no_calls_this_hour_is_inactive(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    db = tmp_path / "mb.db"
+    sessions.register(agent="codex", lanes=["codex:idle"], db_path=db)
+    sessions.register(agent="codex", lanes=["codex:talker"], db_path=db)
+    sessions.register(agent="codex", lanes=["codex:was-busy"], db_path=db)
+    mailbox.send("codex:talker", "claude", "hi", db_path=db)
+    mailbox.send("codex:was-busy", "claude", "hi", db_path=db, now_fn=lambda: datetime.now(timezone.utc) - timedelta(hours=3))
+    raw = sqlite3.connect(db)
+    with raw:
+        raw.execute("UPDATE messages SET acked_at = created_at")
+    raw.close()
+    got = {lane["lane"]: lane["active"] for lane in dash.state(db)["lanes"]}
+    assert got == {"codex:idle": False, "codex:talker": True, "codex:was-busy": False}
+
+
 def test_the_store_is_opened_read_only(tmp_path, monkeypatch):
     opened = []
     real = sqlite3.connect
