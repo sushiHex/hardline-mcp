@@ -151,6 +151,16 @@ environment, plus an explicit existing `workdir`; a Codex write also needs that
 are not a filesystem sandbox. Read [execution modes and write access](docs/configuration.md#execution-modes-and-write-access)
 before enabling unattended edits.
 
+`context="clean"` on the Codex tools runs a builder without your Codex home
+(instructions, config, memories), for a result that does not depend on your
+setup; every result says what it did not remove. See
+[clean context](docs/configuration.md#clean-context-codex).
+
+On Windows the prompt travels on the command line. One over the operating
+system's limit is refused with a clear error, and so are arguments that
+`cmd.exe` would act on when the agent is installed as a `.cmd` shim; see
+[limits](docs/configuration.md#limits).
+
 ## Inbox signals
 
 A running session is woken when its lanes get mail; the agent then calls
@@ -195,16 +205,39 @@ The client's MCP tool schema supplies arguments and defaults.
 | `job_cancel` | Cancel a job. |
 | `list_jobs` | Find recent or active jobs. |
 
+## Command line
+
+`hardline-mcp` with no argument serves MCP over stdio. The other subcommands
+need no MCP client:
+
+| Command | Purpose |
+| --- | --- |
+| `hardline-mcp watch` | Level-triggered observer of unread mail, for a Claude Monitor. `server_info()` gives the exact arguments. |
+| `hardline-mcp watch-codex` | Forward the same observations to a bound Codex app-server thread (needs `.[codex-watch]`). |
+| `hardline-mcp report [--db PATH]` | Read-only audit of a store: which revisions the registered servers run, unread mail by lane, and who acknowledged each job notice. |
+
+## Skills
+
+`skills/playbook` is an agent skill for running several independent agents on
+one task through Hardline: **swim-lanes** (the same task in parallel, blind),
+**roundtable** (blind reviews, then each answers the others) and **ping-pong**
+(alternating turns until a round changes nothing). Link it into the skills
+folder of the client that should use it, for example `~/.claude/skills/playbook`
+or `~/.codex/skills/playbook`. Lanes default to Codex (`ask_codex_async`) and
+Claude (`ask_claude_async`).
+
 ## Guides
 
 | Guide | Read it for |
 | --- | --- |
 | [Messaging and jobs](docs/messaging.md) | Addressing, ownership, recovery, and job lifecycle. |
-| [Configuration](docs/configuration.md) | CLI paths, limits, model options, writes, GitHub evidence, and quota routing. |
+| [Configuration](docs/configuration.md) | CLI paths, limits, model options, writes, clean context, GitHub evidence, and quota routing. |
 | [Inbox signals](docs/inbox-signals.md) | How each session is woken, fallbacks, checks, and troubleshooting. |
 | [Session continuity](docs/session-continuity.md) | Names across background moves, relaunches, and reconnects. |
 | [Development](docs/development.md) | Tests, mutation checks, and optional live acceptance. |
 | [Architecture](docs/architecture.md) | Design decisions, compatibility, and historical rationale. |
+| Wake designs: [Claude inbox](docs/claude-inbox-wake.md), [Codex queue](docs/codex-queue-wake.md), [channel push](docs/push-delivery.md) | Why each wake works as it does, and what was verified live. |
+| [GitHub context](docs/github-context.md) | The design behind `github=` evidence for reviews. |
 
 ## Contributing
 
