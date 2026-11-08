@@ -729,12 +729,13 @@ function board(d) {
       const own = thick(l.n);
       return { half: Math.max(6 * k, own * 0.9 + 3, w / 2 + 4), len: Math.max(11 * k, own * 1.5 + 6, w * 1.3 + 5) };
     };
-    const stub = 9 * k + w * 0.6; // the bit of line left on the arrow's side of a break
+    const stub = 6 * k + w * 0.3; // the bit of line left on the arrow's side of a break
     const toB = across ? (xb > xa ? 1 : -1) : -into; // which way a call from a is heading as it arrives at b
     const toA = across ? -toB : -into; // and one from b, arriving at a
     // Where the line stops: inside the head normally, or short of it, leaving a break, while calls that
     // way are still unanswered.
-    const inset = (l, x, heading) => (l ? x - heading * (2 + (l.unread ? size(l).len + stub + 14 * k + w * 0.8 : size(l).len * 0.6)) : x);
+    // An end with no head stops where a head would sit, so its dot lines up with the arrows on other rows.
+    const inset = (l, x, heading) => x - heading * (2 + (!l ? 6 * k : l.unread ? size(l).len + stub + 8 * k + w * 0.4 : size(l).len * 0.6));
     const ea = inset(back, xa, toA), eb = inset(fwd, xb, toB);
     const d = route(ea, ya, eb, yb);
     g.append(mk("path", { d, class: "line", stroke, "stroke-width": w.toFixed(1), "stroke-dasharray": group.some((l) => isTemp(l.from)) ? "8 5" : "none" }));
@@ -753,8 +754,8 @@ function board(d) {
     if (back) head(back, xa, ya, toA, colourAt(ea));
     // An end that only placed calls has no head: it ends in a dot of its own colour instead.
     const tail = (x, y, colour) => g.append(mk("circle", { cx: x, cy: y, r: Math.max(3.5 * k, w / 2 + 1.5), fill: colour }));
-    if (!back) tail(xa, ya, colA);
-    if (!fwd) tail(xb, yb, colB);
+    if (!back) tail(ea, ya, colA);
+    if (!fwd) tail(eb, yb, colB);
     g.addEventListener("mouseenter", () => focus((x) => group.includes(x)));
     g.addEventListener("mouseleave", refocus);
     svg.append(g);
