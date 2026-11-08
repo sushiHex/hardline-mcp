@@ -275,7 +275,7 @@ function indexNames(d) {
     if (!groups.has(k)) groups.set(k, new Set());
     groups.get(k).add(n);
   };
-  d.lanes.forEach((l) => add(l.lane));
+  d.lanes.filter((l) => isLive(l) && l.active).forEach((l) => add(l.lane)); // idle and abandoned names are folded away, so they are no rivals
   (d.links || []).forEach((l) => { add(l.from); add(l.to); });
   d.recent.forEach((m) => { add(m.from); add(m.to); });
   twins = new Set();
