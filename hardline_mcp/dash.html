@@ -243,6 +243,12 @@ function mark(name, o = {}) {
   return m;
 }
 
+// A session's name takes a slight tint of its agent's colour, so the name and its mark agree.
+const tint = (n) => {
+  const c = AGENT_VAR[known(agentOf(n))];
+  return c ? `color-mix(in srgb, ${c} 38%, var(--ink))` : "";
+};
+
 // How much a session was on the phone this hour: the bar's length is the calls it placed and took,
 // solid for placed, faint for taken.
 function meter(name) {
@@ -296,7 +302,9 @@ function who(n) {
   const w = el("span", "who");
   const temp = isTemp(n);
   w.title = temp ? n + " (reviewer started on demand)" : n;
-  w.append(mark(n, { temp }), el("span", "t" + (temp ? " temp" : ""), nameText(n)));
+  const txt = el("span", "t" + (temp ? " temp" : ""), nameText(n));
+  txt.style.color = tint(n);
+  w.append(mark(n, { temp }), txt);
   const t = tagEl(n);
   if (t) w.append(t);
   return w;
@@ -348,6 +356,7 @@ function item(l, label) {
   row.append(mark(l.lane, { ring: !!l.unread, dark: !isLive(l), unknown: l.liveness === "unknown" }));
   const name = el("span", "name", label);
   name.title = l.lane;
+  name.style.color = tint(l.lane);
   const tag = tagEl(l.lane);
   if (tag) name.append(tag);
   row.append(name);
@@ -544,6 +553,7 @@ function board(d) {
       const tag = tagOf(name);
       if (tag) svg.append(mk("rect", { x: answer ? x + 34 : x - 43, y: y - 4.5, width: 9, height: 9, rx: 2.5, fill: tag, class: "swatch" }));
       const label = mk("text", { x: answer ? x + (tag ? 53 : 38) : x - (tag ? 53 : 38), y: y + 5.5, "text-anchor": answer ? "start" : "end", class: "lbl" + (temp ? " temp" : "") }, short(nameText(name)));
+      label.style.fill = tint(name);
       label.append(mk("title", {}, name));
       const mine = answer ? (l) => l.to === name : (l) => l.from === name;
       label.addEventListener("mouseenter", () => focus(mine));
