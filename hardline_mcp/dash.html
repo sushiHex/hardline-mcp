@@ -10,7 +10,7 @@
   --surface: #fcfcfb; --card: #f4f3f0; --line: #e1dfda;
   --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #76746f;
   --claude: #2a78d6; --codex: #eb6834; --hermes: #1baf7a; --other: #76746f;
-  --bar: #8a8882; --warn: #a15c00; --bad: #c0302f; --good: #1a7f4b;
+  --bar: #8a8882; --warn: #a15c00; --bad: #c0302f; --good: #1a7f4b; --softpct: 52%;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
@@ -18,7 +18,7 @@
     --surface: #1a1a19; --card: #232321; --line: #353533;
     --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #98968d;
     --claude: #3987e5; --codex: #d95926; --hermes: #199e70; --other: #98968d;
-    --bar: #8a8882; --warn: #e0a030; --bad: #e66767; --good: #4cbf85;
+    --bar: #8a8882; --warn: #e0a030; --bad: #e66767; --good: #4cbf85; --softpct: 80%;
   }
 }
 :root[data-theme="dark"] {
@@ -26,7 +26,7 @@
   --surface: #1a1a19; --card: #232321; --line: #353533;
   --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #98968d;
   --claude: #3987e5; --codex: #d95926; --hermes: #199e70; --other: #98968d;
-  --bar: #8a8882; --warn: #e0a030; --bad: #e66767; --good: #4cbf85;
+  --bar: #8a8882; --warn: #e0a030; --bad: #e66767; --good: #4cbf85; --softpct: 80%;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--surface); color: var(--ink);
@@ -168,6 +168,7 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
 .call .status { text-align: right; color: var(--good); }
 .call .status.ringing { color: var(--warn); }
 .empty { color: var(--ink-3); }
+body.offline .layout { opacity: .45; filter: grayscale(.6); transition: opacity .3s; }
 @media (max-width: 640px) { .row { grid-template-columns: 1fr 90px; } .track { grid-column: 1 / -1; order: 3; }
   .call { grid-template-columns: 44px minmax(0, 1fr) 36px minmax(0, 1fr); } .call .status { display: none; } }
 </style>
@@ -202,7 +203,17 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
 <script>
 "use strict";
 const SVG = "http://www.w3.org/2000/svg";
-const $ = (id) => document.getElementById(id);
+// The lists are drawn off-screen first (`stage`) and swapped in only if their markup changed, so a hover
+// on a row survives the refresh instead of being torn down every two seconds.
+const STAGED = ["live", "idle", "stranded", "play", "jobs", "recent"];
+let stage = null;
+const $ = (id) => (stage && stage[id]) || document.getElementById(id);
+function commit() {
+  for (const id of STAGED) {
+    const real = document.getElementById(id);
+    if (stage[id].innerHTML !== real.innerHTML) real.replaceChildren(...stage[id].childNodes);
+  }
+}
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -331,6 +342,8 @@ const tagEl = (n) => {
 function who(n) {
   const w = el("span", "who");
   const temp = isTemp(n);
+  w.addEventListener("mouseenter", () => boardFocus((x) => x.from === n || x.to === n));
+  w.addEventListener("mouseleave", () => boardFocus(null));
   w.title = temp ? n + " (reviewer started on demand)" : n;
   const txt = el("span", "t" + (temp ? " temp" : ""), nameText(n));
   txt.style.color = tint(n);
@@ -383,6 +396,8 @@ function summary(d) {
 
 function item(l, label) {
   const row = el("div", "item");
+  row.addEventListener("mouseenter", () => boardFocus((x) => x.from === l.lane || x.to === l.lane)); // point at it on the board
+  row.addEventListener("mouseleave", () => boardFocus(null));
   row.append(mark(l.lane, { ring: !!l.unread, dark: !isLive(l), unknown: l.liveness === "unknown" }));
   const name = el("span", "name", label);
   name.title = l.lane;
@@ -461,7 +476,7 @@ function stranded(d) {
     `${plural(dead.length, "line")} with nobody on them, ${plural(calls, "call")} still ringing`, dead, "warn");
 }
 
-const short = (s) => (s.length > 22 ? s.slice(0, 21) + "…" : s);
+const short = (s) => (s.length > 20 ? s.slice(0, 19) + "…" : s);
 
 // What the cables mean, drawn once as a key: weight, colour, recency, unanswered, on demand.
 function cordKey(links) {
@@ -491,12 +506,14 @@ function cordKey(links) {
 }
 
 // A patch panel: who placed calls on the left, the line each one reached on the right.
-let boardKey = "";
+let boardKey = "", boardFocus = () => {};
 function board(d) {
   const links = d.links || [];
   heading("h-board", "board", "Who called whom", ...(links.length ? cordKey(links) : []));
   const box = $("board");
-  const key = JSON.stringify(links) + box.clientWidth + "x" + box.clientHeight;
+  // Redraw only when something drawn changes. A pair's age ticks every second, but only its tier is drawn.
+  const tier = (l) => ((l.last_s ?? 3600) <= 300 ? 0 : (l.last_s ?? 3600) <= 1800 ? 1 : 2);
+  const key = JSON.stringify(links.map((l) => [l.from, l.to, l.n, l.unread, tier(l)])) + box.clientWidth + "x" + box.clientHeight;
   if (key === boardKey) return; // unchanged: leave it, so a hover is not wiped every 2s
   boardKey = key;
   box.replaceChildren();
@@ -508,7 +525,9 @@ function board(d) {
   const TOP = 12, W = 1000, XL = 390, XR = 610;
   const rowsN = Math.max(callers.length, lines.length);
   const availU = (box.clientHeight || 400) / ((box.clientWidth || W) / W);
-  const ROW = Math.max(32, Math.min(64, Math.floor((availU - TOP - 6) / rowsN)));
+  const ROW = Math.max(32, Math.min(76, Math.floor((availU - TOP - 6) / rowsN)));
+  const k = Math.min(1.5, ROW / 40); // marks grow with the rows, so a roomy board is not a sparse one...
+  const kf = Math.min(k, 1.1); // ...but type grows only a little: names must keep clear of the count bars
   const H = TOP + Math.max(callers.length, lines.length) * ROW + 6;
   const yOf = (list, name) => TOP + list.indexOf(name) * ROW + ROW / 2;
   const max = Math.max(...links.map((l) => l.n));
@@ -526,6 +545,7 @@ function board(d) {
   };
   const cables = [];
   const focus = (pred) => cables.forEach((c) => c.el.classList.toggle("dim", pred ? !pred(c.link) : false));
+  boardFocus = focus; // the lists beside the board can point at a name too
   // The counts live at the edges, one per row, where there is room: calls placed on the left, calls
   // received on the right (amber for the ones never answered). Faint stripes tie a bar to its name.
   const placed = new Map(), taken = new Map(), waiting = new Map();
@@ -540,17 +560,21 @@ function board(d) {
     if (i % 2 === 0) svg.append(mk("rect", { x: 0, y: TOP + i * ROW + 2, width: W, height: ROW - 4, rx: 8, fill: "var(--card)", opacity: 0.6 }));
   });
   stripe(callers.length >= lines.length ? callers : lines);
-  const num = (x, y, v, anchor) => svg.append(mk("text", { x, y: y + 4.5, "text-anchor": anchor, class: "cnt" }, String(v)));
+  const num = (x, y, v, anchor) => {
+    const t = mk("text", { x, y: y + 4.5 * k, "text-anchor": anchor, class: "cnt" }, String(v));
+    t.style.fontSize = 14 * kf + "px";
+    svg.append(t);
+  };
   callers.forEach((name) => {
     const v = placed.get(name), y = yOf(callers, name), w = bar(v);
-    svg.append(mk("rect", { x: 8, y: y - 4, width: w, height: 8, rx: 4, fill: AGENT_VAR[agentOf(name)] || "var(--other)" }));
+    svg.append(mk("rect", { x: 8, y: y - 4 * k, width: w, height: 8 * k, rx: 4 * k, fill: AGENT_VAR[agentOf(name)] || "var(--other)" }));
     num(8 + w + 7, y, v, "start");
   });
   lines.forEach((name) => {
     const v = taken.get(name), un = Math.min(waiting.get(name) || 0, v), y = yOf(lines, name), w = bar(v);
     const x0 = W - 8 - w, wu = w * un / v;
-    svg.append(mk("rect", { x: x0, y: y - 4, width: w, height: 8, rx: 4, fill: AGENT_VAR[agentOf(name)] || "var(--other)" }));
-    if (un) svg.append(mk("rect", { x: W - 8 - wu, y: y - 4, width: wu, height: 8, rx: 4, fill: "var(--warn)" }));
+    svg.append(mk("rect", { x: x0, y: y - 4 * k, width: w, height: 8 * k, rx: 4 * k, fill: AGENT_VAR[agentOf(name)] || "var(--other)" }));
+    if (un) svg.append(mk("rect", { x: W - 8 - wu, y: y - 4 * k, width: wu, height: 8 * k, rx: 4 * k, fill: "var(--warn)" }));
     num(x0 - 7, y, v, "end");
   });
   for (const l of links) {
@@ -560,14 +584,14 @@ function board(d) {
     // started on demand; an amber badge means some calls were never answered.
     const colour = AGENT_VAR[agentOf(l.from)] || "var(--other)";
     const age = l.last_s ?? 3600, fresh = age <= 300;
-    const w = 1.5 + 5 * Math.sqrt(l.n / max);
+    const w = (1.5 + 5 * Math.sqrt(l.n / max)) * Math.sqrt(k);
     const d = `M${XL} ${y1} C ${XL + 130} ${y1}, ${XR - 130} ${y2}, ${XR} ${y2}`;
     const g = mk("g", { class: "cable" });
     g.style.setProperty("--o", fresh ? 0.95 : age <= 1800 ? 0.6 : 0.35);
     g.append(mk("title", {}, `${l.from} to ${l.to}: ${plural(l.n, "call")}` + (l.unread ? `, ${l.unread} not answered` : "") + `, last ${dur(age)} ago`));
     g.append(mk("path", { d, class: "line", stroke: colour, "stroke-width": w.toFixed(1), "stroke-dasharray": isTemp(l.from) ? "8 5" : "none" }));
     if (fresh) g.append(mk("path", { d, class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
-    g.append(mk("polygon", { points: `${XR - 9},${y2} ${XR - 20},${y2 - 6} ${XR - 20},${y2 + 6}`, fill: l.unread ? "var(--warn)" : colour }));
+    g.append(mk("polygon", { points: `${XR - 9},${y2} ${XR - 9 - 11 * k},${y2 - 6 * k} ${XR - 9 - 11 * k},${y2 + 6 * k}`, fill: l.unread ? "var(--warn)" : colour }));
     g.addEventListener("mouseenter", () => focus((x) => x === l));
     g.addEventListener("mouseleave", () => focus(null));
     svg.append(g);
@@ -578,23 +602,26 @@ function board(d) {
       const y = yOf(list, name);
       svg.append(mk("circle", { cx: x, cy: y, r: 6.5, class: "plug" + (answer ? " answer" : "") }));
       const colour = AGENT_VAR[agentOf(name)] || "var(--other)", temp = isTemp(name);
-      const cx = answer ? x + 21 : x - 21;
+      const off = 21 * k, br = 8.5 * k;
+      const cx = answer ? x + off : x - off;
       // A solid badge in the agent's colour with its glyph in white; an on-demand reviewer is the same
       // glyph in a dashed outline instead, so the two are never confused.
       const badge = mk("g", { class: "swatch" + (isHot(name) ? " hot" : "") });
       badge.append(mk("circle", temp
-        ? { cx, cy: y, r: 8.5, fill: "var(--surface)", stroke: colour, "stroke-width": 1.6, "stroke-dasharray": "3 2.2" }
-        : { cx, cy: y, r: 8.5, fill: colour }));
+        ? { cx, cy: y, r: br, fill: "var(--surface)", stroke: colour, "stroke-width": 1.6, "stroke-dasharray": "3 2.2" }
+        : { cx, cy: y, r: br, fill: colour }));
       const glyph = mk("g", {
-        transform: `translate(${cx - 5.5} ${y - 5.5}) scale(0.4583)`, stroke: temp ? colour : "var(--surface)", fill: "none",
+        transform: `translate(${cx - 5.5 * k} ${y - 5.5 * k}) scale(${0.4583 * k})`, stroke: temp ? colour : "var(--surface)", fill: "none",
         "stroke-width": 3.4, "stroke-linecap": "round", "stroke-linejoin": "round",
       });
       glyph.innerHTML = ICONS[known(agentOf(name)) || "lamp"]; // fixed strings, never data
       badge.append(glyph);
       svg.append(badge);
       const tag = tagOf(name);
-      if (tag) svg.append(mk("rect", { x: answer ? x + 34 : x - 43, y: y - 4.5, width: 9, height: 9, rx: 2.5, fill: tag, class: "swatch" }));
-      const label = mk("text", { x: answer ? x + (tag ? 53 : 38) : x - (tag ? 53 : 38), y: y + 5.5, "text-anchor": answer ? "start" : "end", class: "lbl" + (temp ? " temp" : "") }, short(nameText(name)));
+      const lab = off + br + 8.5; // where the name starts, past the badge
+      if (tag) svg.append(mk("rect", { x: answer ? x + lab - 5 : x - lab - 4, y: y - 4.5, width: 9, height: 9, rx: 2.5, fill: tag, class: "swatch" }));
+      const label = mk("text", { x: answer ? x + lab + (tag ? 15 : 0) : x - lab - (tag ? 15 : 0), y: y + 6 * k, "text-anchor": answer ? "start" : "end", class: "lbl" + (temp ? " temp" : "") }, short(nameText(name)));
+      label.style.fontSize = 19 * kf + "px";
       label.style.fill = tint(name);
       label.append(mk("title", {}, name));
       const mine = answer ? (l) => l.to === name : (l) => l.from === name;
@@ -612,7 +639,7 @@ function board(d) {
 // quietly beside the board. Hover a minute for its readout; the line is a five-minute average; an amber
 // tick under a minute means some of its calls were never answered.
 const STACK = ["claude", "codex", "hermes", "other"];
-const soft = (c) => `color-mix(in srgb, ${c} 52%, var(--surface))`;
+const soft = (c) => `color-mix(in srgb, ${c} var(--softpct, 52%), var(--surface))`; // lighter mix on a light page, stronger on a dark one
 let trafficKey = "";
 function traffic(d) {
   const n = d.traffic.length, W = 1000, H = 110, pad = 26, gutter = 30, bw = (W - gutter) / n;
@@ -805,12 +832,18 @@ async function tick() {
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
     lastData = d;
+    stage = Object.fromEntries(STAGED.map((id) => [id, document.createElement("div")]));
     indexNames(d);
     summary(d); live(d); board(d); playbook(d); traffic(d); jobs(d); recent(d); idle(d); stranded(d);
+    commit();
+    stage = null;
     lastOk = Date.now();
+    document.body.classList.remove("offline");
     st.className = "";
     text.textContent = d.unavailable.length ? "no data: " + d.unavailable.join(", ") : "live";
   } catch (e) {
+    stage = null;
+    document.body.classList.add("offline"); // what is shown may be old: say so by dimming it
     st.className = "stale";
     text.textContent = lastOk ? "offline " + dur(Math.round((Date.now() - lastOk) / 1000)) : "cannot reach";
   }
