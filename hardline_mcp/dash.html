@@ -44,6 +44,9 @@ header.top { display: flex; align-items: center; gap: 26px; flex: none; }
 .panel.lines { flex: 0 1 auto; max-height: 40%; overflow-y: auto; }
 .panel.scrolls { flex: 0 1 auto; max-height: 26%; overflow-y: auto; }
 .scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.panel.vol { flex: 0 0 34%; }
+#traffic { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#traffic svg.chart { flex: 1; min-height: 0; height: 100%; }
 #board { flex: 1; min-height: 0; }
 #board svg.chart { height: 100%; }
 .fold { margin-top: 8px; }
@@ -66,6 +69,7 @@ h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .02em; }
 .chip.muted b { color: var(--ink-2); font-weight: 500; }
 h2 { font-size: 14px; font-weight: 600; margin: 0 0 8px; flex: none; display: flex; align-items: center; gap: 8px; }
 h2 .ic { color: var(--ink-3); }
+h2 .ttl { white-space: nowrap; }
 h2 .meta { flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; margin-left: auto; font-weight: 400; font-size: 12px; color: var(--ink-3); display: flex; align-items: center; gap: 14px; }
 .group { margin: 10px 0 2px; color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
 .list { columns: 2 220px; column-gap: 28px; }
@@ -168,6 +172,12 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
 .call .status { text-align: right; color: var(--good); }
 .call .status.ringing { color: var(--warn); }
 .empty { color: var(--ink-3); }
+.item, .who, .board text.lbl { cursor: pointer; }
+.item.pinned { background: var(--card); border-radius: 6px; box-shadow: -6px 0 0 var(--card), 6px 0 0 var(--card); }
+.who.pinned .t { text-decoration: underline; text-underline-offset: 3px; }
+.board text.lbl.pinned { font-weight: 700; }
+.pinchip { cursor: pointer; background: var(--card); color: var(--ink); padding: 1px 9px; border-radius: 11px; }
+.pinchip .ic { width: .9em; height: .9em; }
 body.offline .layout { opacity: .45; filter: grayscale(.6); transition: opacity .3s; }
 @media (max-width: 640px) { .row { grid-template-columns: 1fr 90px; } .track { grid-column: 1 / -1; order: 3; }
   .call { grid-template-columns: 44px minmax(0, 1fr) 36px minmax(0, 1fr); } .call .status { display: none; } }
@@ -184,7 +194,7 @@ body.offline .layout { opacity: .45; filter: grayscale(.6); transition: opacity 
   <div class="layout">
     <div class="col">
       <section class="panel grow"><h2 id="h-board"></h2><div id="board"></div></section>
-      <section class="panel"><h2 id="h-volume"></h2><div id="traffic"></div></section>
+      <section class="panel vol"><h2 id="h-volume"></h2><div id="traffic"></div></section>
     </div>
 
     <div class="col">
@@ -342,8 +352,11 @@ const tagEl = (n) => {
 function who(n) {
   const w = el("span", "who");
   const temp = isTemp(n);
-  w.addEventListener("mouseenter", () => boardFocus((x) => x.from === n || x.to === n));
-  w.addEventListener("mouseleave", () => boardFocus(null));
+  w.dataset.name = n;
+  if (pinned === n) w.classList.add("pinned");
+  w.addEventListener("mouseenter", () => boardFocus(focusFor(n)));
+  w.addEventListener("mouseleave", refocus);
+  w.addEventListener("click", () => pin(n));
   w.title = temp ? n + " (reviewer started on demand)" : n;
   const txt = el("span", "t" + (temp ? " temp" : ""), nameText(n));
   txt.style.color = tint(n);
@@ -360,7 +373,7 @@ let lastOk = 0, lastData = null;
 
 function heading(id, ic, text, ...meta) {
   const h = $(id);
-  h.replaceChildren(icon(ic), text);
+  h.replaceChildren(icon(ic), el("span", "ttl", text));
   if (meta.length) {
     const m = el("span", "meta");
     m.append(...meta);
@@ -396,8 +409,11 @@ function summary(d) {
 
 function item(l, label) {
   const row = el("div", "item");
-  row.addEventListener("mouseenter", () => boardFocus((x) => x.from === l.lane || x.to === l.lane)); // point at it on the board
-  row.addEventListener("mouseleave", () => boardFocus(null));
+  row.dataset.name = l.lane;
+  if (pinned === l.lane) row.classList.add("pinned");
+  row.addEventListener("mouseenter", () => boardFocus(focusFor(l.lane))); // point at it on the board
+  row.addEventListener("mouseleave", refocus);
+  row.addEventListener("click", () => pin(l.lane));
   row.append(mark(l.lane, { ring: !!l.unread, dark: !isLive(l), unknown: l.liveness === "unknown" }));
   const name = el("span", "name", label);
   name.title = l.lane;
@@ -505,22 +521,86 @@ function cordKey(links) {
   ];
 }
 
+// Companions are a Claude and a Codex session that share a name, or where one name extends the other
+// ("retro" and "retro-wave"). They go on the same rows: the Claude caller sits across from its Codex
+// line, then the Codex caller across from the Claude line, so the cables between them run straight.
+// Anything else is grouped by its own name. A row a side has nobody for is left blank.
+function layout(links) {
+  const froms = [...new Set(links.map((l) => l.from))], tos = [...new Set(links.map((l) => l.to))];
+  const all = [...new Set([...froms, ...tos])];
+  const pair = (n) => n.includes(":") && (agentOf(n) === "claude" || agentOf(n) === "codex");
+  const key = (n) => {
+    if (!pair(n)) return "~" + n; // not a Claude or Codex session: its own group, after the companions
+    const b = nameText(n);
+    let k = b;
+    for (const m of all) {
+      if (!pair(m) || agentOf(m) === agentOf(n)) continue;
+      const c = nameText(m);
+      const cand = c === b || c.startsWith(b + "-") ? b : b.startsWith(c + "-") ? c : null;
+      if (cand !== null && cand.length < k.length) k = cand;
+    }
+    return k;
+  };
+  const groups = new Map();
+  const slot = (n, side) => {
+    const k = key(n);
+    if (!groups.has(k)) groups.set(k, { lc: [], lx: [], lo: [], rc: [], rx: [], ro: [] });
+    const a = agentOf(n), g = groups.get(k);
+    g[side + (a === "claude" ? "c" : a === "codex" ? "x" : "o")].push(n);
+  };
+  froms.sort().forEach((n) => slot(n, "l"));
+  tos.sort().forEach((n) => slot(n, "r"));
+  const L = [], R = [];
+  const track = (left, right) => {
+    for (let i = 0; i < Math.max(left.length, right.length); i++) { L.push(left[i] ?? null); R.push(right[i] ?? null); }
+  };
+  // Pairs first; then the rest, with the callers that have no companion (an on-demand reviewer, say)
+  // ahead of the lines they reached, so those cables are short too.
+  const paired = (g) => (g.lc.length + g.rc.length > 0) && (g.lx.length + g.rx.length > 0);
+  const rank = (k) => (paired(groups.get(k)) ? 0 : k[0] === "~" ? 1 : 2);
+  for (const k of [...groups.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))) {
+    const g = groups.get(k);
+    track(g.lc, g.rx); // Claude placing calls, across from the Codex line
+    track(g.lx, g.rc); // Codex placing calls, across from the Claude line
+    track(g.lo, g.ro);
+  }
+  return { callers: L, lines: R };
+}
+
 // A patch panel: who placed calls on the left, the line each one reached on the right.
 let boardKey = "", boardFocus = () => {};
+
+// Click a name anywhere to pin it: its cables stay lit on the board until it is clicked again, Esc is
+// pressed, or its chip is used. Hovering something else still previews it meanwhile.
+let pinned = null;
+const focusFor = (name) => (x) => x.from === name || x.to === name;
+const refocus = () => boardFocus(pinned ? focusFor(pinned) : null);
+function pin(name) {
+  pinned = pinned === name ? null : name;
+  document.querySelectorAll("[data-name]").forEach((e) => e.classList.toggle("pinned", e.dataset.name === pinned));
+  if (lastData) board(lastData); // redraws the chip and the board's own labels
+  refocus();
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pinned) pin(pinned); });
+function pinChip() {
+  const c = el("span", "key pinchip");
+  c.title = "Showing only " + pinned + ". Click to clear.";
+  c.append(icon("cross"), nameText(pinned));
+  c.addEventListener("click", () => pin(pinned));
+  return c;
+}
 function board(d) {
   const links = d.links || [];
-  heading("h-board", "board", "Who called whom", ...(links.length ? cordKey(links) : []));
+  heading("h-board", "board", "Who called whom", ...(pinned ? [pinChip()] : []), ...(links.length ? cordKey(links) : []));
   const box = $("board");
   // Redraw only when something drawn changes. A pair's age ticks every second, but only its tier is drawn.
   const tier = (l) => ((l.last_s ?? 3600) <= 300 ? 0 : (l.last_s ?? 3600) <= 1800 ? 1 : 2);
-  const key = JSON.stringify(links.map((l) => [l.from, l.to, l.n, l.unread, tier(l)])) + box.clientWidth + "x" + box.clientHeight;
+  const key = JSON.stringify(links.map((l) => [l.from, l.to, l.n, l.unread, tier(l)])) + box.clientWidth + "x" + box.clientHeight + pinned;
   if (key === boardKey) return; // unchanged: leave it, so a hover is not wiped every 2s
   boardKey = key;
   box.replaceChildren();
   if (!links.length) return box.append(el("div", "empty", "No calls in the last hour."));
-  const order = (a, b) => agentOf(a).localeCompare(agentOf(b)) || a.localeCompare(b);
-  const callers = [...new Set(links.map((l) => l.from))].sort(order);
-  const lines = [...new Set(links.map((l) => l.to))].sort(order);
+  const { callers, lines } = layout(links); // rows, with a blank where a side has no one on that row
   // Rows grow to use the height the panel has, within reason, so a quiet hour does not leave a small board in a big space.
   const TOP = 12, W = 1000, XL = 390, XR = 610;
   const rowsN = Math.max(callers.length, lines.length);
@@ -566,11 +646,13 @@ function board(d) {
     svg.append(t);
   };
   callers.forEach((name) => {
+    if (name == null) return;
     const v = placed.get(name), y = yOf(callers, name), w = bar(v);
     svg.append(mk("rect", { x: 8, y: y - 4 * k, width: w, height: 8 * k, rx: 4 * k, fill: AGENT_VAR[agentOf(name)] || "var(--other)" }));
     num(8 + w + 7, y, v, "start");
   });
   lines.forEach((name) => {
+    if (name == null) return;
     const v = taken.get(name), un = Math.min(waiting.get(name) || 0, v), y = yOf(lines, name), w = bar(v);
     const x0 = W - 8 - w, wu = w * un / v;
     svg.append(mk("rect", { x: x0, y: y - 4 * k, width: w, height: 8 * k, rx: 4 * k, fill: AGENT_VAR[agentOf(name)] || "var(--other)" }));
@@ -593,12 +675,13 @@ function board(d) {
     if (fresh) g.append(mk("path", { d, class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
     g.append(mk("polygon", { points: `${XR - 9},${y2} ${XR - 9 - 11 * k},${y2 - 6 * k} ${XR - 9 - 11 * k},${y2 + 6 * k}`, fill: l.unread ? "var(--warn)" : colour }));
     g.addEventListener("mouseenter", () => focus((x) => x === l));
-    g.addEventListener("mouseleave", () => focus(null));
+    g.addEventListener("mouseleave", refocus);
     svg.append(g);
     cables.push({ el: g, link: l });
   }
   const side = (list, x, answer) => {
     for (const name of list) {
+      if (name == null) continue;
       const y = yOf(list, name);
       svg.append(mk("circle", { cx: x, cy: y, r: 6.5, class: "plug" + (answer ? " answer" : "") }));
       const colour = AGENT_VAR[agentOf(name)] || "var(--other)", temp = isTemp(name);
@@ -620,19 +703,21 @@ function board(d) {
       const tag = tagOf(name);
       const lab = off + br + 8.5; // where the name starts, past the badge
       if (tag) svg.append(mk("rect", { x: answer ? x + lab - 5 : x - lab - 4, y: y - 4.5, width: 9, height: 9, rx: 2.5, fill: tag, class: "swatch" }));
-      const label = mk("text", { x: answer ? x + lab + (tag ? 15 : 0) : x - lab - (tag ? 15 : 0), y: y + 6 * k, "text-anchor": answer ? "start" : "end", class: "lbl" + (temp ? " temp" : "") }, short(nameText(name)));
+      const label = mk("text", { x: answer ? x + lab + (tag ? 15 : 0) : x - lab - (tag ? 15 : 0), y: y + 6 * k, "text-anchor": answer ? "start" : "end", class: "lbl" + (temp ? " temp" : "") + (pinned === name ? " pinned" : "") }, short(nameText(name)));
       label.style.fontSize = 19 * kf + "px";
       label.style.fill = tint(name);
       label.append(mk("title", {}, name));
       const mine = answer ? (l) => l.to === name : (l) => l.from === name;
       label.addEventListener("mouseenter", () => focus(mine));
-      label.addEventListener("mouseleave", () => focus(null));
+      label.addEventListener("mouseleave", refocus);
+      label.addEventListener("click", () => pin(name));
       svg.append(label);
     }
   };
   side(callers, XL, false);
   side(lines, XR, true);
   box.append(svg);
+  refocus(); // a pinned name stays lit across a redraw
 }
 
 // Calls per minute for the last hour, stacked by the agent that placed them, in muted tints so it sits
@@ -642,7 +727,10 @@ const STACK = ["claude", "codex", "hermes", "other"];
 const soft = (c) => `color-mix(in srgb, ${c} var(--softpct, 52%), var(--surface))`; // lighter mix on a light page, stronger on a dark one
 let trafficKey = "";
 function traffic(d) {
-  const n = d.traffic.length, W = 1000, H = 110, pad = 26, gutter = 30, bw = (W - gutter) / n;
+  // The chart takes the height its panel has (within reason), so the left column has no blank gap.
+  const box = $("traffic");
+  const n = d.traffic.length, W = 1000, pad = 26, gutter = 30, bw = (W - gutter) / n;
+  const H = Math.max(80, Math.min(240, Math.floor(((box.clientHeight || 160) - 26) / ((box.clientWidth || W) / W) - pad)));
   const max = Math.max(1, ...d.traffic), total = d.traffic.reduce((a, b) => a + b, 0);
   const by = d.traffic_by || {}, pend = d.traffic_unanswered || [];
   const lost = pend.reduce((a, b) => a + b, 0);
@@ -656,8 +744,7 @@ function traffic(d) {
   const miss = el("span", "key"); miss.append(el("span", "tick"), "unanswered");
   heading("h-volume", "bars", "Call volume", el("span", "", total ? `${total} this hour, busiest minute ${max}` : "none this hour"),
     ...legend, ...(total ? [avg] : []), ...(lost ? [miss] : []));
-  const key = JSON.stringify([d.traffic, by, pend]);
-  const box = $("traffic");
+  const key = JSON.stringify([d.traffic, by, pend]) + H;
   if (key === trafficKey && box.firstChild) return; // unchanged: keep the chart, and a hover on it
   trafficKey = key;
   box.replaceChildren();
