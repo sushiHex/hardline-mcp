@@ -77,7 +77,8 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
 .board .cable:hover { opacity: 1; }
 .board .plug { fill: var(--ink-3); }
 .board .plug.answer { fill: var(--surface); stroke: var(--ink-3); stroke-width: 2; }
-.board text.lbl { fill: var(--ink-2); font-size: 12.5px; cursor: default; }
+.board text.lbl { fill: var(--ink); font-size: 19px; cursor: default; }
+.board text.lbl.temp { font-style: italic; fill: var(--ink-2); }
 .board .swatch { stroke: none; }
 .key { display: inline-flex; align-items: center; gap: 6px; }
 .key .cord { width: 28px; }
@@ -95,6 +96,10 @@ svg.chart text { fill: var(--ink-3); font-size: 11px; }
 .who { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .who .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who .dot { width: 8px; height: 8px; }
+.dot.temp { background: none; box-sizing: border-box; border: 2px dashed var(--other); box-shadow: none; }
+.dot.temp.claude { border-color: var(--claude); } .dot.temp.codex { border-color: var(--codex); } .dot.temp.hermes { border-color: var(--hermes); }
+.t.temp, .what.temp { font-style: italic; color: var(--ink-2); }
+.what { display: flex; align-items: center; gap: 8px; }
 .call > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .call .when { color: var(--ink-3); }
 .call span.cord { overflow: visible; }
@@ -157,6 +162,8 @@ const ICONS = {
   board: '<path d="M4 7h16M4 12h16M4 17h16"/><circle cx="8" cy="7" r="1.6" class="solid"/><circle cx="16" cy="12" r="1.6" class="solid"/><circle cx="10" cy="17" r="1.6" class="solid"/>',
   stop: '<rect x="7" y="7" width="10" height="10" rx="1.5" class="solid"/>',
   queue: '<path d="M5 8h14M5 12h14M5 16h9"/>',
+  bolt: '<path d="M13 3L5 14h6l-1 7 8-11h-6z"/>',
+  search: '<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.5 5.5"/>',
 };
 const icon = (name) => {
   const s = document.createElementNS(SVG, "svg");
@@ -177,8 +184,12 @@ const isLive = (l) => l.liveness === "alive" || l.liveness === "unknown" || l.li
 // session keeps the same tag, and the full name stays in the tooltip.
 const HASH = /\.([0-9a-f]{8})$/;
 const nameText = (n) => (n.includes(":") ? n.slice(n.indexOf(":") + 1) : n).replace(HASH, "");
-let twins = new Set();
+// A worker started on demand (a job's CLI, or a bare "codex"/"claude" reporting back) comes and goes.
+// It is drawn as a dashed ring, never as a solid dot, so it is not mistaken for a session someone is in.
+let twins = new Set(), temps = new Set();
+const isTemp = (n) => temps.has(n) || (!n.includes(":") && known(n) !== "");
 function indexNames(d) {
+  temps = new Set(d.temporary || []);
   const groups = new Map();
   const add = (n) => {
     const k = agentOf(n) + "|" + nameText(n);
@@ -204,9 +215,10 @@ const tagEl = (n) => {
 };
 function who(n) {
   const w = el("span", "who");
-  w.title = n;
-  const dot = el("span", "dot " + known(agentOf(n)));
-  w.append(dot, el("span", "t", nameText(n)));
+  const temp = isTemp(n);
+  w.title = temp ? n + " (reviewer started on demand)" : n;
+  const dot = el("span", "dot " + known(agentOf(n)) + (temp ? " temp" : ""));
+  w.append(dot, el("span", "t" + (temp ? " temp" : ""), nameText(n)));
   const t = tagEl(n);
   if (t) w.append(t);
   return w;
@@ -235,7 +247,7 @@ function chip(ic, n, word, tip, cls) {
 }
 
 function summary(d) {
-  const open = d.lanes.filter(isLive), live = open.filter((l) => l.active), idle = open.length - live.length;
+  const open = d.lanes.filter((l) => isLive(l) && !l.temp), live = open.filter((l) => l.active), idle = open.length - live.length;
   const dead = d.lanes.filter((l) => !isLive(l) && l.unread);
   const waiting = live.reduce((n, l) => n + l.unread, 0);
   const stranded = dead.reduce((n, l) => n + l.unread, 0);
@@ -244,7 +256,7 @@ function summary(d) {
   box.replaceChildren(
     chip("lamp", live.length, "active", "Lines that placed or took a call in the last hour, or have a call waiting"),
     chip("bell", waiting, "waiting", "Calls waiting for an active line to pick up"),
-    chip("hourglass", running, "long calls", "Background jobs running now"),
+    chip("search", running, "reviewing", "Reviewers (Codex or Claude, started on demand) running now"),
   );
   if (idle) box.append(chip("moon", idle, "idle", "Open lines with no call in the last hour", "muted"));
   if (stranded) box.append(chip("bellOff", stranded, "unanswered", `${plural(stranded, "call")} ringing on ${plural(dead.length, "line")} nobody holds`, "warn"));
@@ -279,7 +291,7 @@ function live(d) {
   heading("h-lines", "lamp", "Lines");
   const box = $("live");
   box.replaceChildren();
-  const lanes = d.lanes.filter((l) => isLive(l) && l.active);
+  const lanes = d.lanes.filter((l) => isLive(l) && l.active && !l.temp);
   if (!lanes.length) return box.append(el("div", "empty", "No line active in the last hour."));
   for (const a of [...new Set(lanes.map((l) => agentOf(l.agent)))].sort()) {
     box.append(el("div", "group", a));
@@ -309,7 +321,7 @@ function fold(sectionId, boxId, ic, count, tip, lanes, cls) {
 }
 
 function idle(d) {
-  const quiet = d.lanes.filter((l) => isLive(l) && !l.active);
+  const quiet = d.lanes.filter((l) => isLive(l) && !l.active && !l.temp);
   fold("idle-section", "idle", "moon", quiet.length, "Open lines with no call in the last hour", quiet);
 }
 
@@ -320,7 +332,7 @@ function stranded(d) {
     `${plural(dead.length, "line")} with nobody on them, ${plural(calls, "call")} still ringing`, dead, "warn");
 }
 
-const short = (s) => (s.length > 34 ? s.slice(0, 33) + "…" : s);
+const short = (s) => (s.length > 26 ? s.slice(0, 25) + "…" : s);
 const AGENT_VAR = { claude: "var(--claude)", codex: "var(--codex)", hermes: "var(--hermes)" };
 
 function cordKey() {
@@ -345,7 +357,7 @@ function board(d) {
   const order = (a, b) => agentOf(a).localeCompare(agentOf(b)) || a.localeCompare(b);
   const callers = [...new Set(links.map((l) => l.from))].sort(order);
   const lines = [...new Set(links.map((l) => l.to))].sort(order);
-  const ROW = 26, TOP = 10, W = 1000, XL = 330, XR = 670;
+  const ROW = 36, TOP = 12, W = 1000, XL = 390, XR = 610;
   const H = TOP + Math.max(callers.length, lines.length) * ROW + 6;
   const yOf = (list, name) => TOP + list.indexOf(name) * ROW + ROW / 2;
   const max = Math.max(...links.map((l) => l.n));
@@ -379,11 +391,14 @@ function board(d) {
   const side = (list, x, answer) => {
     for (const name of list) {
       const y = yOf(list, name);
-      svg.append(mk("circle", { cx: x, cy: y, r: 5, class: "plug" + (answer ? " answer" : "") }));
-      svg.append(mk("circle", { cx: answer ? x + 22 : x - 22, cy: y, r: 4, fill: AGENT_VAR[agentOf(name)] || "var(--other)", class: "swatch" }));
+      svg.append(mk("circle", { cx: x, cy: y, r: 6.5, class: "plug" + (answer ? " answer" : "") }));
+      const colour = AGENT_VAR[agentOf(name)] || "var(--other)", temp = isTemp(name);
+      svg.append(mk("circle", temp
+        ? { cx: answer ? x + 26 : x - 26, cy: y, r: 6, fill: "none", stroke: colour, "stroke-width": 2.2, "stroke-dasharray": "3 2.2" }
+        : { cx: answer ? x + 26 : x - 26, cy: y, r: 6.5, fill: colour, class: "swatch" }));
       const tag = tagOf(name);
-      if (tag) svg.append(mk("rect", { x: answer ? x + 31 : x - 37, y: y - 3.5, width: 7, height: 7, rx: 2, fill: tag, class: "swatch" }));
-      const label = mk("text", { x: answer ? x + (tag ? 44 : 34) : x - (tag ? 44 : 34), y: y + 4, "text-anchor": answer ? "start" : "end", class: "lbl" }, short(nameText(name)));
+      if (tag) svg.append(mk("rect", { x: answer ? x + 37 : x - 46, y: y - 4.5, width: 9, height: 9, rx: 2.5, fill: tag, class: "swatch" }));
+      const label = mk("text", { x: answer ? x + (tag ? 56 : 42) : x - (tag ? 56 : 42), y: y + 5.5, "text-anchor": answer ? "start" : "end", class: "lbl" + (temp ? " temp" : "") }, short(nameText(name)));
       label.append(mk("title", {}, name));
       const mine = answer ? (l) => l.to === name : (l) => l.from === name;
       label.addEventListener("mouseenter", () => focus(mine));
@@ -434,14 +449,15 @@ function traffic(d) {
 }
 
 function jobs(d) {
-  heading("h-jobs", "hourglass", "Long calls");
+  heading("h-jobs", "search", "Reviews");
   const box = $("jobs");
   box.replaceChildren();
   if (!d.jobs.length) return box.append(el("div", "empty", "none"));
   for (const j of d.jobs) {
     const row = el("div", "row");
-    const what = el("div", "what", `${j.agent} · ${j.label || j.id}`);
-    what.title = `${j.id} for ${j.requester}`;
+    const what = el("div", "what temp");
+    what.append(el("span", "dot temp " + known(agentOf(j.agent))), el("span", "", j.label || j.id));
+    what.title = `${j.agent} reviewer started by ${j.requester} (${j.id})`;
     const track = el("div", "track");
     const active = j.end_s === null && j.state !== "lost";
     const from = Math.min(j.start_s ?? 0, d.window_s), to = active ? 0 : Math.min(j.end_s ?? j.start_s ?? 0, d.window_s);

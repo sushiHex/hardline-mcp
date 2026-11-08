@@ -127,6 +127,21 @@ def test_a_line_with_no_calls_this_hour_is_inactive(tmp_path):
     assert got == {"codex:idle": False, "codex:talker": True, "codex:was-busy": False}
 
 
+def test_a_session_hosted_by_a_spawned_cli_is_temporary(tmp_path):
+    db = tmp_path / "mb.db"
+    sessions.register(agent="claude", lanes=["claude:worker"], db_path=db)
+    sessions.register(agent="claude", lanes=["claude:regular"], db_path=db)
+    job = jobs.create(agent="claude", requester="claude:regular", label="w", request={}, db_path=db)
+    jobs.mark_running(job, child_pid=4242, db_path=db)
+    raw = sqlite3.connect(db)
+    with raw:
+        raw.execute("UPDATE agent_sessions SET host_pid = 4242 WHERE lane = 'claude:worker'")
+    raw.close()
+    got = dash.state(db, probe=lambda pid, key: procid.ALIVE)
+    assert {lane["lane"]: lane["temp"] for lane in got["lanes"]} == {"claude:worker": True, "claude:regular": False}
+    assert got["temporary"] == ["claude:worker"]
+
+
 def test_the_store_is_opened_read_only(tmp_path, monkeypatch):
     opened = []
     real = sqlite3.connect

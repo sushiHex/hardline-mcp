@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "temp = row[\"pid\"] in spawned or row[\"host_pid\"] in spawned",
+  "after": "temp = False",
+  "tests": [
+    "tests/test_dash.py::test_a_session_hosted_by_a_spawned_cli_is_temporary"
+  ]
+}

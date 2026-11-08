@@ -117,7 +117,7 @@ def _snapshot(db: Path, since: str) -> dict:
             ),
             "jobs": _rows(
                 conn,
-                "SELECT job_id, agent, requester, label, state, owner_pid, owner_key,"
+                "SELECT job_id, agent, requester, label, state, owner_pid, owner_key, child_pid,"
                 " created_at, started_at, finished_at FROM jobs"
                 f" WHERE state IN ({marks}) OR finished_at >= ?"
                 " ORDER BY created_at DESC LIMIT ?",
@@ -147,12 +147,19 @@ def state(
     unavailable = sorted(name for name, rows in read.items() if rows is None)
     unread = {r["recipient"]: r for r in read["unread"] or []}
 
+    # A session whose process, or whose host, is the CLI a job spawned is an on-demand worker,
+    # not a session someone is sitting in.
+    spawned = {r["child_pid"] for r in read["jobs"] or [] if r["child_pid"]}
     held: dict = {}  # lane -> the best liveness any holder shows
     for row in read["sessions"] or []:
         verdict = _state(row, seen)  # the server and the host it is bound to, as sessions judges
         if verdict == DEAD:
             continue
-        lane = held.setdefault(row["lane"], {"lane": row["lane"], "agent": row["agent"], "liveness": verdict})
+        temp = row["pid"] in spawned or row["host_pid"] in spawned
+        lane = held.setdefault(
+            row["lane"], {"lane": row["lane"], "agent": row["agent"], "liveness": verdict, "temp": temp}
+        )
+        lane["temp"] = lane["temp"] and temp  # temporary only if every holder is
         if verdict == ALIVE:
             lane["liveness"] = ALIVE
     for recipient in unread:  # mail waiting for a name nobody holds is the thing to see
@@ -163,6 +170,7 @@ def state(
                 "agent": recipient.split(":")[0],
                 # A bare agent name is a shared mailbox any reader may drain.
                 "liveness": "unheld" if ":" in recipient else "shared",
+                "temp": False,
             },
         )
     # A line is active if it placed or took a call this hour, has calls waiting, or started a job.
@@ -223,6 +231,7 @@ def state(
         "window_s": int(WINDOW.total_seconds()),
         "lanes": lanes,
         "traffic": traffic,
+        "temporary": sorted(_clip(l["lane"]) for l in lanes if l["temp"]),
         "links": [
             {"from": _clip(r["sender"]), "to": _clip(r["recipient"]), "n": r["n"], "unread": r["unread"]}
             for r in read["links"] or []
