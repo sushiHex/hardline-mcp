@@ -51,6 +51,11 @@ h2 { font-size: 15px; font-weight: 600; margin: 0; }
 .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--other); }
 .dot.claude { background: var(--claude); } .dot.codex { background: var(--codex); } .dot.hermes { background: var(--hermes); }
 .dot.unknown { background: none; box-shadow: inset 0 0 0 2px var(--ink-3); }
+.dot.ring { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 45%, transparent); animation: glow 1.8s ease-in-out infinite; }
+.dot.dark { background: none; box-shadow: inset 0 0 0 2px var(--line); }
+.dot.dark.ring { box-shadow: inset 0 0 0 2px var(--warn), 0 0 0 3px color-mix(in srgb, var(--warn) 35%, transparent); }
+@keyframes glow { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--warn) 10%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .dot.ring { animation: none; } }
 details summary { cursor: pointer; color: var(--ink-2); }
 details[open] summary { margin-bottom: 8px; }
 svg { display: block; width: 100%; height: auto; }
@@ -65,11 +70,19 @@ svg text { fill: var(--ink-3); font-size: 11px; }
 @media (prefers-reduced-motion: reduce) { .fill.live { animation: none; } }
 .state { color: var(--ink-2); font-size: 12px; text-align: right; white-space: nowrap; }
 .state.failed, .state.lost { color: var(--bad); }
-table { width: 100%; border-collapse: collapse; }
-td { padding: 4px 12px 4px 0; border-top: 1px solid var(--line); color: var(--ink-2); white-space: nowrap; }
-td.to { width: 100%; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
-td.when { color: var(--ink-3); }
-.unread { color: var(--warn); font-weight: 600; }
+.call { display: grid; grid-template-columns: 56px minmax(0, 1fr) 56px minmax(0, 1fr) 76px; gap: 8px; align-items: center;
+  padding: 5px 0; border-top: 1px solid var(--line); color: var(--ink-2); }
+.call span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.call .when { color: var(--ink-3); }
+.call span.cord { overflow: visible; }
+.cord { position: relative; height: 0; border-top: 2px solid var(--ink-3); }
+.cord::before, .cord::after { content: ""; position: absolute; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
+.cord::before { left: -2px; } .cord::after { right: -2px; }
+.cord.ringing { border-top: 2px dashed var(--warn); }
+.cord.ringing::before { background: var(--warn); } .cord.ringing::after { background: none; box-shadow: inset 0 0 0 2px var(--warn); }
+.call .status { text-align: right; font-size: 12px; }
+.call .status.ringing { color: var(--warn); font-weight: 600; }
+@media (max-width: 640px) { .call { grid-template-columns: 44px minmax(0, 1fr) 36px minmax(0, 1fr); } .call .status { display: none; } }
 .empty { color: var(--ink-3); }
 @media (max-width: 640px) { .row { grid-template-columns: 1fr 100px; } .track { grid-column: 1 / -1; order: 3; } }
 </style>
@@ -80,31 +93,32 @@ td.when { color: var(--ink-3); }
   <div id="summary"></div>
 
   <section>
-    <h2>Connected now</h2>
-    <p class="note">Sessions that can read their mail. The number is how many messages are waiting for them.</p>
+    <h2>Lines</h2>
+    <p class="note">Every session on the board. A lamp that glows has a call waiting for that line to pick up.</p>
     <div id="live"></div>
   </section>
 
   <section id="stranded-section" hidden>
-    <h2>Mail nobody can read</h2>
-    <p class="note">These names have no running session, so their messages will sit there until someone claims the name.</p>
+    <h2>Unanswered lines</h2>
+    <p class="note">Nobody is on these lines. Their calls keep ringing until a session takes the name.</p>
     <div id="stranded"></div>
   </section>
 
   <section>
-    <h2>Mail traffic</h2>
+    <h2>Call volume</h2>
     <p class="note" id="trafficnote"></p>
     <div id="traffic"></div>
   </section>
 
   <section>
-    <h2>Jobs</h2>
-    <p class="note">Background work started in the last hour. Each bar runs from start to finish.</p>
+    <h2>Long calls</h2>
+    <p class="note">Background jobs from the last hour. Each bar is a connection held open, from pick-up to hang-up.</p>
     <div id="jobs"></div>
   </section>
 
   <section>
-    <h2>Latest messages</h2>
+    <h2>Patched through</h2>
+    <p class="note">The latest calls, caller to line. A solid cord was answered; a dashed one is still ringing.</p>
     <div id="recent"></div>
   </section>
 </main>
@@ -122,7 +136,7 @@ const agentOf = (s) => String(s).split(":")[0];
 const known = (a) => (["claude", "codex", "hermes"].includes(a) ? a : "");
 const dur = (s) => (s < 90 ? s + "s" : s < 5400 ? Math.round(s / 60) + "m" : s < 172800 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d");
 const plural = (n, one, many) => n + " " + (n === 1 ? one : many || one + "s");
-const GLYPH = { queued: "waiting to start", running: "running", completed: "finished", failed: "failed", cancelled: "cancelled", lost: "lost (its owner died)" };
+const GLYPH = { queued: "waiting for a line", running: "connected", completed: "hung up", failed: "dropped", cancelled: "cut off", lost: "dropped, owner died" };
 let lastOk = 0;
 
 const isLive = (l) => l.liveness === "alive" || l.liveness === "unknown" || l.liveness === "shared";
@@ -139,22 +153,23 @@ function summary(d) {
     s.append(el("b", "", n), " " + text);
     return s;
   };
-  box.append(part(live.length, live.length === 1 ? "session connected" : "sessions connected"), ", ",
-    part(waiting, "unread for them"), ", ",
-    part(running, running === 1 ? "job running" : "jobs running"));
-  if (stranded) box.append(". ", part(stranded, "messages stranded on " + plural(dead.length, "name") + " nobody holds", "warn"));
+  box.append(part(live.length, live.length === 1 ? "line open" : "lines open"), ", ",
+    part(waiting, waiting === 1 ? "call waiting" : "calls waiting"), ", ",
+    part(running, running === 1 ? "long call" : "long calls"));
+  if (stranded) box.append(". ", part(stranded, (stranded === 1 ? "call" : "calls") + " ringing on " + plural(dead.length, "line") + " nobody answers", "warn"));
   box.append(".");
 }
 
 function item(l, label) {
   const row = el("div", "item");
-  row.append(el("span", "dot " + known(agentOf(l.agent)) + (l.liveness === "unknown" ? " unknown" : "")));
+  row.append(el("span", "dot " + known(agentOf(l.agent)) + (l.liveness === "unknown" ? " unknown" : "") +
+    (isLive(l) ? "" : " dark") + (l.unread ? " ring" : "")));
   const name = el("span", "name", label);
   name.title = l.lane;
   row.append(name);
   if (l.unread) {
     const old = l.oldest_s > 600;
-    const n = el("span", "n" + (old ? " old" : ""), l.unread + " unread" + (old ? ", oldest " + dur(l.oldest_s) : ""));
+    const n = el("span", "n" + (old ? " old" : ""), plural(l.unread, "call") + " waiting" + (old ? ", oldest " + dur(l.oldest_s) : ""));
     row.append(n);
   }
   return row;
@@ -164,12 +179,12 @@ function live(d) {
   const box = $("live");
   box.replaceChildren();
   const lanes = d.lanes.filter(isLive);
-  if (!lanes.length) return box.append(el("div", "empty", "No sessions are connected."));
+  if (!lanes.length) return box.append(el("div", "empty", "No lines are open."));
   for (const a of [...new Set(lanes.map((l) => agentOf(l.agent)))].sort()) {
     box.append(el("div", "group", a));
     const list = el("div", "list");
     for (const l of lanes.filter((x) => agentOf(x.agent) === a)) {
-      const bare = l.lane.includes(":") ? l.lane.slice(a.length + 1) : l.lane + " (shared mailbox)";
+      const bare = l.lane.includes(":") ? l.lane.slice(a.length + 1) : l.lane + " (party line)";
       list.append(item(l, bare));
     }
     box.append(list);
@@ -184,7 +199,7 @@ function stranded(d) {
   if (!dead.length) return;
   const oldest = Math.max(...dead.map((l) => l.oldest_s || 0));
   const det = el("details");
-  det.append(el("summary", "", `${plural(dead.reduce((n, l) => n + l.unread, 0), "message")} on ${plural(dead.length, "name")}, oldest ${dur(oldest)}. Show the list`));
+  det.append(el("summary", "", `${plural(dead.reduce((n, l) => n + l.unread, 0), "call")} ringing on ${plural(dead.length, "line")}, oldest ${dur(oldest)}. Show the list`));
   const list = el("div", "list");
   for (const l of dead) list.append(item(l, l.lane));
   det.append(list);
@@ -197,8 +212,8 @@ function traffic(d) {
   const n = d.traffic.length, W = 1000, H = 70, pad = 18, bw = W / n;
   const max = Math.max(1, ...d.traffic), total = d.traffic.reduce((a, b) => a + b, 0);
   $("trafficnote").textContent = total
-    ? `${plural(total, "message")} in the last hour. The tallest bar is ${plural(max, "message")} in one minute.`
-    : "No messages in the last hour.";
+    ? `${plural(total, "call")} in the last hour. The tallest bar is ${plural(max, "call")} in one minute.`
+    : "No calls in the last hour.";
   if (!total) return;
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H + pad}`);
@@ -251,15 +266,14 @@ function jobs(d) {
 function recent(d) {
   const box = $("recent");
   box.replaceChildren();
-  if (!d.recent.length) return box.append(el("div", "empty", "No messages yet."));
-  const t = el("table");
+  if (!d.recent.length) return box.append(el("div", "empty", "No calls yet."));
   for (const m of d.recent) {
-    const tr = el("tr");
-    tr.append(el("td", "when", dur(m.age_s ?? 0) + " ago"), el("td", "", m.from), el("td", "to", "to " + m.to),
-      el("td", m.read ? "" : "unread", m.read ? "read" : "unread"));
-    t.append(tr);
+    const row = el("div", "call");
+    const ring = m.read ? "" : " ringing";
+    row.append(el("span", "when", dur(m.age_s ?? 0) + " ago"), el("span", "", m.from), el("span", "cord" + ring),
+      el("span", "", m.to), el("span", "status" + ring, m.read ? "answered" : "ringing"));
+    box.append(row);
   }
-  box.append(t);
 }
 
 async function tick() {
