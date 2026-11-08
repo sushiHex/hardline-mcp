@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "self.headers.get(\"Origin\", None) not in (None, *origins)",
+  "after": "False",
+  "tests": [
+    "tests/test_dash.py::test_a_cross_site_origin_is_refused"
+  ]
+}

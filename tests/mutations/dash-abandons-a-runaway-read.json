@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "conn.set_progress_handler(lambda: time.monotonic() > deadline, CHECK_EVERY)",
+  "after": "conn.set_progress_handler(lambda: False, CHECK_EVERY)",
+  "tests": [
+    "tests/test_dash.py::test_a_runaway_read_is_abandoned"
+  ]
+}

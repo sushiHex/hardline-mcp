@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "if verdict in ACTIVE_STATES and seen(row[\"owner_pid\"], row[\"owner_key\"]) == DEAD:",
+  "after": "if False:",
+  "tests": [
+    "tests/test_dash.py::test_a_job_whose_owner_died_reads_lost"
+  ]
+}

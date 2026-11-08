@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "return text if text is None or len(text) <= CLIP else text[: CLIP - 1] + \"…\"",
+  "after": "return text",
+  "tests": [
+    "tests/test_dash.py::test_a_long_name_is_clipped"
+  ]
+}

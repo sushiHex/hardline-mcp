@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "        if verdict == DEAD:\n            continue\n",
+  "after": "        if False:\n            continue\n",
+  "tests": [
+    "tests/test_dash.py::test_a_job_whose_owner_died_reads_lost"
+  ]
+}

@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hardline</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #fcfcfb; --card: #f4f3f0; --line: #e1dfda;
+  --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #76746f;
+  --claude: #2a78d6; --codex: #eb6834; --hermes: #1baf7a; --other: #76746f;
+  --bar: #8a8882; --warn: #a15c00; --bad: #c0302f;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface: #1a1a19; --card: #232321; --line: #353533;
+    --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #98968d;
+    --claude: #3987e5; --codex: #d95926; --hermes: #199e70; --other: #98968d;
+    --bar: #8a8882; --warn: #e0a030; --bad: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #1a1a19; --card: #232321; --line: #353533;
+  --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #98968d;
+  --claude: #3987e5; --codex: #d95926; --hermes: #199e70; --other: #98968d;
+  --bar: #8a8882; --warn: #e0a030; --bad: #e66767;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 24px; margin-bottom: 20px; }
+h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+.stats { display: flex; gap: 20px; flex-wrap: wrap; color: var(--ink-2); }
+.stats b { color: var(--ink); font-size: 16px; font-variant-numeric: tabular-nums; }
+#status { margin-left: auto; color: var(--ink-3); font-size: 12px; }
+#status.stale { color: var(--bad); }
+h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--ink-3); margin: 28px 0 10px; }
+.lanes { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.lane { background: var(--card); border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; align-items: center; min-width: 0; }
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--other); }
+.dot.claude { background: var(--claude); } .dot.codex { background: var(--codex); } .dot.hermes { background: var(--hermes); }
+.dot.unknown { background: none; box-shadow: inset 0 0 0 2px var(--ink-3); }
+.lane .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.lane .sub { color: var(--ink-3); font-size: 12px; }
+.badge { font-variant-numeric: tabular-nums; font-weight: 600; padding: 1px 8px; border-radius: 10px; background: var(--line); }
+.badge.warn { color: var(--warn); box-shadow: inset 0 0 0 1.5px var(--warn); background: none; }
+.lane.unheld { box-shadow: inset 0 0 0 1.5px var(--warn); }
+svg { display: block; width: 100%; height: auto; }
+svg text { fill: var(--ink-3); font-size: 11px; }
+.row { display: grid; grid-template-columns: 200px 1fr 110px; gap: 10px; align-items: center; padding: 3px 0; }
+.row .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track { position: relative; height: 10px; background: var(--card); border-radius: 5px; }
+.fill { position: absolute; top: 0; bottom: 0; border-radius: 5px; background: var(--other); min-width: 4px; }
+.fill.claude { background: var(--claude); } .fill.codex { background: var(--codex); } .fill.hermes { background: var(--hermes); }
+.fill.live { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .fill.live { animation: none; } }
+.state { color: var(--ink-2); font-size: 12px; text-align: right; white-space: nowrap; }
+.state.failed, .state.lost { color: var(--bad); }
+table { width: 100%; border-collapse: collapse; }
+td { padding: 4px 8px 4px 0; border-top: 1px solid var(--line); color: var(--ink-2); white-space: nowrap; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.to { width: 100%; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
+.unread { color: var(--warn); font-weight: 600; }
+.empty { color: var(--ink-3); padding: 6px 0; }
+@media (max-width: 640px) { .row { grid-template-columns: 1fr 90px; } .track { grid-column: 1 / -1; order: 3; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>hardline</h1>
+    <div class="stats" id="stats"></div>
+    <div id="status">connecting</div>
+  </header>
+  <h2>Lanes</h2><div class="lanes" id="lanes"></div>
+  <h2>Mail per minute, last hour</h2><div id="traffic"></div>
+  <h2>Jobs, last hour</h2><div id="jobs"></div>
+  <h2>Latest messages</h2><div id="recent"></div>
+</main>
+<script>
+"use strict";
+const SVG = "http://www.w3.org/2000/svg";
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+};
+const agentOf = (s) => String(s).split(":")[0];
+const known = (a) => (["claude", "codex", "hermes"].includes(a) ? a : "");
+const dur = (s) => (s < 90 ? s + "s" : s < 5400 ? Math.round(s / 60) + "m" : Math.round(s / 3600) + "h");
+const GLYPH = { queued: "queued", running: "running", completed: "done", failed: "failed", cancelled: "cancelled", lost: "lost" };
+let lastOk = 0;
+
+function stats(d) {
+  const live = d.lanes.filter((l) => l.liveness === "alive" || l.liveness === "unknown").length;
+  const unread = d.lanes.reduce((n, l) => n + l.unread, 0);
+  const running = d.jobs.filter((j) => j.state === "running" || j.state === "queued").length;
+  const hour = d.traffic.reduce((a, b) => a + b, 0);
+  const box = $("stats");
+  box.replaceChildren();
+  for (const [n, label] of [[live, "lanes held"], [unread, "unread"], [running, "jobs active"], [hour, "messages / h"]]) {
+    const s = el("span");
+    s.append(el("b", "", n), " " + label);
+    box.append(s);
+  }
+}
+
+function lanes(d) {
+  const box = $("lanes");
+  box.replaceChildren();
+  if (!d.lanes.length) return box.append(el("div", "empty", "No lanes held."));
+  for (const l of d.lanes) {
+    const card = el("div", "lane" + (l.liveness === "unheld" ? " unheld" : ""));
+    card.append(el("span", "dot " + known(agentOf(l.agent)) + (l.liveness === "alive" ? "" : " unknown")));
+    const name = el("div", "name", l.lane);
+    if (l.liveness !== "alive") name.append(el("div", "sub", { unheld: "no holder", shared: "shared mailbox" }[l.liveness] || "liveness unknown"));
+    card.append(name);
+    if (l.unread) {
+      const old = l.oldest_s > 600;
+      card.append(el("span", "badge" + (old ? " warn" : ""), (old ? "! " : "") + l.unread));
+      card.title = l.unread + " unread, oldest " + dur(l.oldest_s);
+    }
+    box.append(card);
+  }
+}
+
+function traffic(d) {
+  const box = $("traffic");
+  box.replaceChildren();
+  const n = d.traffic.length, W = 1000, H = 120, pad = 22, bw = W / n;
+  const max = Math.max(1, ...d.traffic);
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H + pad}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `Messages per minute over the last hour, peak ${max}`);
+  d.traffic.forEach((v, i) => {
+    const r = document.createElementNS(SVG, "rect");
+    const h = v ? Math.max((v / max) * H, 2) : 0;
+    r.setAttribute("x", i * bw + 1); r.setAttribute("width", Math.max(bw - 2, 1));
+    r.setAttribute("y", H - h); r.setAttribute("height", h); r.setAttribute("rx", 2);
+    r.setAttribute("fill", "var(--bar)");
+    const t = document.createElementNS(SVG, "title");
+    t.textContent = `${v} message${v === 1 ? "" : "s"}, ${n - 1 - i} min ago`;
+    r.append(t);
+    svg.append(r);
+  });
+  const base = document.createElementNS(SVG, "line");
+  for (const [k, v] of [["x1", 0], ["x2", W], ["y1", H], ["y2", H]]) base.setAttribute(k, v);
+  base.setAttribute("stroke", "var(--line)");
+  svg.append(base);
+  for (const [x, anchor, text] of [[0, "start", "60 min ago"], [W / 2, "middle", "30"], [W, "end", "now"]]) {
+    const t = document.createElementNS(SVG, "text");
+    t.setAttribute("x", x); t.setAttribute("y", H + 15); t.setAttribute("text-anchor", anchor);
+    t.textContent = text;
+    svg.append(t);
+  }
+  const peak = document.createElementNS(SVG, "text");
+  peak.setAttribute("x", 0); peak.setAttribute("y", 10); peak.textContent = "peak " + max;
+  svg.append(peak);
+  box.append(svg);
+}
+
+function jobs(d) {
+  const box = $("jobs");
+  box.replaceChildren();
+  if (!d.jobs.length) return box.append(el("div", "empty", "No jobs in the last hour."));
+  for (const j of d.jobs) {
+    const row = el("div", "row");
+    const what = el("div", "what", `${j.agent} · ${j.label || j.id}`);
+    what.title = `${j.id} for ${j.requester}`;
+    const track = el("div", "track");
+    const live = j.end_s === null && j.state !== "lost";
+    const from = Math.min(j.start_s ?? 0, d.window_s), to = live ? 0 : Math.min(j.end_s ?? j.start_s ?? 0, d.window_s);
+    const fill = el("div", "fill " + known(agentOf(j.agent)) + (live && j.state === "running" ? " live" : ""));
+    fill.style.left = (100 * (1 - from / d.window_s)) + "%";
+    fill.style.width = (100 * Math.max(from - to, 0) / d.window_s) + "%";
+    track.append(fill);
+    row.append(what, track, el("div", "state " + j.state, `${GLYPH[j.state] || j.state} · ${dur((j.start_s ?? 0) - (j.end_s ?? 0))}`));
+    box.append(row);
+  }
+}
+
+function recent(d) {
+  const box = $("recent");
+  box.replaceChildren();
+  if (!d.recent.length) return box.append(el("div", "empty", "No messages yet."));
+  const t = el("table");
+  for (const m of d.recent) {
+    const tr = el("tr");
+    tr.append(el("td", "num", dur(m.age_s ?? 0) + " ago"), el("td", "", m.from), el("td", "to", "→ " + m.to),
+      el("td", "num", (m.size ?? 0) + " B"), el("td", m.read ? "" : "unread", m.read ? "read" : "unread"));
+    t.append(tr);
+  }
+  box.append(t);
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    stats(d); lanes(d); traffic(d); jobs(d); recent(d);
+    lastOk = Date.now();
+    $("status").className = "";
+    $("status").textContent = d.unavailable.length ? "no data for: " + d.unavailable.join(", ") : d.store + " · live";
+  } catch (e) {
+    $("status").className = "stale";
+    $("status").textContent = lastOk ? "disconnected, last update " + dur(Math.round((Date.now() - lastOk) / 1000)) + " ago" : "cannot reach the dashboard";
+  }
+}
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>

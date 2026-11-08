@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "traffic[minutes - 1 - age // 60] += 1",
+  "after": "traffic[age // 60] += 1",
+  "tests": [
+    "tests/test_dash.py::test_lanes_unread_traffic_and_jobs"
+  ]
+}

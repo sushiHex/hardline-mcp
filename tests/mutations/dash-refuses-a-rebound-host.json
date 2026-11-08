@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "if self.headers.get(\"Host\") not in hosts or ",
+  "after": "if False or ",
+  "tests": [
+    "tests/test_dash.py::test_a_rebound_name_is_refused"
+  ]
+}
