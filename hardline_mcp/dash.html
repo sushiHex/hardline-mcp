@@ -532,7 +532,7 @@ function cordKey(links) {
     mini('<defs><linearGradient id="kg" x1="0" x2="1"><stop offset="0" stop-color="var(--claude)"/><stop offset=".4" stop-color="var(--claude)"/><stop offset=".65" stop-color="var(--codex)"/><stop offset="1" stop-color="var(--codex)"/></linearGradient></defs>' +
       '<path d="M8 8H36" stroke="url(#kg)" stroke-width="3" stroke-linecap="round"/><polygon points="43,8 35,3.5 35,12.5" fill="var(--codex)"/><polygon points="1,8 9,3.5 9,12.5" fill="var(--claude)"/>', "both ways"),
     mini('<path d="M2 8H34" stroke="var(--claude)" stroke-width="4" stroke-linecap="round"/><path class="flowdemo" d="M2 8H34" pathLength="100" stroke="var(--surface)" stroke-opacity=".8" stroke-width="2" stroke-linecap="round" stroke-dasharray="9 200" stroke-dashoffset="9"/>', "just now"),
-    mini('<path d="M2 8H16M25 8H34" stroke="var(--ink-3)" stroke-width="3" stroke-linecap="round"/><polygon points="43,8 34,2.5 34,13.5" fill="var(--ink-3)"/>', "unanswered"),
+    mini('<path d="M2 8H14M27 8H34" stroke="var(--ink-3)" stroke-width="3" stroke-linecap="round"/><path d="M17 3.5V12.5M24 3.5V12.5" stroke="var(--ink-3)" stroke-width="1.5" stroke-linecap="round"/><polygon points="43,8 34,2.5 34,13.5" fill="var(--ink-3)"/>', "unanswered"),
     mini(line(8, 3, "var(--codex)", 'stroke-dasharray="6 4"'), "on demand"),
   ];
 }
@@ -730,12 +730,13 @@ function board(d) {
       return { half: Math.max(6 * k, own * 0.9 + 3, w / 2 + 4), len: Math.max(11 * k, own * 1.5 + 6, w * 1.3 + 5) };
     };
     const stub = 6 * k + w * 0.3; // the bit of line left on the arrow's side of a break
+    const gap = 10 * k + w * 1.2; // the break itself, with room for a tick on each side
     const toB = across ? (xb > xa ? 1 : -1) : -into; // which way a call from a is heading as it arrives at b
     const toA = across ? -toB : -into; // and one from b, arriving at a
     // Where the line stops: inside the head normally, or short of it, leaving a break, while calls that
     // way are still unanswered.
     // An end with no head stops where a head would sit, so its dot lines up with the arrows on other rows.
-    const inset = (l, x, heading) => x - heading * (2 + (!l ? 6 * k : l.unread ? size(l).len + stub + 8 * k + w * 0.4 : size(l).len * 0.6));
+    const inset = (l, x, heading) => x - heading * (2 + (!l ? 6 * k : l.unread ? size(l).len + stub + gap : size(l).len * 0.6));
     const ea = inset(back, xa, toA), eb = inset(fwd, xb, toB);
     const d = route(ea, ya, eb, yb);
     g.append(mk("path", { d, class: "line", stroke, "stroke-width": w.toFixed(1), "stroke-dasharray": group.some((l) => isTemp(l.from)) ? "8 5" : "none" }));
@@ -747,6 +748,11 @@ function board(d) {
       if (l.unread) { // the stub: line, break, a little line, then the head
         const from = tip - heading * len * 0.6, to = base - heading * stub;
         g.append(mk("path", { d: `M${to} ${y} L${from} ${y}`, class: "line", stroke: colour, "stroke-width": w.toFixed(1) }));
+        // A small upright tick on each side of the break, just clear of the rounded line ends.
+        const reach = w / 2 + 5 * k, edge = w / 2 + 2.5;
+        for (const tx of [to - heading * edge, to - heading * (gap - edge)]) {
+          g.append(mk("path", { d: `M${tx} ${y - reach} V${y + reach}`, stroke: colour, "stroke-width": (1.8 * Math.sqrt(k)).toFixed(1), "stroke-linecap": "round" }));
+        }
       }
       g.append(mk("polygon", { points: `${tip},${y} ${base},${y - half} ${base},${y + half}`, fill: colour }));
     };
