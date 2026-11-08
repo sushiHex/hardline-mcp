@@ -130,26 +130,26 @@ cancel queued or running work. A clean exit records the jobs it never started
 as `failed`; jobs whose owner exits without recording a terminal state become
 `lost` and are not automatically resumed.
 
-A spawned reviewer cannot reach GitHub itself. Pass `github="owner/repo#123"`
-and Hardline collects the pull request with its own `gh` and hands it over; see
-[GitHub evidence for reviews](docs/configuration.md#github-evidence-for-reviews).
+What a spawned agent can and cannot do:
 
-A spawned Codex is read-only unless `write=True`, and gets no MCP servers or app
-connectors. Its sandbox (bubblewrap on Linux, Seatbelt on macOS, MXC on
-Windows) is pinned through a permission profile that also keeps its commands
-out of your secrets: Claude Code's and Codex's credentials and transcripts,
-gh's token, Hardline's mailbox, and `~/.ssh`. Its commands don't inherit
-variables named like credentials (`GH_TOKEN`, `OPENAI_API_KEY`), though on
-macOS a command can read any of your processes' starting environments. The
-denial holds for that one reviewer and leaves your own Codex sessions, full
-access included, untouched; see
-[what a Codex reviewer can read](docs/configuration.md#what-a-codex-reviewer-can-read).
-
-Writes require both `write=True` and `HARDLINE_ALLOW_WRITE=1` in the MCP server's
-environment, plus an explicit existing `workdir`; a Codex write also needs that
-`workdir` inside a git repository (a read-only review runs anywhere). Claude's default read controls
-are not a filesystem sandbox. Read [execution modes and write access](docs/configuration.md#execution-modes-and-write-access)
-before enabling unattended edits.
+- **GitHub:** it cannot reach GitHub itself. Pass `github="owner/repo#123"` and
+  Hardline collects the pull request with its own `gh`
+  ([details](docs/configuration.md#github-evidence-for-reviews)).
+- **Codex is sandboxed and read-only** unless `write=True`. It gets no MCP servers
+  or app connectors, and its commands cannot read your credentials, transcripts,
+  mailbox or `~/.ssh`. Your own Codex sessions are untouched
+  ([what a reviewer can read](docs/configuration.md#what-a-codex-reviewer-can-read)).
+- **Writes** need `write=True`, `HARDLINE_ALLOW_WRITE=1` in the server's
+  environment, and an existing `workdir` (inside a git repository for Codex).
+  Claude's read controls are not a filesystem sandbox; read
+  [execution modes](docs/configuration.md#execution-modes-and-write-access)
+  before enabling unattended edits.
+- **Clean context:** `context="clean"` runs a Codex builder without your Codex
+  home, so the result does not depend on your setup
+  ([details](docs/configuration.md#clean-context-codex)).
+- **Windows:** a prompt over the command-line limit, or carrying characters
+  `cmd.exe` acts on for a `.cmd` shim, is refused with a clear error
+  ([limits](docs/configuration.md#limits)).
 
 ## Inbox signals
 
@@ -195,16 +195,39 @@ The client's MCP tool schema supplies arguments and defaults.
 | `job_cancel` | Cancel a job. |
 | `list_jobs` | Find recent or active jobs. |
 
+## Command line
+
+`hardline-mcp` with no argument serves MCP over stdio. The other subcommands
+need no MCP client:
+
+| Command | Purpose |
+| --- | --- |
+| `hardline-mcp watch` | Level-triggered observer of unread mail, for a Claude Monitor. `server_info()` gives the exact arguments. |
+| `hardline-mcp watch-codex` | Forward the same observations to a bound Codex app-server thread (needs `.[codex-watch]`). |
+| `hardline-mcp report [--db PATH]` | Read-only audit of a store: which revisions the registered servers run, unread mail by lane, and who acknowledged each job notice. |
+
+## Skills
+
+`skills/playbook` is an agent skill for running several independent agents on
+one task through Hardline: **swim-lanes** (the same task in parallel, blind),
+**roundtable** (blind reviews, then each answers the others) and **ping-pong**
+(alternating turns until a round changes nothing). Link it into the skills
+folder of the client that should use it, for example `~/.claude/skills/playbook`
+or `~/.codex/skills/playbook`. Lanes default to Codex (`ask_codex_async`) and
+Claude (`ask_claude_async`).
+
 ## Guides
 
 | Guide | Read it for |
 | --- | --- |
 | [Messaging and jobs](docs/messaging.md) | Addressing, ownership, recovery, and job lifecycle. |
-| [Configuration](docs/configuration.md) | CLI paths, limits, model options, writes, GitHub evidence, and quota routing. |
+| [Configuration](docs/configuration.md) | CLI paths, limits, model options, writes, clean context, GitHub evidence, and quota routing. |
 | [Inbox signals](docs/inbox-signals.md) | How each session is woken, fallbacks, checks, and troubleshooting. |
 | [Session continuity](docs/session-continuity.md) | Names across background moves, relaunches, and reconnects. |
 | [Development](docs/development.md) | Tests, mutation checks, and optional live acceptance. |
 | [Architecture](docs/architecture.md) | Design decisions, compatibility, and historical rationale. |
+| Wake designs: [Claude inbox](docs/claude-inbox-wake.md), [Codex queue](docs/codex-queue-wake.md), [channel push](docs/push-delivery.md) | Why each wake works as it does, and what was verified live. |
+| [GitHub context](docs/github-context.md) | The design behind `github=` evidence for reviews. |
 
 ## Contributing
 
