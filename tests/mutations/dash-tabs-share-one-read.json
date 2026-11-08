@@ -1,6 +1,6 @@
 {
   "file": "hardline_mcp/dash.py",
-  "before": "if time.monotonic() - self._at >= REFRESH:",
+  "before": "if time.monotonic() - at >= REFRESH:",
   "after": "if True:",
   "tests": [
     "tests/test_dash.py::test_tabs_share_one_read"

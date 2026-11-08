@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "bars = 60 if window_s >= 3600 else window_s // 60",
+  "after": "bars = 60",
+  "tests": [
+    "tests/test_dash.py::test_the_span_follows_the_request"
+  ]
+}

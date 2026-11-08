@@ -62,6 +62,10 @@ h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .02em; }
 #status.stale { color: var(--bad); } #status.stale .pulse { background: var(--bad); animation: none; }
 .ic { width: 1.15em; height: 1.15em; flex: none; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -0.2em; }
 .ic .solid { fill: currentColor; stroke: none; }
+.seg { display: inline-flex; background: var(--card); border-radius: 8px; padding: 2px; gap: 2px; flex: none; }
+.seg button { font: inherit; font-size: 12px; border: 0; background: none; color: var(--ink-3); padding: 3px 11px; border-radius: 6px; cursor: pointer; }
+.seg button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+.seg button:focus-visible { outline: 2px solid var(--ink-3); outline-offset: 1px; }
 #summary { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 0; font-size: 15px; flex: 1; }
 .chip { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-2); cursor: default; }
 .chip b { color: var(--ink); font-size: 17px; font-variant-numeric: tabular-nums; }
@@ -191,6 +195,7 @@ body.offline .layout { opacity: .45; filter: grayscale(.6); transition: opacity 
   <header class="top">
     <h1>hardline</h1>
     <div id="summary"></div>
+    <div id="span" class="seg" role="group" aria-label="Time span"></div>
     <div id="status"><span class="pulse"></span><span id="statustext">connecting</span></div>
   </header>
 
@@ -404,12 +409,12 @@ function summary(d) {
   const plays = new Set(d.jobs.filter((j) => j.play && activeJob(j)).map((j) => j.play.name + "|" + j.requester)).size;
   const box = $("summary");
   box.replaceChildren(
-    chip("lamp", live.length, "active", "Lines that placed or took a call in the last hour, or have a call waiting"),
+    chip("lamp", live.length, "active", `Lines that placed or took a call in ${last()}, or have a call waiting`),
     chip("bell", waiting, "waiting", "Calls waiting for an active line to pick up"),
     chip("search", running, "reviewing", "Reviewers (Codex or Claude, started on demand) running now"),
   );
   if (plays) box.append(chip("roundtable", plays, plays === 1 ? "play" : "plays", "Playbook plays with a reviewer still running"));
-  if (idle) box.append(chip("moon", idle, "idle", "Open lines with no call in the last hour", "muted"));
+  if (idle) box.append(chip("moon", idle, "idle", `Open lines with no call in ${last()}`, "muted"));
   if (stranded) box.append(chip("bellOff", stranded, "unanswered", `${plural(stranded, "call")} ringing on ${plural(dead.length, "line")} nobody holds`, "warn"));
 }
 
@@ -457,7 +462,7 @@ function live(d) {
   const box = $("live");
   box.replaceChildren();
   const lanes = d.lanes.filter((l) => isLive(l) && l.active && !l.temp);
-  if (!lanes.length) return box.append(el("div", "empty", "No line active in the last hour."));
+  if (!lanes.length) return box.append(el("div", "empty", `No line active in ${last()}.`));
   for (const a of [...new Set(lanes.map((l) => agentOf(l.agent)))].sort()) {
     const head = el("div", "group");
     head.append(mark(a, { hot: false }), a);
@@ -492,7 +497,7 @@ function fold(sectionId, boxId, ic, count, tip, lanes, cls) {
 
 function idle(d) {
   const quiet = d.lanes.filter((l) => isLive(l) && !l.active && !l.temp);
-  fold("idle-section", "idle", "moon", quiet.length, "Open lines with no call in the last hour", quiet);
+  fold("idle-section", "idle", "moon", quiet.length, `Open lines with no call in ${last()}`, quiet);
 }
 
 function stranded(d) {
@@ -603,7 +608,7 @@ function board(d) {
   if (key === boardKey) return; // unchanged: leave it, so a hover is not wiped every 2s
   boardKey = key;
   box.replaceChildren();
-  if (!links.length) return box.append(el("div", "empty", "No calls in the last hour."));
+  if (!links.length) return box.append(el("div", "empty", `No calls in ${last()}.`));
   const rows = layout(links);
   const rowOf = new Map(), sideOf = new Map();
   rows.forEach(([l, r], i) => {
@@ -624,7 +629,7 @@ function board(d) {
   svg.setAttribute("preserveAspectRatio", "xMidYMin meet");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `${links.length} directed conversations in the last hour`);
+  svg.setAttribute("aria-label", `${links.length} directed conversations in ${last()}`);
   const mk = (tag, attrs, text) => {
     const n = document.createElementNS(SVG, tag);
     for (const [a, v] of Object.entries(attrs)) n.setAttribute(a, v);
@@ -788,7 +793,8 @@ function traffic(d) {
   });
   const avg = el("span", "key"); avg.append(el("span", "avgkey"), "5-min average");
   const miss = el("span", "key"); miss.append(el("span", "tick"), "unanswered");
-  heading("h-volume", "bars", "Call volume", el("span", "", total ? `${total} this hour, busiest minute ${max}` : "none this hour"),
+  const slot = d.bucket_s === 60 ? "minute" : spanText(d.bucket_s);
+  heading("h-volume", "bars", "Call volume", el("span", "", total ? `${total} in ${last()}, busiest ${slot} ${max}` : `none in ${last()}`),
     ...legend, ...(total ? [avg] : []), ...(lost ? [miss] : []));
   const key = JSON.stringify([d.traffic, by, pend]) + H;
   if (key === trafficKey && box.firstChild) return; // unchanged: keep the chart, and a hover on it
@@ -796,13 +802,13 @@ function traffic(d) {
   box.replaceChildren();
   if (!total) return;
   const readout = el("div", "readout");
-  const idle = () => readout.replaceChildren(el("span", "hint", "hover a minute for detail"));
+  const idle = () => readout.replaceChildren(el("span", "hint", "hover a bar for detail"));
   idle();
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("class", "chart");
   svg.setAttribute("viewBox", `0 0 ${W} ${H + pad}`);
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `Calls per minute over the last hour, busiest minute ${max}`);
+  svg.setAttribute("aria-label", `Calls per ${slot} over ${last()}, busiest ${slot} ${max}`);
   const mk = (tag, attrs, text) => {
     const e = document.createElementNS(SVG, tag);
     for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
@@ -841,7 +847,7 @@ function traffic(d) {
     const hit = mk("rect", { x: xo(i), y: 0, width: bw, height: H + pad, fill: "transparent" });
     hit.addEventListener("mouseenter", () => {
       bands[i].setAttribute("opacity", 0.8);
-      const when = n - 1 - i === 0 ? "this minute" : `${n - 1 - i} min ago`;
+      const ago = (n - 1 - i) * d.bucket_s, when = ago === 0 ? "just now" : `${spanText(ago)} ago`;
       readout.replaceChildren(el("b", "", when), ` · ${plural(v, "call")}`);
       for (const a of STACK.filter((s) => by[s] && by[s][i])) {
         const s = el("span", "key"), sw = el("span", "dot");
@@ -854,7 +860,7 @@ function traffic(d) {
     hit.addEventListener("mouseleave", () => { bands[i].setAttribute("opacity", 0); idle(); });
     svg.append(hit);
   });
-  for (const [x, anchor, text] of [[gutter, "start", "1 hour ago"], [gutter + (W - gutter) / 2, "middle", "30 min"], [W, "end", "now"]]) {
+  for (const [x, anchor, text] of [[gutter, "start", spanText(d.window_s) + " ago"], [gutter + (W - gutter) / 2, "middle", spanText(d.window_s / 2) + " ago"], [W, "end", "now"]]) {
     svg.append(mk("text", { x, y: H + pad - 4, "text-anchor": anchor }, text));
   }
   box.append(readout, svg);
@@ -958,12 +964,40 @@ function recent(d) {
   }
 }
 
+// The span everything time-bound covers: chosen in the header, remembered by this browser only.
+const SPANS = ["15m", "1h", "6h"], SPAN_TEXT = { "15m": "15 minutes", "1h": "hour", "6h": "6 hours" };
+let span = "1h";
+try { const saved = localStorage.getItem("hardline.span"); if (SPANS.includes(saved)) span = saved; } catch (e) { /* private window: the default will do */ }
+const last = () => "the last " + SPAN_TEXT[span];
+const spanText = (s) => (s >= 3600 ? +(s / 3600).toFixed(1) + "h" : Math.round(s / 60) + "m");
+function spanControl() {
+  const box = document.getElementById("span");
+  box.replaceChildren();
+  for (const s of SPANS) {
+    const b = el("button", s === span ? "on" : "", s);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(s === span));
+    b.addEventListener("click", () => {
+      if (s === span) return;
+      span = s;
+      try { localStorage.setItem("hardline.span", s); } catch (e) { /* not remembered, still applied */ }
+      boardKey = ""; trafficKey = "";
+      spanControl();
+      tick();
+    });
+    box.append(b);
+  }
+}
+spanControl();
+
 async function tick() {
   const st = $("status"), text = $("statustext");
   try {
-    const r = await fetch("/api/state", { cache: "no-store" });
+    const asked = span;
+    const r = await fetch("/api/state?window=" + asked, { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
+    if (asked !== span) return; // the span changed while this was in flight; a fresher answer is coming
     lastData = d;
     stage = Object.fromEntries(STAGED.map((id) => [id, document.createElement("div")]));
     indexNames(d);

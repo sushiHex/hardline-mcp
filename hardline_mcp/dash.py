@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import parse_qs, urlsplit
 
 from .jobs import ACTIVE_STATES
 from .mailbox import _resolve_db
@@ -42,7 +43,18 @@ BUDGET = 3.0  # seconds a read may run before it is abandoned
 CHECK_EVERY = 10_000  # SQLite VM steps between looks at the clock
 CLIP = 80 # characters of any stored name shown; a label is the user's text, not ours
 DEFAULT_PORT = 8765
-WINDOW = timedelta(hours=1)
+# The spans the page can show. Everything time-bound follows the one chosen: which lines count as
+# active, the board, the chart, the jobs. The chart always has at most 60 bars.
+WINDOWS = {"15m": 900, "1h": 3600, "6h": 21600}
+DEFAULT_WINDOW = WINDOWS["1h"]
+
+
+def _window(query: str) -> Optional[int]:
+    """The span a request asks for (``?window=15m``), the default if it names none, or ``None``."""
+    choice = parse_qs(query).get("window", ["1h"])
+    if len(choice) != 1:
+        return None
+    return WINDOWS.get(choice[0])
 RECENT = 15
 JOBS_SHOWN = 40
 LINKS_SHOWN = 30
@@ -148,12 +160,14 @@ def state(
     *,
     now: Optional[datetime] = None,
     probe: Callable = instance_state,
+    window_s: int = DEFAULT_WINDOW,
 ) -> dict:
     """What the page draws. Ages are seconds before ``now``, so the browser's clock never matters."""
     db = _resolve_db(db_path).resolve()
     db.stat()  # a missing store is an error, never an empty page
     now = now or datetime.now(timezone.utc)
-    read = _snapshot(db, (now - WINDOW).isoformat(timespec="seconds").replace("+00:00", "Z"))
+    since = now - timedelta(seconds=window_s)
+    read = _snapshot(db, since.isoformat(timespec="seconds").replace("+00:00", "Z"))
     cache: dict = {}
 
     def seen(pid, key):  # once per identity per refresh
@@ -212,19 +226,20 @@ def state(
             }
         )
 
-    minutes = int(WINDOW.total_seconds() // 60)
-    traffic = [0] * minutes
-    by_agent: dict = {}  # the same minutes, split by the agent that placed the call
-    pending = [0] * minutes  # and how many of each minute's calls nobody has answered
+    bars = 60 if window_s >= 3600 else window_s // 60  # a minute a bar up to an hour, then wider bars
+    bucket = window_s // bars
+    traffic = [0] * bars
+    by_agent: dict = {}  # the same bars, split by the agent that placed the call
+    pending = [0] * bars  # and how many of each bar's calls nobody has answered
     for row in read["traffic"] or []:
         age = _ago(row["created_at"], now)
-        if age is not None and age < minutes * 60:
-            slot = minutes - 1 - age // 60
+        if age is not None and age < bars * bucket:
+            slot = bars - 1 - age // bucket
             traffic[slot] += 1
             pending[slot] += 1 if row["pending"] else 0
             agent = row["sender"].split(":")[0]
             agent = agent if agent in ("claude", "codex", "hermes") else "other"
-            by_agent.setdefault(agent, [0] * minutes)[slot] += 1
+            by_agent.setdefault(agent, [0] * bars)[slot] += 1
 
     jobs = []
     for row in read["jobs"] or []:
@@ -259,7 +274,8 @@ def state(
     return {
         "now": now.isoformat(timespec="seconds"),
         "store": db.name,
-        "window_s": int(WINDOW.total_seconds()),
+        "window_s": window_s,
+        "bucket_s": bucket,
         "lanes": lanes,
         "traffic": traffic,
         "traffic_by": by_agent,
@@ -286,14 +302,15 @@ class _Shared:
     adds no reads, and a slow read is never run twice at once."""
 
     def __init__(self, db_path: Optional[Path]):
-        self._db, self._lock, self._at, self._body = db_path, threading.Lock(), -REFRESH, b""
+        self._db, self._lock, self._made = db_path, threading.Lock(), {}  # window -> (when, body)
 
-    def body(self) -> bytes:
+    def body(self, window_s: int = DEFAULT_WINDOW) -> bytes:
         with self._lock:
-            if time.monotonic() - self._at >= REFRESH:
-                self._body = json.dumps(state(self._db)).encode("utf-8")
-                self._at = time.monotonic()
-            return self._body
+            at, made = self._made.get(window_s, (-REFRESH, b""))
+            if time.monotonic() - at >= REFRESH:
+                made = json.dumps(state(self._db, window_s=window_s)).encode("utf-8")
+                self._made[window_s] = (time.monotonic(), made)
+            return made
 
 
 def _handler(db_path: Optional[Path], port: int) -> type:
@@ -330,12 +347,16 @@ def _handler(db_path: Optional[Path], port: int) -> type:
         def do_GET(self) -> None:
             if self.headers.get("Host") not in hosts or self.headers.get("Origin", None) not in (None, *origins):
                 return self._send(403, b"forbidden", "text/plain")
-            path = self.path.split("?", 1)[0]
+            target = urlsplit(self.path)
+            path = target.path
             if path == "/":
                 return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
             if path == "/api/state":
+                window_s = _window(target.query)
+                if window_s is None:
+                    return self._send(400, b"window must be one of 15m, 1h, 6h", "text/plain")
                 try:
-                    body = shared.body()
+                    body = shared.body(window_s)
                 except (OSError, sqlite3.Error):
                     return self._send(503, b"store unavailable", "text/plain")
                 return self._send(200, body, "application/json")

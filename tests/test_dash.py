@@ -222,9 +222,29 @@ def test_a_runaway_read_is_abandoned(tmp_path, monkeypatch):
 def test_tabs_share_one_read(tmp_path, monkeypatch):
     calls = []
     real = dash.state
-    monkeypatch.setattr(dash, "state", lambda db: calls.append(1) or real(db))
+    monkeypatch.setattr(dash, "state", lambda db, **kw: calls.append(kw) or real(db, **kw))
     shared = dash._Shared(_store(tmp_path))
     assert shared.body() == shared.body() and len(calls) == 1
+    shared.body(900)  # another span is its own read, cached apart
+    assert shared.body(900) and [c["window_s"] for c in calls] == [3600, 900]
+
+
+def test_the_span_follows_the_request(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    db = _store(tmp_path)
+    two_hours_ago = lambda: datetime.now(timezone.utc) - timedelta(hours=2)
+    mailbox.send("claude:old", "codex:review", "x", db_path=db, now_fn=two_hours_ago)
+    quarter, hour, six = (dash.state(db, window_s=s) for s in (900, 3600, 21600))
+    assert [(len(s["traffic"]), s["bucket_s"]) for s in (quarter, hour, six)] == [(15, 60), (60, 60), (60, 360)]
+    # A call two hours old is on the six-hour board and nowhere in the last hour.
+    assert ("claude:old" in {l["from"] for l in six["links"]}, "claude:old" in {l["from"] for l in hour["links"]}) == (True, False)
+    assert sum(six["traffic"]) == sum(hour["traffic"]) + 1
+
+
+def test_a_request_names_one_known_span():
+    assert [dash._window(q) for q in ("", "window=15m", "window=6h", "window=2h", "window=1h&window=6h")] == [
+        3600, 900, 21600, None, None]
 
 
 @pytest.fixture

@@ -1,0 +1,8 @@
+{
+  "file": "hardline_mcp/dash.py",
+  "before": "since = now - timedelta(seconds=window_s)",
+  "after": "since = now - timedelta(seconds=DEFAULT_WINDOW)",
+  "tests": [
+    "tests/test_dash.py::test_the_span_follows_the_request"
+  ]
+}
