@@ -103,7 +103,7 @@ def _snapshot(db: Path, since: str) -> dict:
                 "SELECT recipient, COUNT(*) AS n, MIN(created_at) AS oldest"
                 " FROM messages WHERE acked_at IS NULL GROUP BY recipient",
             ),
-            "traffic": _rows(conn, "SELECT created_at FROM messages WHERE created_at >= ?", (since,)),
+            "traffic": _rows(conn, "SELECT created_at, sender FROM messages WHERE created_at >= ?", (since,)),
             # Every name that sent or received anything this hour: the activity test for a line.
             "talkers": _rows(
                 conn,
@@ -202,10 +202,15 @@ def state(
 
     minutes = int(WINDOW.total_seconds() // 60)
     traffic = [0] * minutes
+    by_agent: dict = {}  # the same minutes, split by the agent that placed the call
     for row in read["traffic"] or []:
         age = _ago(row["created_at"], now)
         if age is not None and age < minutes * 60:
-            traffic[minutes - 1 - age // 60] += 1
+            slot = minutes - 1 - age // 60
+            traffic[slot] += 1
+            agent = row["sender"].split(":")[0]
+            agent = agent if agent in ("claude", "codex", "hermes") else "other"
+            by_agent.setdefault(agent, [0] * minutes)[slot] += 1
 
     jobs = []
     for row in read["jobs"] or []:
@@ -243,6 +248,7 @@ def state(
         "window_s": int(WINDOW.total_seconds()),
         "lanes": lanes,
         "traffic": traffic,
+        "traffic_by": by_agent,
         "temporary": sorted(_clip(l["lane"]) for l in lanes if l["temp"]),
         "links": [
             {

@@ -1,7 +1,7 @@
 {
   "file": "hardline_mcp/dash.py",
-  "before": "traffic[minutes - 1 - age // 60] += 1",
-  "after": "traffic[age // 60] += 1",
+  "before": "slot = minutes - 1 - age // 60",
+  "after": "slot = age // 60",
   "tests": [
     "tests/test_dash.py::test_lanes_unread_traffic_and_jobs"
   ]

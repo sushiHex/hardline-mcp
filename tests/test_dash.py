@@ -159,6 +159,18 @@ def test_playbook_jobs_are_recognised_by_their_label(tmp_path):
     }
 
 
+def test_traffic_is_split_by_the_agent_that_placed_the_call(tmp_path):
+    db = tmp_path / "mb.db"
+    mailbox.send("claude", "codex:a", "x", db_path=db)
+    mailbox.send("codex:x", "claude", "x", db_path=db)
+    mailbox.send("codex:y", "claude", "x", db_path=db)
+    mailbox.send("somebody", "claude", "x", db_path=db)
+    got = dash.state(db)
+    by = got["traffic_by"]
+    assert {agent: col[-1] for agent, col in by.items()} == {"claude": 1, "codex": 2, "other": 1}
+    assert [sum(col) for col in zip(*by.values())] == got["traffic"]
+
+
 def test_the_store_is_opened_read_only(tmp_path, monkeypatch):
     opened = []
     real = sqlite3.connect
