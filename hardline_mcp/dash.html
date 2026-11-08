@@ -46,7 +46,7 @@ header.top { display: flex; align-items: center; gap: 26px; flex: none; }
 .scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .panel.vol { flex: 1 1 0; min-height: 150px; }
 #traffic { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-#traffic svg.chart { flex: 1; min-height: 0; height: 100%; }
+#traffic svg.chart { flex: none; height: auto; }
 #board { flex: 0 1 auto; min-height: 0; }
 #board svg.chart { height: auto; }
 .fold { margin-top: 8px; }
@@ -513,8 +513,8 @@ function cordKey(links) {
   });
   return [
     ...who,
-    mini('<path d="M8 4.5H34" stroke="var(--ink-3)" stroke-width="2.5" stroke-linecap="round"/><polygon points="42,4.5 34,0.5 34,8.5" fill="var(--ink-3)"/>' +
-      '<path d="M10 11.5H36" stroke="var(--ink-3)" stroke-width="2.5" stroke-linecap="round"/><polygon points="2,11.5 10,7.5 10,15.5" fill="var(--ink-3)"/>', "each way"),
+    mini('<defs><linearGradient id="kg" x1="0" x2="1"><stop offset="0" stop-color="var(--claude)"/><stop offset=".4" stop-color="var(--claude)"/><stop offset=".65" stop-color="var(--codex)"/><stop offset="1" stop-color="var(--codex)"/></linearGradient></defs>' +
+      '<path d="M8 8H36" stroke="url(#kg)" stroke-width="3" stroke-linecap="round"/><polygon points="43,8 35,3.5 35,12.5" fill="var(--codex)"/><polygon points="1,8 9,3.5 9,12.5" fill="var(--claude)"/>', "both ways"),
     mini('<path d="M2 8H34" stroke="var(--claude)" stroke-width="4" stroke-linecap="round"/><path class="flowdemo" d="M2 8H34" pathLength="100" stroke="var(--surface)" stroke-opacity=".8" stroke-width="2" stroke-linecap="round" stroke-dasharray="9 200" stroke-dashoffset="9"/>', "just now"),
     mini(line(8, 3, "var(--ink-3)") + '<polygon points="42,8 33,2 33,14" fill="var(--warn)"/>', "unanswered"),
     mini(line(8, 3, "var(--codex)", 'stroke-dasharray="6 4"'), "on demand"),
@@ -593,7 +593,7 @@ function board(d) {
   // Rows grow to use the height the panel has, within reason.
   const TOP = 12, W = 1000, XL = 390, XR = 610;
   const availU = ((col.clientHeight || 700) - 230) / ((box.clientWidth || W) / W); // the rest is the chart's minimum and the headings
-  const ROW = Math.max(32, Math.min(76, Math.floor((availU - TOP - 6) / rows.length)));
+  const ROW = Math.max(32, Math.min(96, Math.floor((availU - TOP - 6) / rows.length)));
   const k = Math.min(1.5, ROW / 40); // marks grow with the rows...
   const kf = Math.min(k, 1.1); // ...type only a little, so names keep clear of the bars
   const H = TOP + rows.length * ROW + 6;
@@ -650,39 +650,59 @@ function board(d) {
     if (!pairs.has(pk)) pairs.set(pk, []);
     pairs.get(pk).push(l);
   }
-  const max = Math.max(...links.map((l) => l.n));
+  // One line per pair of sessions, whichever way the calls went, and the line says what is happening:
+  //  - an arrowhead at each end that received calls, sized by how many came that way, so a two-way
+  //    conversation has two heads and a one-way call has one;
+  //  - thickness is the total number of calls;
+  //  - colour runs from one agent's to the other's and turns where the balance of who placed them lies,
+  //    so a line that is mostly one colour is mostly that agent talking;
+  //  - an amber head means calls to that end are still unanswered;
+  //  - a highlight travels the way of the latest call, if it was in the last five minutes;
+  //  - it fades as the last call gets old, and is dashed when an on-demand reviewer is in it.
+  const defs = mk("defs", {});
+  svg.append(defs);
+  const maxPair = Math.max(...[...pairs.values()].map((grp) => grp.reduce((s, l) => s + l.n, 0)));
+  const thick = (n) => (1.5 + 5 * Math.sqrt(n / maxPair)) * Math.sqrt(k);
+  let gradients = 0;
   for (const group of pairs.values()) {
-    const wOf = (l) => (1.5 + 5 * Math.sqrt(l.n / max)) * Math.sqrt(k);
-    const off = group.length === 2 ? (wOf(group[0]) + wOf(group[1])) / 4 + 3.2 * Math.sqrt(k) : 0;
-    const g = mk("g", { class: "cable" });
-    const youngest = Math.min(...group.map((l) => l.last_s ?? 3600));
-    g.style.setProperty("--o", youngest <= 300 ? 0.95 : youngest <= 1800 ? 0.6 : 0.35);
-    g.append(mk("title", {}, group.map((l) => `${l.from} to ${l.to}: ${plural(l.n, "call")}` + (l.unread ? `, ${l.unread} not answered` : "")).join("\n")));
-    // The two directions are kept apart: the one running left to right rides above, the other below.
-    const lane = (l) => (xOf(l.from) <= xOf(l.to) && sideOf.get(l.from) <= sideOf.get(l.to) ? -1 : 1);
-    group.forEach((l, i) => {
-      const colour = AGENT_VAR[agentOf(l.from)] || "var(--other)", w = wOf(l);
-      const fresh = (l.last_s ?? 3600) <= 300;
-      const dy = group.length === 2 ? (lane(l) < 0 ? -off : off) : 0;
-      const xs = xOf(l.from), xt = xOf(l.to), ys = yOf(l.from) + dy, yt = yOf(l.to) + dy;
-      let path, dirn;
-      if (sideOf.get(l.from) !== sideOf.get(l.to)) {
-        const s = xt > xs ? 1 : -1;
-        path = `M${xs} ${ys} C ${xs + s * 130} ${ys}, ${xt - s * 130} ${yt}, ${xt} ${yt}`;
-        dirn = s; // travelling right (+1) or left (-1) as it arrives
-      } else {
-        // Two sessions on the same side: an arc bulging toward the middle, arriving back at the column.
-        const into = sideOf.get(l.from) === 0 ? 1 : -1, bulge = 70 + 26 * i;
-        path = `M${xs} ${ys} C ${xs + into * bulge} ${ys}, ${xt + into * bulge} ${yt}, ${xt} ${yt}`;
-        dirn = -into;
+    let a = group[0].from, b = group[0].to; // a is the left-hand session (or the earlier name on one side)
+    if (sideOf.get(a) > sideOf.get(b) || (sideOf.get(a) === sideOf.get(b) && a > b)) [a, b] = [b, a];
+    const fwd = group.find((l) => l.from === a), back = group.find((l) => l.from === b);
+    const nF = fwd ? fwd.n : 0, nB = back ? back.n : 0, total = nF + nB, w = thick(total);
+    const colA = AGENT_VAR[agentOf(a)] || "var(--other)", colB = AGENT_VAR[agentOf(b)] || "var(--other)";
+    const xa = xOf(a), ya = yOf(a), xb = xOf(b), yb = yOf(b);
+    const across = sideOf.get(a) !== sideOf.get(b), into = sideOf.get(a) === 0 ? 1 : -1;
+    const route = (x1, y1, x2, y2) => {
+      if (across) { const s = x2 > x1 ? 1 : -1; return `M${x1} ${y1} C ${x1 + s * 130} ${y1}, ${x2 - s * 130} ${y2}, ${x2} ${y2}`; }
+      return `M${x1} ${y1} C ${x1 + into * 70} ${y1}, ${x2 + into * 70} ${y2}, ${x2} ${y2}`; // an arc through the middle
+    };
+    let stroke = fwd ? colA : colB;
+    if (across && fwd && back && colA !== colB) {
+      const id = "gr" + gradients++, share = nF / total;
+      const grad = mk("linearGradient", { id, gradientUnits: "userSpaceOnUse", x1: xa, y1: 0, x2: xb, y2: 0 });
+      for (const [o, c] of [[0, colA], [Math.max(0, share - 0.12), colA], [Math.min(1, share + 0.12), colB], [1, colB]]) {
+        grad.append(mk("stop", { offset: o, "stop-color": c }));
       }
-      g.append(mk("path", { d: path, class: "line", stroke: colour, "stroke-width": w.toFixed(1), "stroke-dasharray": isTemp(l.from) ? "8 5" : "none" }));
-      if (fresh) g.append(mk("path", { d: path, class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
-      // The head is sized from the strand it ends: a thick cable gets a head that clearly outgrows it.
-      const half = Math.max(6 * k, w * 0.9 + 3), len = Math.max(11 * k, w * 1.5 + 6);
-      const tip = xt - dirn * 9, base = tip - dirn * len;
-      g.append(mk("polygon", { points: `${tip},${yt} ${base},${yt - half} ${base},${yt + half}`, fill: l.unread ? "var(--warn)" : colour }));
-    });
+      defs.append(grad);
+      stroke = `url(#${id})`;
+    } else if (fwd && back) stroke = colA;
+    const latest = group.reduce((m, l) => ((l.last_s ?? 3600) < (m.last_s ?? 3600) ? l : m));
+    const age = latest.last_s ?? 3600;
+    const g = mk("g", { class: "cable" });
+    g.style.setProperty("--o", age <= 300 ? 0.95 : age <= 1800 ? 0.6 : 0.35);
+    g.append(mk("title", {}, group.map((l) => `${l.from} to ${l.to}: ${plural(l.n, "call")}` + (l.unread ? `, ${l.unread} not answered` : "")).join("\n") + `\nlast ${dur(age)} ago`));
+    const d = route(xa, ya, xb, yb);
+    g.append(mk("path", { d, class: "line", stroke, "stroke-width": w.toFixed(1), "stroke-dasharray": group.some((l) => isTemp(l.from)) ? "8 5" : "none" }));
+    if (age <= 300) g.append(mk("path", { d: route(xOf(latest.from), yOf(latest.from), xOf(latest.to), yOf(latest.to)), class: "flow", pathLength: 100, "stroke-width": Math.max(2, w * 0.5).toFixed(1) }));
+    // A head at the end that received the calls: sized by its own volume, and never smaller than the line it ends.
+    const head = (l, x, y, heading) => {
+      const own = thick(l.n), half = Math.max(6 * k, own * 0.9 + 3, w / 2 + 4), len = Math.max(11 * k, own * 1.5 + 6, w * 1.3 + 5);
+      const tip = x - heading * 9, base = tip - heading * len;
+      g.append(mk("polygon", { points: `${tip},${y} ${base},${y - half} ${base},${y + half}`, fill: l.unread ? "var(--warn)" : AGENT_VAR[agentOf(l.from)] || "var(--other)" }));
+    };
+    const toRight = across ? (xb > xa ? 1 : -1) : -into; // which way a call travelling a to b is heading as it arrives
+    if (fwd) head(fwd, xb, yb, toRight);
+    if (back) head(back, xa, ya, across ? -toRight : -into);
     g.addEventListener("mouseenter", () => focus((x) => group.includes(x)));
     g.addEventListener("mouseleave", refocus);
     svg.append(g);
@@ -735,7 +755,7 @@ function traffic(d) {
   // The chart takes the height its panel has (within reason), so the left column has no blank gap.
   const box = $("traffic");
   const n = d.traffic.length, W = 1000, pad = 26, gutter = 30, bw = (W - gutter) / n;
-  const H = Math.max(80, Math.min(320, Math.floor(((box.clientHeight || 160) - 26) / ((box.clientWidth || W) / W) - pad)));
+  const H = Math.max(80, Math.min(190, Math.floor(((box.clientHeight || 160) - 26) / ((box.clientWidth || W) / W) - pad)));
   const max = Math.max(1, ...d.traffic), total = d.traffic.reduce((a, b) => a + b, 0);
   const by = d.traffic_by || {}, pend = d.traffic_unanswered || [];
   const lost = pend.reduce((a, b) => a + b, 0);
